@@ -528,6 +528,17 @@
   [^Class c]
   (str "the defparsed " (.getSimpleName c) " in " (:ns (.get owners (.getName c)))))
 
+(defn- class-ns
+  "The namespace whose `defparsed` claimed the class `c`, or nil."
+  [^Class c]
+  (:ns (.get owners (.getName c))))
+
+(defn- reload-command
+  "`(require 'a 'b :reload)` for the namespaces `nss`, in order, each once: reloading them in that order re-evaluates
+  each against the ones before it."
+  [nss]
+  (str "(require " (clojure.string/join " " (map #(str "'" %) (distinct nss))) " :reload)"))
+
 (defn- stale-value!
   "Throws `::stale-type`: `what`, a value or draft of the parsed class `c`, is from before `c`'s `defparsed` was
   re-evaluated, and the code that got it expects the class defined since."
@@ -587,7 +598,8 @@
   [sum-name x & clauses]
   (let [refuse! (fn [rule message data]
                   (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (str sum-name)))))
-        s       (let [v (resolve sum-name)] (when (var? v) @v))
+        sum-var (resolve sum-name)
+        s       (when (var? sum-var) @sum-var)
         _       (when-not (sum? s)
                   (refuse! ::rule/match-not-a-sum
                            (str "match: " sum-name " is not a sum defined with defsum. match branches on the members"
@@ -614,12 +626,18 @@
         missing (remove (fn [m] (some #(identical? m %) types)) (sum-members s))
         extra   (remove (fn [t] (some #(identical? t %) (sum-members s))) types)]
     (when-let [[t] (seq (filter (fn [t] (some #(= (name-of t) (name-of %)) missing)) extra))]
-      (throw (ex-info (str "match on " sum-name ": the clause " (simple t) " names " (name-of t) ", but the sum holds"
-                           " another class of that name: one of the two is from before " (defined-in t) " was"
-                           " re-evaluated. Types compare by class, like records. Re-evaluate the defsum " sum-name
-                           " after the defparsed " (simple t) ", then this match, or reload their namespaces, as in"
-                           " (require '" (ns-name *ns*) " :reload).")
-                      {:type ::stale-type, :rule ::rule/stale-sum, :sum (str sum-name), :class (name-of t)})))
+      (let [sum-ns (ns-name (.ns ^clojure.lang.Var sum-var))
+            nss    [sum-ns (ns-name *ns*)]]
+        (throw (ex-info (str "match on " sum-name ": the clause " (simple t) " names " (name-of t) ", but the sum holds"
+                             " another class of that name: one of the two is from before " (defined-in t) " was"
+                             " re-evaluated. Types compare by class, like records. "
+                             (if (apply = (class-ns t) nss)
+                               (str "Re-evaluate the defsum " sum-name " after the defparsed " (simple t) ", then this"
+                                    " match, or reload the namespace, as in " (reload-command nss) ".")
+                               (str "Reload the namespace of the defsum " sum-name ", then this match's, in that order,"
+                                    " as in " (reload-command nss) ".")))
+                        {:type ::stale-type, :rule ::rule/stale-sum, :sum (str sum-name), :class (name-of t)
+                         :sum-ns sum-ns}))))
     (when (seq missing)
       (let [simple (mapv simple missing)]
         (refuse! ::rule/match-missing-member
@@ -647,7 +665,8 @@
                        [`((var issued-as?) ~t ~v) `(let [~b ~v] ~e)])
                      triples)
            ;; `v` is no member this match handles, so this throws
-           :else ((var match-fell-through!) ~sum-name ~(vec (map first triples)) '~(ns-name *ns*) ~v))))))
+           :else ((var match-fell-through!) ~sum-name ~(vec (map first triples)) '~(ns-name *ns*)
+                  '~(ns-name (.ns ^clojure.lang.Var sum-var)) ~v))))))
 
 ;;; ------------------------------------------------ defparsed ------------------------------------------------
 
@@ -859,7 +878,17 @@
                                                  (str "the child field " (pr-str field) " is not a field of the"
                                                       " draft, and a child field must be a field of the draft."
                                                       (did-you-mean field fields) " Name one of " fields ".")))
-                                [(keyword field) {:kind (if (= 'child head) :one :many), :type type}])))
+                                [(keyword field) {:kind    (if (= 'child head) :one :many)
+                                                  :type    type
+                                                  ;; for a stale-type message: where to reload the child type
+                                                  :type-ns (let [r (when (symbol? type)
+                                                                     (if (= type parsed-name)
+                                                                       *ns*
+                                                                       (try (resolve type) (catch Exception _ nil))))]
+                                                             (cond
+                                                               (instance? clojure.lang.Namespace r) (ns-name r)
+                                                               (var? r)   (ns-name (.ns ^clojure.lang.Var r))
+                                                               (class? r) (class-ns r)))}])))
         _           (doseq [{n :name, :keys [reads]} fetches
                             :let [kids (filter (set (keys children)) reads)]
                             :when (seq kids)]
@@ -967,34 +996,50 @@
 
 (defn- stale-child!
   "Throws `::stale-type`: the child field `field` of the parent `parent`, a plan or `{:parses-to :draft-class}`,
-  declared to hold `type`, holds the draft `d`, which parses to `c`, a class with the name of `type` or of one of its
-  members but not that class."
-  [{:keys [parses-to draft-class]} field type d ^Class c]
+  declared as `child`, `{:type :type-ns}`, holds the draft `d`, which parses to `c`, a class with the name of the
+  type or of one of its members but not that class."
+  [{:keys [parses-to draft-class]} field {:keys [type type-ns]} d ^Class c]
   (let [where (str (.getSimpleName ^Class draft-class) ": the child field " field)]
     (if (stale? c)
       (stale-value! where (str "a " (.getSimpleName (class d))) c)
-      (throw (ex-info (str where " holds a " (.getSimpleName (class d)) " of " (.getName c) ", but "
-                           (defined-in parses-to) " was evaluated against an older " (.getName c)
-                           (when (sum? type) (str ", through the sum " (sum-name type))) ". Types compare by class,"
-                           " like records, so a parent keeps the child types it was evaluated with. Re-evaluate "
-                           (when (sum? type) (str "the defsum " (sum-name type) ", then "))
-                           "the defparsed " (.getSimpleName ^Class parses-to) ", or reload its namespace, as in"
-                           " (require '" (:ns (.get owners (.getName ^Class parses-to))) " :reload).")
-                      {:type ::stale-type, :rule ::rule/stale-child-type, :class (.getName c), :field field
-                       :parent (.getName ^Class parses-to)})))))
+      (let [parent    (.getSimpleName ^Class parses-to)
+            parent-ns (class-ns parses-to)
+            ;; a sum is re-evaluated in its own namespace first, so it takes the new member
+            nss       (if (sum? type) [type-ns parent-ns] [parent-ns])
+            ;; re-evaluating a form in place works only when no namespace imports the class from another
+            in-place? (apply = (class-ns c) nss)]
+        (throw (ex-info (str where " holds a " (.getSimpleName (class d)) " of " (.getName c) ", but "
+                             (defined-in parses-to) " was evaluated against an older " (.getName c)
+                             (when (sum? type) (str ", through the sum " (sum-name type))) ". Types compare by class,"
+                             " like records, so a parent keeps the child types it was evaluated with. "
+                             (cond
+                               in-place?
+                               (str "Re-evaluate " (when (sum? type) (str "the defsum " (sum-name type) ", then "))
+                                    "the defparsed " parent ", or reload its namespace, as in " (reload-command nss)
+                                    ".")
+
+                               (sum? type)
+                               (str "Reload the namespace of the defsum " (sum-name type) ", then the parent's, in that"
+                                    " order, as in " (reload-command nss) ".")
+
+                               :else
+                               (str "Reload its namespace, which imports the new class, as in " (reload-command nss)
+                                    ".")))
+                        {:type ::stale-type, :rule ::rule/stale-child-type, :class (.getName c), :field field
+                         :parent (.getName ^Class parses-to)}))))))
 
 (defn- children-of-type?
   "Whether `v` is what the child field `field` of `parent`, declared as `{:kind :type}`, may hold: drafts that parse to
   the type's class itself, or one of its members. A draft of a class with that name but not the class throws
   `::stale-type`."
-  [parent field {:keys [kind], parsed-type :type} v]
+  [parent field {:keys [kind], parsed-type :type, :as child} v]
   (let [drafts-it? (fn [d] (when (instance? DraftValue d)
                                 (not-loaded! (str (.getSimpleName ^Class (:draft-class parent)) ": the child field " field)
                                              (class d)))
                               (and (draft-value? d)
                                 (let [c (:parses-to (plan-for d))]
                                   (when (and (named-member parsed-type c) (not (member? parsed-type c)))
-                                    (stale-child! parent field parsed-type d c))
+                                    (stale-child! parent field child d c))
                                   (member? parsed-type c))))]
     (case kind
       :one  (or (nil? v) (drafts-it? v))
@@ -1685,10 +1730,11 @@
   x)
 
 (defn- match-fell-through!
-  "Throws for `v`, which no clause of a [[match]] on `sum` took. `handled` holds the classes the match handles, and
-  `ns-sym` names the namespace it was compiled in. `::stale-type` when `v` was issued with a class of the name of
-  one it handles, `::not-parsed` otherwise. Called by the expansion of [[match]]."
-  [sum handled ns-sym v]
+  "Throws for `v`, which no clause of a [[match]] on `sum` took. `handled` holds the classes the match handles,
+  `ns-sym` names the namespace it was compiled in, and `sum-ns` the namespace of the defsum. `::stale-type` when `v`
+  was issued with a class of the name of one it handles, `::not-parsed` otherwise. Called by the expansion of
+  [[match]]."
+  [sum handled ns-sym sum-ns v]
   (when (issued? v)
     (let [c (class v)]
       (when (some #(= (.getName ^Class %) (.getName c)) handled)
@@ -1698,9 +1744,13 @@
                                (.getName c) ", but its clause " (.getSimpleName c) " names an older class of that"
                                " name: the match was compiled before " (defined-in c) " was re-evaluated. Types"
                                " compare by class, like records, so a match keeps the classes it was compiled"
-                               " against. Re-evaluate the namespace " ns-sym ", as in (require '" ns-sym " :reload),"
-                               " after the defsum " (sum-name sum) " if it is in another namespace.")
-                          {:type ::stale-type, :rule ::rule/stale-match, :class (.getName c), :ns ns-sym}))))))
+                               " against. "
+                               (if (= sum-ns ns-sym)
+                                 (str "Re-evaluate the namespace " ns-sym ", as in " (reload-command [ns-sym]) ".")
+                                 (str "Reload the namespace of the defsum " (sum-name sum) ", then the match's, in that"
+                                      " order, as in " (reload-command [sum-ns ns-sym]) ".")))
+                          {:type ::stale-type, :rule ::rule/stale-match, :class (.getName c), :ns ns-sym
+                           :sum-ns sum-ns}))))))
   (when (and (some? v) (member? sum (class v)) (issued? v))
     (let [got     (symbol (.getSimpleName (class v)))
           handled (mapv #(symbol (.getSimpleName ^Class %)) handled)]

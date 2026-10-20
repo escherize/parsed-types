@@ -335,6 +335,48 @@
       (is (pt/parsed? (resolve-here 'Members) member))
       (is (= [:member 1] ((resolve-here 'which-member) member))))))
 
+(defn- fx
+  "The value of `sym` in the stale-fixture namespace `suffix`, as it is now, as in (fx \"types\" '->DebitDraft)."
+  [suffix sym]
+  @(ns-resolve (symbol (str "parsed-types.stale-fixture." suffix)) sym))
+
+(defn- apply-fix!
+  "Evaluate the `(require ... :reload)` the message of `e` names, as written, and return it."
+  [e]
+  (let [cmd (re-find #"\(require [^)]*:reload\)" (str (:message e)))]
+    (is (some? cmd) (str "no command in: " (:message e)))
+    (when cmd (eval (read-string cmd)))
+    cmd))
+
+(deftest every-reload-command-applies-test
+  (let [nss   (fn [& suffixes] (map #(symbol (str "parsed-types.stale-fixture." %)) suffixes))
+        debit #((fx "types" '->DebitDraft) 5)]
+    (apply require (concat (nss "types" "sum" "parent" "app") [:reload]))
+    (require (first (nss "types")) :reload)
+    (testing "a parent of a type of another namespace: reload the parent's namespace"
+      (let [e (thrown #(pt/parse ((fx "parent" '->OneDraft) (debit))))]
+        (is (= :parsed-types.rule/stale-child-type (:rule e)))
+        (is (= "(require 'parsed-types.stale-fixture.parent :reload)" (apply-fix! e)))
+        (is (not (re-find #"Re-evaluate the defparsed One" (:message e))) "re-evaluating it alone keeps the old import")
+        (is (= 5 (:amount (:debit (pt/parse ((fx "parent" '->OneDraft) (debit)))))))))
+    (testing "a parent of a sum of another namespace: reload the sum's namespace, then the parent's"
+      (let [e (thrown #(pt/parse ((fx "parent" '->EntryDraft) [(debit)])))]
+        (is (= :parsed-types.rule/stale-child-type (:rule e)))
+        (is (= "(require 'parsed-types.stale-fixture.sum 'parsed-types.stale-fixture.parent :reload)" (apply-fix! e)))
+        (is (not (re-find #"or reload its namespace" (:message e))) "no parent-only fix")
+        (is (= [5] (map :amount (:lines (pt/parse ((fx "parent" '->EntryDraft) [(debit)]))))))))
+    (testing "a match compiled before the reload: reload the sum's namespace, then the match's"
+      (let [e (thrown #((fx "app" 'transact) (pt/parse (debit))))]
+        (is (= :parsed-types.rule/stale-match (:rule e)))
+        (is (= "(require 'parsed-types.stale-fixture.sum 'parsed-types.stale-fixture.app :reload)" (apply-fix! e)))
+        (is (= [:debit 5] ((fx "app" 'transact) (pt/parse (debit)))))))
+    (testing "a match compiled against a sum from before the reload: the same"
+      (require (first (nss "types")) :reload)
+      (let [e (thrown #(require (first (nss "app")) :reload))]
+        (is (= :parsed-types.rule/stale-sum (:rule e)))
+        (is (= "(require 'parsed-types.stale-fixture.sum 'parsed-types.stale-fixture.app :reload)" (apply-fix! e)))
+        (is (= [:debit 5] ((fx "app" 'transact) (pt/parse (debit)))))))))
+
 (deftest reloading-the-library-keeps-every-type-test
   (eval-here '(pt/defparsed RlLine [n] (pure ::rl-n-int "n is an integer." [n] (int? n))))
   (eval-here '(pt/defparsed RlOther [n]))

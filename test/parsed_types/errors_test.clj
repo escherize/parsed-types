@@ -205,7 +205,7 @@
    [:match-compiled-before-member
     ;; what a match on Growing compiled when it held only Debit does once Credit joins
     #((var parsed-types.core/match-fell-through!) (#'pt/sum 'Growing [Debit Credit]) [Debit] 'parsed-types.errors-test
-      (pt/parse (->CreditDraft 1)))
+      'parsed-types.errors-test (pt/parse (->CreditDraft 1)))
     "got a parsed Credit, but this match was compiled before Credit joined the sum" "Re-evaluate the match"]
    ;; a REPL re-evaluated a defparsed, and code evaluated before it keeps the old class
    [:stale-value (in-ns-named 'errs.stale-value '(do (pt/defparsed V [x])

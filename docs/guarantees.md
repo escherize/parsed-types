@@ -216,9 +216,14 @@ and the message says what to re-evaluate:
 |---|---|---|
 | `stale-value` | a sink, `match` or a child field got a value or draft built before its type was re-evaluated | build it again from a new draft, or re-run the code that built it |
 | `stale-sink` | `(pt/parsed Debit x)` compiled before `Debit` was re-evaluated got a new value | re-evaluate the namespace that calls it, or `(clojure.tools.namespace.repl/refresh)` |
-| `stale-child-type` | a parent evaluated before its child type, or its sum, was re-evaluated got a new draft | re-evaluate the `defsum`, then the parent `defparsed`, or `(require 'ns :reload)` |
-| `stale-match` | a `match` compiled before a member was re-evaluated got a new value | re-evaluate the namespace the match was compiled in, as `(require 'ns :reload)` |
-| `stale-sum` | a `match` names a member re-evaluated after its `defsum` | re-evaluate the `defsum`, then the match |
+| `stale-child-type` | a parent evaluated before its child type, or its sum, was re-evaluated got a new draft | reload the sum's namespace, if the child type is a sum, then the parent's, as in `(require 'app.sum 'app.parent :reload)` |
+| `stale-match` | a `match` compiled before a member was re-evaluated got a new value | reload the `defsum`'s namespace, then the match's, as in `(require 'app.sum 'app.core :reload)` |
+| `stale-sum` | a `match` names a member re-evaluated after its `defsum` | the same: the `defsum`'s namespace, then the match's |
+
+Each command names the namespaces in the order they depend on each other, and works as printed:
+`every-reload-command-applies-test` runs each one. A namespace that imports a type from another keeps the old class
+until its `ns` form runs again, so re-evaluating one form there is not enough. The message offers that, as in
+"Re-evaluate the defsum Members, then the defparsed Holder", only when every form involved is in one namespace.
 
 Two registered classes share a name only when the namespace that defined them defines them again: a REPL reload, or
 code that switches into that namespace with `in-ns`. A `defparsed` in another namespace whose name compiles to the
