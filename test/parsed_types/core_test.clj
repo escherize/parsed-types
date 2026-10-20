@@ -82,14 +82,15 @@
         (is (not= parsed (->RenameCardDraft 1 1 "New")) "and not its draft")
         (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
-        (is (= 500 (:status-code (thrown-data #(:nope parsed)))) "a key that is not a field throws")
+        (is (= ::pt/no-field (:type (thrown-data #(:nope parsed)))) "a key that is not a field throws")
         (is (= ::none (get parsed :nope ::none)) "unless a default is given")
         (is (not (contains? parsed :nope))))
       (testing "it prints with its type"
         (is (= "#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}" (pr-str parsed))))))
-  (testing "a failed pure check is a 400 reporting every failure by name, with its doc and what it returned"
-    (is (= {:status-code 400
-            :draft       RenameCardDraft
+  (testing "a failed pure check is reported by name, with its doc and what it returned"
+    (is (= {:type         ::pt/invalid
+            :failed-kinds #{:pure}
+            :draft        "parsed_types.core_test.RenameCardDraft"
             :failures    {::card-id-positive {:doc      "The card id is a positive integer."
                                               :returned false
                                               :blocked  [::title-not-the-card-id ::may-write-card]}
@@ -97,13 +98,14 @@
                                               :returned {:title " "}
                                               :blocked  [::title-not-the-card-id ::may-write-card]}}}
            (thrown-data #(pt/parse (->RenameCardDraft 1 -1 " "))))))
-  (testing "a failed external check is a 403"
-    (is (= {:status-code 403
-            :draft       RenameCardDraft
-            :failures    {::may-write-card {:doc "User 1 may write the card.", :returned false}}}
+  (testing "a failed external check is reported as :external"
+    (is (= {:type         ::pt/invalid
+            :failed-kinds #{:external}
+            :draft        "parsed_types.core_test.RenameCardDraft"
+            :failures     {::may-write-card {:doc "User 1 may write the card.", :returned false}}}
            (thrown-data #(pt/parse (->RenameCardDraft 1 3 "New"))))))
   (testing "who is acting is a field: the same card, another user"
-    (is (= 403 (:status-code (thrown-data #(pt/parse (->RenameCardDraft 2 1 "New"))))))))
+    (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (->RenameCardDraft 2 1 "New"))))))))
 
 (deftest order-test
   (testing "shape checks first, then checks over several fields, then fetches, then external checks"
@@ -130,8 +132,8 @@
         (is (= [::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
                (runs #(pt/parse renamed))))))
     (testing "assoc refuses a key that is not a field, and dissoc any key"
-      (is (= 500 (:status-code (thrown-data #(assoc draft :titel "x")))))
-      (is (= 500 (:status-code (thrown-data #(dissoc draft :title))))))
+      (is (= ::pt/no-field (:type (thrown-data #(assoc draft :titel "x")))))
+      (is (= ::pt/cannot-change (:type (thrown-data #(dissoc draft :title))))))
     (testing "a failure is not remembered"
       (let [bad (->RenameCardDraft 1 1 " ")]
         (pt/check bad nil)
@@ -148,7 +150,7 @@
       (is (= [::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
              (runs #(pt/parse (assoc draft :title "Newer"))))))
     (testing "draft-of refuses anything parse did not issue"
-      (is (= 500 (:status-code (thrown-data #(pt/draft-of (->RenameCard 1 1 "New")))))))))
+      (is (= ::pt/not-parsed (:type (thrown-data #(pt/draft-of (->RenameCard 1 1 "New")))))))))
 
 (pt/defparsed-type Moded [user-id card-id title])
 
@@ -170,7 +172,7 @@
       (is (= #{::lax} (pt/passed-checks lax)))
       (let [strict (assoc lax :user-id :strict)]
         (is (= #{} (pt/passed-checks strict)))
-        (is (= 400 (:status-code (thrown-data #(pt/parse strict)))))))))
+        (is (= #{:pure} (:failed-kinds (thrown-data #(pt/parse strict)))))))))
 
 (deftest batching-test
   (testing "parse-all calls each fetch once, with each distinct tuple once"
@@ -180,8 +182,9 @@
              (filter vector? (runs #(reset! parsed (pt/parse-all drafts))))))
       (is (= 3 (count @parsed)))
       (is (every? #(pt/parsed? RenameCard %) @parsed))))
-  (testing "parse-all throws once with every failure, by index"
-    (is (= {:status-code 403
+  (testing "parse-all throws once with every failure, by index, and every kind that failed"
+    (is (= {:type         ::pt/invalid
+            :failed-kinds #{:pure :external}
             :failures    {1 {::may-write-card {:doc "User 1 may write the card.", :returned false}}
                           2 {::card-id-positive {:doc      "The card id is a positive integer."
                                                  :returned false
@@ -189,22 +192,6 @@
            (thrown-data #(pt/parse-all [(->RenameCardDraft 1 1 "a")
                                         (->RenameCardDraft 1 3 "b")
                                         (->RenameCardDraft 1 -1 "c")]))))))
-
-(pt/defparsed-type NotFound [])
-
-(def ^:private not-found-declaration
-  {:parses-to NotFound
-   :checks    [{:name        ::exists
-                :doc         "The row exists."
-                :kind        :external
-                :status-code 404
-                :f           (fn [] false)}]})
-
-(pt/defdraft-type NotFoundDraft []
-  not-found-declaration)
-
-(deftest status-code-test
-  (is (= 404 (:status-code (thrown-data #(pt/parse (->NotFoundDraft)))))))
 
 ;; The declaration under test. Each one is a new map, so each is planned afresh.
 (def ^:private bad-declaration (atom nil))
@@ -275,7 +262,7 @@
                            {:name ::c, :doc "d", :kind :pure, :f (fn [] true)}]}]]]
       (testing label
         (reset! bad-declaration decl)
-        (is (= 500 (:status-code (thrown-data #(pt/parse (->BadDraft 1))))))))))
+        (is (= ::pt/bad-declaration (:type (thrown-data #(pt/parse (->BadDraft 1))))))))))
 
 (pt/defdraft-type BadDraft2 [a]
   @bad-declaration)
@@ -289,7 +276,7 @@
 
 (deftest a-draft-must-be-a-draft-type-test
   (testing "anything but a type defparsed or defdraft-type made is refused"
-    (is (= 500 (:status-code (thrown-data #(pt/parse (reify pt/Draft (declaration [_] rename-card-declaration)))))))))
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (reify pt/Draft (declaration [_] rename-card-declaration)))))))))
 
 (deftest parsed-refuses-anything-parse-did-not-issue-test
   (let [real (pt/parse (->RenameCardDraft 1 1 "New"))]
@@ -301,7 +288,7 @@
                        ["a parsed value of another type" (pt/parse (->OtherDraft 1 3 "pwned"))]
                        ["an edn round trip" (edn/read-string {:default (fn [_ m] m)} (pr-str real))]]]
       (testing label
-        (is (= {:status-code 500, :expected RenameCard, :got (type x)}
+        (is (= {:type ::pt/not-parsed, :expected "parsed_types.core_test.RenameCard", :got (some-> x class .getName)}
                (thrown-data #(pt/parsed RenameCard x))))
         (is (false? (pt/parsed? RenameCard x)))))
     (is (true? (pt/parsed? RenameCard real)))))
@@ -315,9 +302,9 @@
                            ["with-meta" #(with-meta real {:x 1})]
                            ["vary-meta" #(vary-meta real assoc :x 1)]]]
       (testing label
-        (is (= 500 (:status-code (thrown-data thunk))))))
+        (is (= ::pt/cannot-change (:type (thrown-data thunk))))))
     (testing "the draft type is a record, and the parse is still the only way to the parsed one"
-      (is (= 500 (:status-code (thrown-data #(assoc real :card-id 3))))))))
+      (is (= ::pt/cannot-change (:type (thrown-data #(assoc real :card-id 3))))))))
 
 (deftest extend-cannot-replace-the-checks-test
   (testing "Clojure refuses to extend a draft to Draft when it implements it inline, so its checks cannot be emptied"
@@ -379,10 +366,27 @@
 (deftest a-fetch-may-close-over-a-local-test
   (testing "a fetch reads the world, so it may hold a database handle; only pure checks must close over nothing"
     (is (= {:a 1} (into {} (pt/parse (->ClosureDraft 1)))))
-    (is (= 403 (:status-code (thrown-data #(pt/parse (->ClosureDraft 2))))))))
+    (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (->ClosureDraft 2))))))))
 
 (deftest a-hand-written-declaration-may-not-use-reserved-names-test
   (reset! bad-declaration {:parses-to BadParsed
                            :checks    [{:name :parsed-types.child/a, :doc "d", :kind :pure, :reads [:a], :f (fn [_] true)}]})
   (is (re-find #"reserved for child-field checks"
                (ex-message (try (pt/parse (->BadDraft 1)) (catch clojure.lang.ExceptionInfo e e))))))
+
+(deftest error-messages-name-the-fix-test
+  (let [real    (pt/parse (->RenameCardDraft 1 1 "New"))
+        message (fn [thunk] (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
+    (is (= "RenameCard is a parsed value and cannot be changed with assoc. Use (pt/draft-of x), assoc, then pt/parse."
+           (message #(assoc real :title "x"))))
+    (is (= (str "Expected a parsed RenameCard, got a RenameCard that parse did not issue. Build a draft that parses to"
+                " RenameCard and call pt/parse.")
+           (message #(pt/parsed RenameCard (->RenameCard 1 1 "New")))))
+    (is (= "Expected a parsed RenameCard, got a RenameCardDraft. Call pt/parse on it first."
+           (message #(pt/parsed RenameCard (->RenameCardDraft 1 1 "New")))))
+    (is (= "RenameCard has no field :nope. Use one of its fields [:user-id :card-id :title], or give get a default."
+           (message #(:nope real))))
+    (is (str/starts-with? (message #(pt/parse (->RenameCardDraft 1 -1 " ")))
+                          (str "Invalid RenameCard: :parsed-types.core-test/card-id-positive,"
+                               " :parsed-types.core-test/title-not-blank failed. Change the draft so these checks"
+                               " pass")))))

@@ -1,8 +1,9 @@
 (ns parsed-types.tree-properties-test
   "Generative tests of tree parsing against a model written by hand: the whole failure map (paths, :returned,
-  :blocked-by, :blocked) and the status, for random trees with :one and :many children, malformed children, a node
+  :blocked-by, :blocked) and the kinds that failed, for random trees with :one and :many children, malformed children, a node
   that does not read its child, a fetch and checks that read child fields, and edits to child fields."
   (:require
+   [clojure.set :as set]
    [clojure.test.check.clojure-test :refer [defspec]]
    [clojure.test.check.generators :as gen]
    [clojure.test.check.properties :as prop]
@@ -24,12 +25,12 @@
 
 (pt/defparsed Leaf [n]
   (pure ::leaf-int "n is an integer." [n] (int? n))
-  (external ::leaf-known "n is not 13." {:status 404} [] [row ::leaf-row] (not= 13 (:n row)))
+  (external ::leaf-known "n is not 13." [] [row ::leaf-row] (not= 13 (:n row)))
   (fetch ::leaf-row [n] leaf-rows))
 
 (pt/defparsed Box [label item]
   (child item Leaf)
-  (pure ::label-kw "The label is a keyword." {:status 422} [label] (keyword? label)))
+  (pure ::label-kw "The label is a keyword." [label] (keyword? label)))
 
 (pt/defparsed Crate [total boxes leaves]
   (children boxes Box)
@@ -38,7 +39,7 @@
   (pure ::sum-fits "The leaves add up to at most the total." [total leaves]
         (<= (reduce + 0 (map :n leaves)) total))
   (pure ::boxes-labeled "Every box has a label." [boxes] (every? #(keyword? (:label %)) boxes))
-  (external ::few-boxes "At most 3 boxes." {:status 409} [] [row ::crate-row] (<= (:box-count row) 3))
+  (external ::few-boxes "At most 3 boxes." [] [row ::crate-row] (<= (:box-count row) 3))
   (external ::views-seen "The checks see children as values, not drafts." [boxes] (views? boxes))
   (fetch ::crate-row [total boxes] crate-rows))
 
@@ -73,8 +74,8 @@
                        (gen-children gen-leaf (gen/return (->BoxDraft :wrong nil))))))
 
 (def ^:private gen-well-formed-crate
-  "A crate whose every pure check passes, so the external checks decide: a leaf of 13 is a 404, more than 3 boxes a
-  409."
+  "A crate whose every pure check passes, so the external checks decide: a leaf of 13 fails, and so do more than 3
+  boxes."
   (gen/fmap (fn [[labels items ns]]
               (->CrateDraft 1000
                             (mapv (fn [l it] (->BoxDraft l (some-> it ->LeafDraft))) labels items)
@@ -97,7 +98,7 @@
   ([doc held-by] {:doc doc, :blocked-by (set held-by)}))
 
 (defn- node
-  "One node's pure phase: its failures in run order as `[name entry status]`, the checks each failure holds up, and
+  "One node's pure phase: its failures in run order as `[name entry kind]`, the checks each failure holds up, and
   its externals."
   [path failures blocks externals]
   {:path path, :failures failures, :blocks blocks, :externals externals})
@@ -106,9 +107,9 @@
 
 (defn- leaf-nodes [path {:keys [n]}]
   [(node path
-         (when-not (int? n) [[::leaf-int (fail "n is an integer.") 400]])
+         (when-not (int? n) [[::leaf-int (fail "n is an integer.") :pure]])
          {::leaf-int #{}}
-         [[::leaf-known (fail "n is not 13.") 404 (not= 13 n)]])])
+         [[::leaf-known (fail "n is not 13.") :external (not= 13 n)]])])
 
 (defn- box-nodes [path {:keys [label item]}]
   (let [shape-ok? (or (nil? item) (leaf? item))
@@ -117,8 +118,8 @@
           (node path
                 (cond-> []
                   (not shape-ok?)      (conj [:parsed-types.child/item
-                                              (fail "item holds nil or a draft that parses to Leaf.") 400])
-                  (not (keyword? label)) (conj [::label-kw (fail "The label is a keyword.") 422]))
+                                              (fail "item holds nil or a draft that parses to Leaf.") :pure])
+                  (not (keyword? label)) (conj [::label-kw (fail "The label is a keyword.") :pure]))
                 {}
                 []))))
 
@@ -138,34 +139,38 @@
         total-ok?  (int? total)
         failures   (cond-> []
                      (not boxes-ok?)  (conj [:parsed-types.child/boxes
-                                             (fail "boxes holds a vector of drafts that parse to Box.") 400])
+                                             (fail "boxes holds a vector of drafts that parse to Box.") :pure])
                      (not leaves-ok?) (conj [:parsed-types.child/leaves
-                                             (fail "leaves holds a vector of drafts that parse to Leaf.") 400])
-                     (not total-ok?)  (conj [::total-int (fail "The total is an integer.") 400])
+                                             (fail "leaves holds a vector of drafts that parse to Leaf.") :pure])
+                     (not total-ok?)  (conj [::total-int (fail "The total is an integer.") :pure])
                      (and boxes-ok? (seq bad-boxes))
-                     (conj [::boxes-labeled (fail "Every box has a label." bad-boxes) 400])
+                     (conj [::boxes-labeled (fail "Every box has a label." bad-boxes) :pure])
                      (and total-ok? leaves-ok? (seq bad-leaves))
-                     (conj [::sum-fits (fail "The leaves add up to at most the total." bad-leaves) 400])
+                     (conj [::sum-fits (fail "The leaves add up to at most the total." bad-leaves) :pure])
                      (and total-ok? leaves-ok? (empty? bad-leaves) (< total (reduce + 0 (map :n leaves))))
-                     (conj [::sum-fits (fail "The leaves add up to at most the total.") 400]))]
+                     (conj [::sum-fits (fail "The leaves add up to at most the total.") :pure]))]
     (conj kids
           (node []
                 failures
                 {:parsed-types.child/boxes  #{::boxes-labeled}
                  :parsed-types.child/leaves #{::sum-fits}
                  ::total-int                #{::sum-fits}}
-                [[::few-boxes (fail "At most 3 boxes.") 409 (<= (count boxes) 3)]
-                 [::views-seen (fail "The checks see children as values, not drafts.") 403 true]]))))
+                [[::few-boxes (fail "At most 3 boxes.") :external (<= (count boxes) 3)]
+                 [::views-seen (fail "The checks see children as values, not drafts.") :external true]]))))
 
 (defn- entry [e] (update e :blocked-by #(when % (set %))))
 
 (defn- model
-  "`{:status :failures}`, the failures as `{[path check] entry}`, or `:ok`."
+  "`{:failed-kinds :failures}`, the failures as `{[path check] entry}`, or `:ok`. A held check failed nothing itself,
+  so its kind is not counted."
   [crate]
   (let [nodes    (crate-nodes crate)
         failing  (filter (comp seq :failures) nodes)]
     (if (seq failing)
-      {:status   (nth (first (:failures (first failing))) 2)
+      {:failed-kinds (into #{} (for [{:keys [failures]} failing
+                                     [_ e kind]         failures
+                                     :when              (contains? e :returned)]
+                                 kind))
        :failures (into {}
                        (for [{:keys [path failures blocks externals]} failing
                              :let  [failed (set (map first failures))]
@@ -174,9 +179,9 @@
                           (assoc (entry e) :blocked
                                  (into (set (remove failed (get blocks n #{}))) (map first externals)))]))}
       (let [ext-failures (for [{:keys [path externals]} nodes
-                               [n e status ok?] externals
+                               [n e kind ok?] externals
                                :when (not ok?)]
-                           [path n e status])
+                           [path n e kind])
             ;; the crate's ::views-seen reads boxes, so it is held when a box, or its item, failed an external check
             bad-boxes    (filter (fn [bp] (some (fn [[path]] (= bp (take (count bp) path))) ext-failures))
                                  (map (fn [i] [:boxes i]) (range (count (:boxes crate)))))
@@ -185,7 +190,7 @@
                                                :blocked-by (set bad-boxes)
                                                :blocked    #{}}])]
         (if (seq ext-failures)
-          {:status   (nth (first ext-failures) 3)
+          {:failed-kinds (into #{} (map #(nth % 3)) ext-failures)
            :failures (into {} (concat (for [[path n e] ext-failures] [[path n] (assoc (entry e) :blocked #{})])
                                       (when held [held])))}
           :ok)))))
@@ -209,16 +214,17 @@
              {}
              m))
 
-(defn- normalize-model [{:keys [status failures]}]
-  {:status   status
+(defn- normalize-model [{:keys [failed-kinds failures]}]
+  {:type         ::pt/invalid
+   :failed-kinds failed-kinds
    :failures (into {} (map (fn [[k e]] [k (merge {:returned nil, :blocked-by nil} e)])) failures)})
 
 (defn- parse-outcome [crate]
   (try (pt/parse crate)
        :ok
        (catch clojure.lang.ExceptionInfo e
-         (let [{:keys [status-code failures]} (ex-data e)]
-           {:status status-code, :failures (flat-failures failures [])}))))
+         (let [{:keys [type failed-kinds failures]} (ex-data e)]
+           {:type type, :failed-kinds failed-kinds, :failures (flat-failures failures [])}))))
 
 (defn- all-parsed?
   "Whether every node of a parsed crate is a parsed value of its type, :one children included."
@@ -250,15 +256,20 @@
 
 (defspec the-tree-generator-reaches-every-outcome 1
   (prop/for-all [crates (gen/vector gen-any-crate 500)]
-    (= #{400 404 409 422 :ok} (set (map #(if (= :ok %) :ok (:status %)) (map model crates))))))
+    (let [models (map model crates)]
+      (and (= #{#{:pure} #{:external} :ok} (set (map #(if (= :ok %) :ok (:failed-kinds %)) models)))
+           ;; every check fails in some crate
+           (set/subset? #{::leaf-int ::leaf-known ::label-kw ::total-int ::sum-fits ::boxes-labeled ::few-boxes
+                          :parsed-types.child/item :parsed-types.child/boxes :parsed-types.child/leaves}
+                        (set (mapcat #(map second (keys (:failures %))) (remove #{:ok} models))))))))
 
 (defspec nothing-in-a-failing-tree-fetches 300
   (prop/for-all [crate gen-any-crate]
     (reset! seen [])
     (let [expected (model crate)]
-      (or (not= 400 (:status expected 400))
-          (= :ok expected)
-          (some #(= 422 (nth % 2)) (mapcat :failures (crate-nodes crate)))
+      (parse-outcome crate)
+      (or (= :ok expected)
+          (not (contains? (:failed-kinds expected) :pure))
           (empty? @seen)))))
 
 (defspec fetches-see-checked-values-and-run-once 300
@@ -312,10 +323,10 @@
                     (catch clojure.lang.ExceptionInfo e (ex-data e)))]
       (if (every? #{:ok} each)
         (= :ok all)
-        (let [i (first (keep-indexed (fn [i o] (when-not (= :ok o) i)) each))]
-          (and (= (:status (nth each i)) (:status-code all))
-               (= (into {} (keep-indexed (fn [i o] (when-not (= :ok o) [i (:failures o)]))) each)
-                  (into {} (map (fn [[i f]] [i (flat-failures f [])])) (:failures all)))))))))
+        (and (= ::pt/invalid (:type all))
+             (= (apply set/union (keep :failed-kinds each)) (:failed-kinds all))
+             (= (into {} (keep-indexed (fn [i o] (when-not (= :ok o) [i (:failures o)]))) each)
+                (into {} (map (fn [[i f]] [i (flat-failures f [])])) (:failures all))))))))
 
 (defspec draft-of-returns-drafts-all-the-way-down 200
   (prop/for-all [crate (gen/such-that #(= :ok (model %)) gen-well-formed-crate 100)]

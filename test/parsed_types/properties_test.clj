@@ -105,13 +105,13 @@
   (->TripleDraft (:user-id draft) (:a draft) (:b draft) (:c draft)))
 
 (defn- outcome
-  "What `thunk` returned, as a plain value, or the status and failures it threw."
+  "What `thunk` returned, as a plain value, or the type, failed kinds and failures it threw."
   [thunk]
   (try
     (let [x (thunk)]
       {:ok (if (vector? x) (mapv #(into {} %) x) (into {} x))})
     (catch clojure.lang.ExceptionInfo e
-      (select-keys (ex-data e) [:status-code :failures]))))
+      (select-keys (ex-data e) [:type :failed-kinds :failures]))))
 
 (defn- edit [draft [op x y]]
   (case op
@@ -170,7 +170,7 @@
                  v     gen-value]
     (let [parsed  (pt/parse draft)
           refused #(try (%) false
-                        (catch clojure.lang.ExceptionInfo e (= 500 (:status-code (ex-data e)))))]
+                        (catch clojure.lang.ExceptionInfo e (= ::pt/cannot-change (:type (ex-data e)))))]
       (and (refused #(assoc parsed k v))
            (refused #(dissoc parsed k))
            (refused #(merge parsed {k v}))
@@ -196,8 +196,9 @@
           failures (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
       (if (empty? failures)
         (= all {:ok (mapv :ok each)})
-        (= all {:status-code (:status-code (nth each (key (first failures))))
-                :failures    failures})))))
+        (= all {:type         ::pt/invalid
+                :failed-kinds (apply set/union (keep :failed-kinds each))
+                :failures     failures})))))
 
 (defspec parse-all-fetches-once-with-each-distinct-tuple 300
   (prop/for-all [drafts (gen/vector gen-draft 0 8)]
@@ -231,15 +232,16 @@
         blocked   (fn [n] (vec (concat (when (and (= :blocked relation) (#{::a-int ::c-int} n)) [::a-below-c])
                                        externals)))]
     (if (seq failed)
-      {:status-code 400
-       :failures    (into {} (map (fn [[n e]] [n (assoc e :blocked (blocked n))])) failed)}
+      {:type         ::pt/invalid
+       :failed-kinds #{:pure}
+       :failures     (into {} (map (fn [[n e]] [n (assoc e :blocked (blocked n))])) failed)}
       (let [ext (cond-> {}
                   (not (and (= 1 user-id) (even? a)))
                   (assoc ::may-use-row {:doc "User 1 may use the row for a.", :returned false})
                   (not (contains? #{1 2} user-id))
                   (assoc ::user-known {:doc "The user is known. An external check with no fetch.", :returned false}))]
         (if (seq ext)
-          {:status-code 403, :failures ext}
+          {:type ::pt/invalid, :failed-kinds #{:external}, :failures ext}
           {:ok (into {} fields)})))))
 
 (defspec parse-matches-the-model 500
@@ -248,7 +250,7 @@
 
 (defspec the-generators-reach-every-outcome 1
   (prop/for-all [drafts (gen/vector gen-draft 400)]
-    (= #{400 403 :ok} (set (map #(or (:status-code %) :ok) (map model drafts))))))
+    (= #{#{:pure} #{:external} :ok} (set (map #(or (:failed-kinds %) :ok) (map model drafts))))))
 
 ;;; Several declarations in one call, sharing a fetch name with different fetches
 
@@ -284,8 +286,9 @@
           failures  (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
       (if (empty? failures)
         (= all {:ok (mapv :ok each)})
-        (= all {:status-code (:status-code (nth each (key (first failures))))
-                :failures    failures})))))
+        (= all {:type         ::pt/invalid
+                :failed-kinds (apply set/union (keep :failed-kinds each))
+                :failures     failures})))))
 
 (defspec parse-all-after-edits-agrees-with-fresh-drafts 200
   (prop/for-all [drafts (gen/vector (gen/tuple gen-draft (gen/vector gen-edit 0 4)) 0 6)]
@@ -408,8 +411,9 @@
           failures (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
       (if (empty? failures)
         (= all {:ok (mapv :ok each)})
-        (= all {:status-code (:status-code (nth each (key (first failures))))
-                :failures    failures})))))
+        (= all {:type         ::pt/invalid
+                :failed-kinds (apply set/union (keep :failed-kinds each))
+                :failures     failures})))))
 
 (defspec remembered-passes-never-change-a-tree-outcome 200
   (prop/for-all [tree   (gen/one-of [gen-tree gen-ordered-tree])
@@ -455,7 +459,7 @@
                    :forged (->Triple (:user-id d) (:a d) (:b d) (:c d))
                    :draft  d
                    :other  (try (pt/parse d) (catch clojure.lang.ExceptionInfo _ d)))
-          result (try (which x) (catch clojure.lang.ExceptionInfo e (:status-code (ex-data e))))]
+          result (try (which x) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))]
       (if (= :parsed kind)
         (= [(if (instance? Triple x) :triple :pair) (:a x)] result)
-        (= 500 result)))))
+        (= ::pt/not-parsed result)))))

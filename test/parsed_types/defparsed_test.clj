@@ -63,21 +63,27 @@
            ["a pure check that binds a fetch"
             '(pt/defparsed A [a] (pure ::c "d" [a] [r ::f] true) (fetch ::f [a] identity))
             #"a pure check cannot fetch"]
-           ["an unknown option"
-            '(pt/defparsed A [a] (pure ::c "d" {:status-code 422} [a] true))
-            #"unknown options \[:status-code\]"]
-           ["a status that is not an integer"
-            '(pt/defparsed A [a] (pure ::c "d" {:status "teapot"} [a] true))
-            #":status must be an integer"]
+           ["an options map on a pure check"
+            '(pt/defparsed A [a] (pure ::c "d" {:status 422} [a] true))
+            #"checks take no options"]
+           ["an options map on an external check"
+            '(pt/defparsed A [a] (external ::c "d" {} [a] true))
+            #"checks take no options"]
            ["an unknown clause"
             '(pt/defparsed A [a] (check ::c "d" [a] true))
             #"a clause is \(pure"]]]
     (testing label
-      (is (re-find re (str (compile-error form)))))))
+      (is (re-find re (str (compile-error form))))))
+  (testing "a compile error is a ::pt/bad-declaration"
+    (is (= ::pt/bad-declaration
+           (try (binding [*ns* (the-ns 'parsed-types.defparsed-test)]
+                  (eval '(pt/defparsed A [a] (pure ::c "d" {} [a] true))))
+                nil
+                (catch Throwable e (:type (ex-data (or (ex-cause e) e)))))))))
 
 (pt/defparsed Point [x y]
   (pure ::x-int "x is an integer." [x] (int? x))
-  (pure ::y-int "y is an integer." {:status 422} [y] (int? y))
+  (pure ::y-int "y is an integer." [y] (int? y))
   (pure ::on-diagonal "x equals y." [x y] (= x y))
   (external ::known "The point is known." [] [row ::row] (some? row))
   (fetch ::row [x] (fn [tuples] (into {} (map (fn [t] [t :row])) tuples))))
@@ -87,14 +93,14 @@
     (let [decl (pt/declaration (->PointDraft 1 1))]
       (is (= Point (:parses-to decl)))
       (is (= [{:name ::x-int, :doc "x is an integer.", :kind :pure, :reads [:x]}
-              {:name ::y-int, :doc "y is an integer.", :kind :pure, :reads [:y], :status-code 422}
+              {:name ::y-int, :doc "y is an integer.", :kind :pure, :reads [:y]}
               {:name ::on-diagonal, :doc "x equals y.", :kind :pure, :reads [:x :y]}
               {:name ::known, :doc "The point is known.", :kind :external, :reads [], :fetches [::row]}]
              (mapv #(dissoc % :f) (:checks decl))))
       (is (= [{:name ::row, :reads [:x]}] (mapv #(dissoc % :f) (:fetches decl))))))
   (testing "and parses with it"
     (is (= {:x 2, :y 2} (into {} (pt/parse (->PointDraft 2 2)))))
-    (is (= 422 (:status-code (try (pt/parse (->PointDraft 1 :y)) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
+    (is (= #{:pure} (:failed-kinds (try (pt/parse (->PointDraft 1 :y)) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
 (pt/defparsed-type Other [x z])
 
@@ -137,9 +143,9 @@
   (testing "a literal map with a key that is not a field does not compile"
     (is (re-find #"Point has no fields \[:z\]; its fields are \[:x :y\]"
                  (str (compile-error '(pt/draft Point {:x 1, :z 2}))))))
-  (testing "a map built at run time: a key that is not a field is a 400"
+  (testing "a map built at run time: a key that is not a field is bad input"
     (let [m {:x 1, :z 2}]
-      (is (= {:status-code 400, :unknown-fields [:z], :fields [:x :y]}
+      (is (= {:type ::pt/bad-input, :unknown-fields [:z], :fields [:x :y]}
              (try (pt/draft Point m) (catch clojure.lang.ExceptionInfo e (ex-data e)))))
       (is (= (->PointDraft 1 2) (pt/draft Point (dissoc (assoc m :y 2) :z))))))
   (testing "a type without a draft does not compile"
@@ -156,7 +162,7 @@
                              ["get" #(get x :z)]
                              ["invoke" #(x :z)]
                              ["destructuring" #(let [{:keys [z]} x] z)]]]
-          (is (= 500 (:status-code (try (thunk) (catch clojure.lang.ExceptionInfo e (ex-data e))))) how))
+          (is (= ::pt/no-field (:type (try (thunk) (catch clojure.lang.ExceptionInfo e (ex-data e))))) how))
         (is (= ::none (get x :z ::none)))
         (is (false? (contains? x :z)))
         (is (nil? (find x :z)))
@@ -175,7 +181,7 @@
     (is (some? (pt/parse parent)))
     (testing "after the child type is re-evaluated, the parent no longer accepts the old child, remembered or not"
       (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
-      (is (= 400 (:status-code (try (pt/parse parent) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
+      (is (= #{:pure} (:failed-kinds (try (pt/parse parent) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
     (testing "a draft of the old class does not stop the new class from parsing"
       (is (some? (pt/check old-kid nil)))
       (is (some? (pt/parse ((resolve 'parsed-types.defparsed-test/->KidDraft) 2)))))))
@@ -293,7 +299,7 @@
                   (pure ::never "Never passes." [ShadowDraft-declaration] false)))
     (let [d ((resolve 'parsed-types.defparsed-test/->ShadowDraft) {:parses-to (resolve 'parsed-types.defparsed-test/Shadow)
                                                                   :checks []})]
-      (is (= 400 (:status-code (try (pt/parse d) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
+      (is (= #{:pure} (:failed-kinds (try (pt/parse d) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
 
 (deftest field-name-limits-test
   (doseq [[fields re] [['[a.b] #"cannot contain a dot"]

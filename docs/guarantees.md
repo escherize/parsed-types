@@ -15,17 +15,41 @@ The README covers how to use the library; this page covers what it promises and 
 | A field may be named like any `clojure.core` function, or like the generated declaration | The map type's methods call every function qualified, and `defparsed` names its declaration qualified, so no field shadows either | `fields-named-like-core-functions-test`, `a-field-cannot-shadow-the-declaration-test` |
 | Equality is a record's: same type, each field `=` | `equiv` checks the class, then compares fields with `=`, so `1.0M` equals `1.00M` | `equality-test` |
 | The checks see the values that are issued | Each field is read once, from the type's own field; each node's value is built once and is both what parent checks see and what `parse` returns | `fields-are-read-once-from-the-record-test`, `parse-matches-the-tree-model` |
-| `parse` reports exactly what the declaration says | | `parse-matches-the-model`, `parse-matches-the-tree-model`: each against a model written by hand, down to every path, `:blocked-by`, `:blocked` and status |
+| `parse` reports exactly what the declaration says | | `parse-matches-the-model`, `parse-matches-the-tree-model`: each against a model written by hand, down to every path, `:blocked-by`, `:blocked` and `:failed-kinds` |
 | Remembered passes never change an outcome | `assoc` clears the passes of the checks that read the field; passes are tied to the declaration that set them; a child field's shape check always runs | `remembered-passes-never-change-the-outcome`, `remembered-passes-never-change-a-tree-outcome-under-edits`, `passes-are-not-read-under-a-replaced-declaration`, `re-evaluating-a-child-type-test` |
 | Malformed input never reaches a fetch or an external check, anywhere in a tree | Fetches and external checks wait on every pure check in the tree | `nothing-touches-the-world-until-every-pure-check-passes`, `nothing-in-a-failing-tree-fetches` |
-| Each fetch runs once per declaration, with each tuple once, and answers every tuple | Tuples gathered across the call and deduplicated; a missing answer is a 500 | `parse-all-fetches-once-with-each-distinct-tuple`, `fetches-see-checked-values-and-run-once`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
+| Each fetch runs once per declaration, with each tuple once, and answers every tuple | Tuples gathered across the call and deduplicated; a missing answer throws `::bad-fetch` | `parse-all-fetches-once-with-each-distinct-tuple`, `fetches-see-checked-values-and-run-once`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Fetches grouped by declaration | `parse-all-agrees-with-parse-across-declarations`, `parse-all-agrees-with-parse-on-trees` |
 | A parsed tree is parsed all the way down, and `draft-of` returns drafts all the way down | Values built bottom-up | `parse-matches-the-tree-model`, `draft-of-returns-drafts-all-the-way-down` |
 | `match` handles every member of a sum, and only parsed values reach a branch | `match` compares its clauses with the sum when it expands, and calls `pt/parsed` in each branch | `match-compile-errors-test`, `match-runs-only-on-parsed-members` |
 | A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
-| A deep or huge tree is refused with a 400, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
+| A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others | `compile-errors-test` |
 | Threads that first use a declaration at once keep their remembered passes | The first plan stored wins | `concurrent-first-use-test` |
+
+## Errors
+
+Every error the library throws is an `ex-info` whose ex-data has a `:type`, a keyword in `parsed-types.core`. Its
+message says what went wrong and how to fix it.
+
+| `:type` | Thrown when | Other ex-data |
+|---|---|---|
+| `::invalid` | `parse` or `parse-all` ran the checks and some failed | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
+| `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
+| `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, or `dissoc` or `with-meta` on a draft | `:parsed` or `:draft`, `:op` |
+| `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields` |
+| `::bad-input` | `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft, or a tree is over the limits | depends on the cause |
+| `::bad-declaration` | a declaration error, when compiling or when a declaration is first used, or `check` named a check that doesn't exist | `:draft` when found at first use |
+| `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
+
+Class names in ex-data are strings, so ex-data can be serialized. For `::invalid`:
+
+- `:failures` is shaped like the tree: the root's checks at the top, and each child's under its field (and index,
+  for `children`). From `parse-all`, it maps the index of each draft that failed to its failures.
+- `:failed-kinds` is a set of `:pure` and `:external`: the kinds of check that returned a failure anywhere in the
+  call. A pure failure means the input is malformed. An external one means a check of the world refused it. A caller
+  can map each kind to its own error codes.
+- `:draft` is the name of the draft's class.
 
 ## Errors caught when compiling
 
@@ -37,7 +61,7 @@ The README covers how to use the library; this page covers what it promises and 
 - a check with no doc string or no body;
 - a fetch binding that names no declared fetch, binds a local with a field's name, or binds two fetches to one local;
 - a pure check that binds a fetch;
-- an option other than `:status`, or a `:status` that isn't an integer;
+- an options map: checks take no options;
 - a field named twice, like a special form, with a dot in it, starting with `__`, or compiling to the same Java name
   as another field (`a-b` and `a_b`);
 - a field declared as a child twice, or a child field that isn't a field.
@@ -46,7 +70,7 @@ The README covers how to use the library; this page covers what it promises and 
 
 ## Errors caught when a declaration is first used
 
-`parse` throws a 500 when:
+`parse` throws `::bad-declaration` when:
 
 - `:parses-to` isn't a parsed type, its fields differ from the draft's, or another draft type already parses to it;
 - a check's or fetch's `:f` isn't a fn, or a pure check's `:f` closes over a local (this refuses `constantly`,
@@ -60,7 +84,7 @@ The README covers how to use the library; this page covers what it promises and 
   default, `(get x :k ::none)` returns it, and so does `:or` in `let`, which reads with a default. `contains?` is
   false, `find` is nil, `select-keys` leaves the key out, and `java.util.Map.get` returns null.
 - **Equality.** Like a record, a value equals only a value of its own type with the same fields: a parsed value never
-  equals a plain map or its draft. A `Transfer` built by hand still equals one `parse` made, because they hold the
+  equals a plain map or its draft. A `Debit` built by hand still equals one `parse` made, because they hold the
   same value, so a set of parsed values can't tell a forgery apart. Proof is `pt/parsed`, never `=`. Java `.equals`
   is one-sided, unlike a record, whose `.equals` compares contents both ways: a `HashMap` or a Clojure map's `.equals`
   compares contents and says true, while the value's own `.equals` says false. So a Java `HashSet` holding a parsed
@@ -71,22 +95,22 @@ The README covers how to use the library; this page covers what it promises and 
   an external check is held, so it can't throw over the child's failure.
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
-- **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field is a 400: the map
-  is usually a request.
+- **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field throws
+  `::bad-input`.
 - **`check` with some names.** Children run all their pure checks. A tree fetches and runs external checks only when
   every pure check in it ran and passed, so a child's external checks may not run.
-- **Status in a tree.** The first pure failure decides it, children before parents; with none, the first external
-  failure, children before parents.
-- **Exceptions.** An exception thrown by a check or fetch, such as an existing permission check that throws a 403,
-  propagates out of `parse` and stops `parse-all` at that draft.
+- **Failed kinds in a tree.** One tree never holds both: its external checks run only when every pure check in it
+  passed. `parse-all` can report both, from different drafts.
+- **Exceptions.** An exception thrown by a check or fetch propagates out of `parse` and stops `parse-all` at that
+  draft.
 
 ## REPL reloads
 
 Re-evaluating a `defparsed` makes new classes.
 
 - A draft of the old class still parses, under the declaration it now reads.
-- A parent declared before a child type was re-evaluated refuses drafts of the child, old and new, with a 400 from its
-  child-field check. Re-evaluate the parent.
+- A parent declared before a child type was re-evaluated refuses drafts of the child, old and new, with a failure of
+  its child-field check. Re-evaluate the parent.
 - A `defsum` and every compiled `(pt/parsed T ...)` and `match` still name the old class, so they refuse
   values of the new one until their namespaces are reloaded.
 
@@ -98,13 +122,13 @@ of the same class, which for a parsed value would look like proof, and `map->` t
 **Proof is identity, not a token.** A secret in a field or in metadata can be copied from one parsed value into a
 forged one. An identity map holds nothing a caller can copy.
 
-**One draft type per parsed type.** If two draft types could parse to `Transfer`, a `Transfer` would mean only that
-some checks passed.
+**One draft type per parsed type.** If two draft types could parse to `Debit`, a `Debit` would mean only that some
+checks passed.
 
 **A check's argument vector is its reads.** One list says what the check reads, and the compiler holds the body to
 it.
 
-**Checks happen in ordinary forms.** `pt/draft` builds what `->TransferDraft` builds. It adds a compile-time check and
+**Checks happen in ordinary forms.** `pt/draft` builds what `->DebitDraft` builds. It adds a compile-time check and
 expands to the plain form.
 
 **A declaration is still data.** `defparsed` writes a plain map, which `(pt/declaration draft)` returns. Declarations
@@ -135,7 +159,7 @@ Each of these deliberately broken copies of the library fails at least one test:
 an external check waiting only on its fetches; a truthy return counted as a pass; a tree fetching after a pure check
 failed; passes read under a replaced declaration; tuples not deduplicated; a missing fetch answer allowed; `draft-of`
 forgetting passes or leaving a child parsed; a parsed parent holding a raw child; checks or fetches seeing children as
-drafts or as open maps; `:blocked-by` naming one child; the status taken root-first; a grandchild failure not holding
+drafts or as open maps; `:blocked-by` naming one child; `:failed-kinds` missing a kind; a grandchild failure not holding
 the grandparent; fields read through `get`; two draft types for one parsed type; `check` on a subset letting a tree
 fetch; a child-field check remembered; racing threads keeping different plans; an unknown key returning `nil`; a
 literal `pt/draft` leaving a field out; reserved check names allowed; a map-type method calling a function a field can

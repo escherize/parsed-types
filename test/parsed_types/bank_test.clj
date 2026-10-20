@@ -42,10 +42,10 @@
   (pure ::two-accounts "Money moves between two different accounts."
         [from-id to-id]
         (not= from-id to-id))
-  (external ::source-exists "The source account exists." {:status 404}
+  (external ::source-exists "The source account exists."
             [] [source ::source]
             (some? source))
-  (external ::destination-exists "The destination account exists." {:status 404}
+  (external ::destination-exists "The destination account exists."
             [] [destination ::destination]
             (some? destination))
   (external ::owns-source "The user owns the source account."
@@ -75,9 +75,9 @@
       (is (= {:user-id :ada, :from-id 1, :to-id 2, :amount 30M} (into {} t)))
       (transfer! t)
       (is (= [70M 40M] (map #(get-in @accounts [% :balance]) [1 2])))))
-  (testing "malformed input is a 400 with every failure, and nothing is fetched"
+  (testing "malformed input fails pure checks, reports every failure, and fetches nothing"
     (reset! fetched [])
-    (is (= {:status-code 400
+    (is (= {:failed-kinds #{:pure}
             :failures    {::amount-positive {:doc      "The amount is a positive decimal."
                                              :returned false
                                              :blocked  [::source-exists ::destination-exists ::owns-source
@@ -86,17 +86,21 @@
                                              :returned false
                                              :blocked  [::source-exists ::destination-exists ::owns-source
                                                         ::funds-available]}}}
-           (select-keys (thrown-data #(pt/parse (->TransferDraft :ada 1 1 30))) [:status-code :failures])))
+           (select-keys (thrown-data #(pt/parse (->TransferDraft :ada 1 1 30))) [:failed-kinds :failures])))
     (is (= [] @fetched)))
-  (testing "a missing account is a 404, and someone else's account a 403"
-    (is (= 404 (:status-code (thrown-data #(pt/parse (->TransferDraft :ada 9 2 1M))))))
-    (is (= 403 (:status-code (thrown-data #(pt/parse (->TransferDraft :bob 1 2 1M)))))))
-  (testing "more than the balance is a 403 (bob's account holds 40M after the first transfer)"
+  (testing "a missing account, and someone else's account, fail external checks"
+    (let [missing (thrown-data #(pt/parse (->TransferDraft :ada 9 2 1M)))]
+      (is (= #{:external} (:failed-kinds missing)))
+      (is (contains? (:failures missing) ::source-exists)))
+    (is (= {:failed-kinds #{:external}
+            :failures     {::owns-source {:doc "The user owns the source account.", :returned false}}}
+           (select-keys (thrown-data #(pt/parse (->TransferDraft :bob 1 2 1M))) [:failed-kinds :failures]))))
+  (testing "more than the balance fails an external check (bob's account holds 40M after the first transfer)"
     (is (= {::funds-available {:doc "The source account holds the amount.", :returned false}}
            (:failures (thrown-data #(pt/parse (->TransferDraft :bob 2 1 41M)))))))
   (testing "the sink refuses a transfer built by hand"
-    (is (= 500 (:status-code (thrown-data #(transfer! (->Transfer :ada 1 2 1000M))))))
-    (is (= 500 (:status-code (thrown-data #(transfer! (->TransferDraft :ada 1 2 1000M))))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (->Transfer :ada 1 2 1000M))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (->TransferDraft :ada 1 2 1000M))))))))
 
 ;;; A payroll: one account pays several people, parsed with its transfers in one call
 
@@ -139,7 +143,7 @@
       (is (= [70M 20M 20M] (map #(get-in @accounts [% :balance]) [1 2 3])))))
   (testing "a malformed transfer fails the payroll, under its index, and nothing in the tree is fetched"
     (reset! fetched [])
-    (is (= {:status-code 400
+    (is (= {:failed-kinds #{:pure}
             :failures    {:transfers         {1 {::amount-positive {:doc      "The amount is a positive decimal."
                                                                     :returned false
                                                                     :blocked  [::source-exists ::destination-exists
@@ -151,7 +155,7 @@
                           ::no-repeat-payee  {:doc        "No account is paid twice."
                                               :blocked-by [[:transfers 1]]
                                               :blocked    [::one-source ::one-payer ::covers-total]}}}
-           (select-keys (thrown-data #(pt/parse (payroll :ada 1  2 10M  3 -5M))) [:status-code :failures])))
+           (select-keys (thrown-data #(pt/parse (payroll :ada 1  2 10M  3 -5M))) [:failed-kinds :failures])))
     (is (= [] @fetched)))
   (testing "each transfer fits the balance, but together they don't: only the parent can see that"
     (is (= {::covers-total {:doc "The account holds the sum of every transfer.", :returned false}}
@@ -234,21 +238,21 @@
 
 (deftest a-failed-grandchild-holds-the-grandparent-test
   (testing "the middle has no check of its own that reads the leaf, and the top's check is still held"
-    (is (= {:status-code 400
+    (is (= {:failed-kinds #{:pure}
             :failures    {:middles            {0 {:leaf {::amount-int {:doc "The amount is an integer.", :returned false}}}}
                           ::leaves-positive   {:doc "Every leaf's amount is positive.", :blocked-by [[:middles 0]]}}}
-           (select-keys (thrown-data #(pt/parse (->TopDraft [(->MiddleDraft (->LeafDraft "x"))]))) [:status-code :failures])))))
+           (select-keys (thrown-data #(pt/parse (->TopDraft [(->MiddleDraft (->LeafDraft "x"))]))) [:failed-kinds :failures])))))
 
 (pt/defparsed Chain [next]
   (child next Chain))
 
 (deftest tree-limits-test
-  (testing "a tree deeper than the limit is a 400, not a stack overflow"
-    (is (= 400 (:status-code (thrown-data #(pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 1500))))))))
+  (testing "a tree deeper than the limit is bad input, not a stack overflow"
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 1500))))))))
   (testing "a deep tree within the limit parses"
     (is (pt/parsed? Chain (pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 900))))))
   (testing "a draft shared at every level counts each time it appears, so the tree has a size limit"
-    (is (= 400 (:status-code (thrown-data #(pt/parse (reduce (fn [b _] (->BudgetDraft "b" 0M [b b])) (->BudgetDraft "b" 0M []) (range 20)))))))))
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (reduce (fn [b _] (->BudgetDraft "b" 0M [b b])) (->BudgetDraft "b" 0M []) (range 20)))))))))
 
 ;;; A sum: a payment is a transfer or a payroll
 
@@ -273,9 +277,9 @@
     (pay! (pt/parse (payroll :ada 1  2 5M  3 5M)))
     (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3]))))
   (testing "match refuses anything parse did not issue, member type or not"
-    (is (= 500 (:status-code (thrown-data #(pay! (->Transfer :ada 1 2 1000M))))))
-    (is (= 500 (:status-code (thrown-data #(pay! (->TransferDraft :ada 1 2 1M))))))
-    (is (= 500 (:status-code (thrown-data #(pay! (pt/parse (budget "b" 1M)))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (->Transfer :ada 1 2 1000M))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (->TransferDraft :ada 1 2 1M))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (pt/parse (budget "b" 1M)))))))
     (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3])) "nothing moved"))
   (testing "parsed and parsed? take a sum"
     (is (pt/parsed? Payment (pt/parse (->TransferDraft :ada 1 2 1M))))
@@ -296,7 +300,7 @@
 (deftest depth-boundary-test
   (let [chain (fn [levels] (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range (dec levels))))]
     (is (pt/parsed? Chain (pt/parse (chain 1000))) "1000 levels, counting the root, parse")
-    (is (= 400 (:status-code (thrown-data #(pt/parse (chain 1001))))) "1001 do not")))
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (chain 1001))))) "1001 do not")))
 
 ;;; A parent check that misspells a child's field
 
@@ -306,7 +310,7 @@
 
 (deftest a-parent-check-cannot-read-a-key-a-child-lacks-test
   (testing "children are closed values inside parent checks too: a misspelled key throws, never nil"
-    (is (= 500 (:status-code (thrown-data #(pt/parse (->SloppyDraft [(->TransferDraft :ada 1 2 1M)]))))))))
+    (is (= ::pt/no-field (:type (thrown-data #(pt/parse (->SloppyDraft [(->TransferDraft :ada 1 2 1M)]))))))))
 
 ;;; A fetch that leaves out a tuple
 
@@ -317,8 +321,12 @@
   (fetch ::row [id] forgetful-rows))
 
 (deftest a-fetch-must-answer-every-tuple-test
-  (testing "a missing tuple is a 500, never a nil row a check could pass on"
-    (is (= 500 (:status-code (thrown-data #(pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)])))))))
+  (testing "a missing tuple throws, never a nil row a check could pass on"
+    (is (= ::pt/bad-fetch (:type (thrown-data #(pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)])))))
+    (is (= (str "Fetch :parsed-types.bank-test/row returned no entry for [[1]]. Return a key for every tuple, with nil"
+                " for not found.")
+           (try (pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)]) nil
+                (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
 
 ;;; A child's external failure holds the parent's external checks over it
 
@@ -328,14 +336,14 @@
 
 (deftest a-child-external-failure-holds-the-parent-test
   (testing "bob may not draw on account 1: the payroll's check over transfers waits, and is held"
-    (is (= {:status-code 403
+    (is (= {:failed-kinds #{:external}
             :failures    {:transfers     {0 {::owns-source {:doc "The user owns the source account.", :returned false}}}
                           ::covers-total {:doc "The account holds the sum of every transfer.", :blocked-by [[:transfers 0]]}}}
-           (select-keys (thrown-data #(pt/parse (payroll :bob 1  2 10M))) [:status-code :failures]))))
-  (testing "a parent check that would throw never runs, so the child's 403 is what you get"
-    (is (= 403 (:status-code (thrown-data #(pt/parse (->GrumpyDraft [(->TransferDraft :bob 1 2 10M)]))))))))
+           (select-keys (thrown-data #(pt/parse (payroll :bob 1  2 10M))) [:failed-kinds :failures]))))
+  (testing "a parent check that would throw never runs, so the child's failure is what you get"
+    (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (->GrumpyDraft [(->TransferDraft :bob 1 2 10M)]))))))))
 
 (deftest node-limit-boundary-test
   (let [wide (fn [n] (->BudgetDraft "root" 1000000M (vec (repeatedly (dec n) #(->BudgetDraft "p" 0M [])))))]
     (is (pt/parsed? Budget (pt/parse (wide 100000))) "100,000 drafts parse")
-    (is (= 400 (:status-code (thrown-data #(pt/parse (wide 100001))))) "100,001 do not")))
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (wide 100001))))) "100,001 do not")))
