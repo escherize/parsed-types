@@ -72,7 +72,7 @@
    [:draft-no-metadata #(with-meta draft {}) "with-meta on a DebitDraft" "{:value x, :meta m}"]
    [:draft-no-empty #(empty draft) "DebitDraft has fixed fields" "(into {} x)"]
    [:no-such-field-read #(:amont real) "Debit has no field :amont" "Did you mean :amount?"
-    "[:user-id :account-id :amount]" "(get x :amont default)"]
+    "[:user-id :account-id :amount]" "(:amount x)"]
    [:no-such-field-assoc #(assoc draft :acount-id 1) "DebitDraft has no field :acount-id" "Did you mean :account-id?"
     "(assoc d :account-id v)"]
    ;; field names

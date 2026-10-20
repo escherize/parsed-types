@@ -139,8 +139,8 @@
         nearest (nearest k fields)]
     (throw (ex-info (if (= "read" op)
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A key that is not a field"
-                           " throws, never reads nil. Read one of its fields " fields ", or read with a default, as"
-                           " in (get x " (pr-str k) " default).")
+                           " throws, never reads nil. Read one of its fields " fields ", as in ("
+                           (pr-str (or nearest (first fields))) " x).")
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A draft has fixed fields. Set"
                            " one of " fields ", as in (assoc d " (pr-str (or nearest (first fields))) " v)."))
                     (cond-> {:type                                        ::no-field
