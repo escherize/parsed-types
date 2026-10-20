@@ -16,15 +16,10 @@ The idea is the smart constructor, or
 `defparsed` defines `Order`, the parsed type, and `OrderDraft`, its draft. An order holds order lines that are
 already parsed.
 
-```mermaid
-flowchart TD
-  D["OrderDraft<br/>anyone builds one"] -->|pt/parse| C{every check<br/>passes?}
-  C -->|yes| P["Order<br/>carries the proof"]
-  C -->|no| F["throws ::invalid<br/>with every failure"]
-  P -->|pt/parsed or match| S["sink<br/>place-order!"]
-  P -->|pt/draft-of| D
-  D -->|assoc| D
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/lifecycle-dark.svg">
+  <img alt="An OrderDraft goes through pt/parse to an Order, which carries the proof and goes to place-order!. A failing check throws ::invalid. An Order built by hand is refused at the sink." src="docs/lifecycle-light.svg">
+</picture>
 
 ## A shop declares its checks once, and `place-order!` accepts only a parsed order
 

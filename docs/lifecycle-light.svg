@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="890" height="498" viewBox="0 0 890 498" font-family="'DejaVu Sans Mono', 'Menlo', 'Consolas', 'Liberation Mono', 'Courier New', monospace" font-size="14px">
+  <defs>
+    <marker id="r9bc0f60c-arrow-7c83a0" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c83a0"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="890" height="498" fill="#ffffff"/>
+  <path d="M48 216 H220 a8 8 0 0 1 8 8 V274 a8 8 0 0 1 -8 8 H48 a8 8 0 0 1 -8 -8 V224 a8 8 0 0 1 8 -8 Z" fill="#eef0f7" stroke="#8a90a8"/>
+  <text x="134" y="244.4" fill="#1f2328" text-anchor="middle">OrderDraft</text>
+  <text x="134" y="263.4" fill="#6e7781" text-anchor="middle">built with pt/draft</text>
+  <path d="M401.4 216 H556.4 a8 8 0 0 1 8 8 V274 a8 8 0 0 1 -8 8 H401.4 a8 8 0 0 1 -8 -8 V224 a8 8 0 0 1 8 -8 Z" fill="#cedfd0" stroke="#3a7d44"/>
+  <text x="478.9" y="244.4" fill="#1f2328" text-anchor="middle">Order</text>
+  <text x="478.9" y="263.4" fill="#6e7781" text-anchor="middle">carries the proof</text>
+  <path d="M682.4 216 H820.4 a8 8 0 0 1 8 8 V274 a8 8 0 0 1 -8 8 H682.4 a8 8 0 0 1 -8 -8 V224 a8 8 0 0 1 8 -8 Z" fill="#eef0f7" stroke="#8a90a8"/>
+  <text x="751.4" y="244.4" fill="#1f2328" text-anchor="middle">place-order!</text>
+  <text x="751.4" y="263.4" fill="#6e7781" text-anchor="middle">calls pt/parsed</text>
+  <path d="M56.5 40 H211.5 a8 8 0 0 1 8 8 V98 a8 8 0 0 1 -8 8 H56.5 a8 8 0 0 1 -8 -8 V48 a8 8 0 0 1 8 -8 Z" fill="#eef0f7" stroke="#8a90a8"/>
+  <text x="134" y="68.4" fill="#1f2328" text-anchor="middle">OrderLines</text>
+  <text x="134" y="87.4" fill="#6e7781" text-anchor="middle">from pt/parse-all</text>
+  <path d="M375.9 392 H581.9 a8 8 0 0 1 8 8 V450 a8 8 0 0 1 -8 8 H375.9 a8 8 0 0 1 -8 -8 V400 a8 8 0 0 1 8 -8 Z" fill="#eef0f7" stroke="#b3423a"/>
+  <text x="478.9" y="420.4" fill="#1f2328" text-anchor="middle">throws ::invalid</text>
+  <text x="478.9" y="439.4" fill="#6e7781" text-anchor="middle">every failure, by check</text>
+  <path d="M661.4 392 H841.4 a8 8 0 0 1 8 8 V450 a8 8 0 0 1 -8 8 H661.4 a8 8 0 0 1 -8 -8 V400 a8 8 0 0 1 8 -8 Z" fill="#eef0f7" stroke="#b3423a"/>
+  <text x="751.4" y="420.4" fill="#1f2328" text-anchor="middle">(Order. ...) by hand</text>
+  <text x="751.4" y="439.4" fill="#6e7781" text-anchor="middle">no proof</text>
+  <path d="M 228 249 C 294.16 249, 327.24 249, 382.2 249 L 393.4 249" fill="none" stroke="#7c83a0" stroke-width="1.6" marker-end="url(#r9bc0f60c-arrow-7c83a0)"/>
+  <rect x="270.3" y="239.5" width="78" height="19" fill="#ffffff"/>
+  <text x="309.3" y="253.9" fill="#1f2328" text-anchor="middle">pt/parse</text>
+  <path d="M 564.4 249 C 608.4 249, 630.4 249, 663.2 249 L 674.4 249" fill="none" stroke="#7c83a0" stroke-width="1.6" marker-end="url(#r9bc0f60c-arrow-7c83a0)"/>
+  <path d="M 134 282 C 134 391.66, 258.24 425, 356.7 425 L 367.9 425" fill="none" stroke="#7c83a0" stroke-width="1.6" marker-end="url(#r9bc0f60c-arrow-7c83a0)"/>
+  <rect x="148.43" y="385.12" width="120" height="19" fill="#ffffff"/>
+  <text x="208.43" y="399.52" fill="#1f2328" text-anchor="middle">a check fails</text>
+  <path d="M 478.9 216 L 478.9 216 C 478.9 198.77, 425.18 184.8, 358.9 184.8 L 262 184.8 C 195.72 184.8, 142 193.75, 142 204.8 L 142 216" fill="none" stroke="#7c83a0" stroke-width="1.6" marker-end="url(#r9bc0f60c-arrow-7c83a0)"/>
+  <rect x="258.95" y="175.3" width="103" height="19" fill="#ffffff"/>
+  <text x="310.45" y="189.7" fill="#1f2328" text-anchor="middle">pt/draft-of</text>
+  <path d="M 134 106 C 134 150.12, 126 171.88, 126 204.8 L 126 216" fill="none" stroke="#7c83a0" stroke-width="1.6" marker-end="url(#r9bc0f60c-arrow-7c83a0)"/>
+  <rect x="87" y="150.1" width="86" height="19" fill="#ffffff"/>
+  <text x="130" y="164.5" fill="#1f2328" text-anchor="middle">in :lines</text>
+  <path d="M 751.4 392 C 751.4 348, 751.4 326, 751.4 293.2 L 751.4 282" fill="none" stroke="#7c83a0" stroke-width="1.6" stroke-dasharray="6.4 4.8" marker-end="url(#r9bc0f60c-arrow-7c83a0)"/>
+  <rect x="716.9" y="328.9" width="69" height="19" fill="#ffffff"/>
+  <text x="751.4" y="343.3" fill="#1f2328" text-anchor="middle">refused</text>
+</svg>
