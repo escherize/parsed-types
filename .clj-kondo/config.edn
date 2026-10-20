@@ -1,1 +1,2 @@
-{:config-paths ["../resources/clj-kondo.exports/escherize/parsed-types"]}
+{:config-paths ["../resources/clj-kondo.exports/escherize/parsed-types"]
+ :lint-as      {clojure.test.check.clojure-test/defspec clojure.test/deftest}}

@@ -81,7 +81,9 @@
         (is (= {:user-id 1, :card-id 1, :title "New"} parsed))
         (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
-        (is (nil? (:nope parsed))))))
+        (is (nil? (:nope parsed))))
+      (testing "it prints with its type"
+        (is (= "#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}" (pr-str parsed))))))
   (testing "a failed pure check is a 400 reporting every failure by name, with its doc and what it returned"
     (is (= {:status-code 400
             :draft       RenameCardDraft
@@ -146,12 +148,14 @@
     (testing "draft-of refuses anything parse did not issue"
       (is (= 500 (:status-code (thrown-data #(pt/draft-of (->RenameCard 1 1 "New")))))))))
 
+(pt/defparsed Moded [user-id card-id title])
+
 (def ^:private lax-declaration
-  {:parses-to Other
+  {:parses-to Moded
    :checks    [{:name ::lax, :doc "Any title.", :kind :pure, :reads [:title], :f (fn [_] true)}]})
 
 (def ^:private strict-declaration
-  {:parses-to Other
+  {:parses-to Moded
    :checks    [{:name ::strict, :doc "A positive card id.", :kind :pure, :reads [:card-id], :f pos-int?}]})
 
 (defrecord ModedDraft [user-id card-id title]
@@ -219,6 +223,8 @@
               {:checks []}]
              ["a :parses-to that is not a parsed type"
               {:parses-to String, :checks []}]
+             ["a :parses-to that is a record, which assoc would change"
+              {:parses-to BadDraft, :checks []}]
              ["a parsed type with other fields"
               {:parses-to WrongFields, :checks []}]
              ["a check that closes over a local"
@@ -227,6 +233,29 @@
               {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (constantly true)}]}]
              ["a check built with partial"
               {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (partial = 1)}]}]
+             ["a check built with comp"
+              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (comp boolean pos-int?)}]}]
+             ["a check whose :f is a keyword, not a fn"
+              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f :a}]}]
+             ["a check with no :f"
+              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a]}]}]
+             ["an unqualified name"
+              {:parses-to BadParsed, :checks [{:name :c, :doc "d", :kind :pure, :reads [:a], :f (fn [_] true)}]}]
+             [":reads that is not a vector"
+              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads :a, :f (fn [_] true)}]}]
+             [":reads that names a field twice"
+              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a :a], :f (fn [_ _] true)}]}]
+             ["a type another draft parses to"
+              {:parses-to RenameCard, :checks []}]
+             ["a child field the draft does not have"
+              {:parses-to BadParsed, :checks [], :children {:b {:kind :many, :type BadParsed}}}]
+             ["a child that is not {:kind :type}"
+              {:parses-to BadParsed, :checks [], :children {:a {:kind :lots, :type BadParsed}}}]
+             ["more than 64 pure checks"
+              {:parses-to BadParsed
+               :checks    (vec (for [i (range 65)]
+                                 {:name (keyword "parsed-types.core-test" (str "c" i)), :doc "d", :kind :pure,
+                                  :reads [], :f (fn [] true)}))}]
              ["a check built with memoize"
               {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (memoize pos-int?)}]}]
              ["a field the draft does not have"
@@ -249,6 +278,21 @@
         (reset! bad-declaration decl)
         (is (= 500 (:status-code (thrown-data #(pt/parse (->BadDraft 1))))))))))
 
+(defrecord BadDraft2 [a]
+  pt/Draft
+  (declaration [_] @bad-declaration))
+
+(deftest shared-declaration-test
+  (testing "two draft types may not share one declaration"
+    (reset! bad-declaration {:parses-to BadParsed, :checks []})
+    (pt/parse (->BadDraft 1))
+    (is (re-find #"shares its declaration"
+                 (ex-message (try (pt/parse (->BadDraft2 1)) (catch clojure.lang.ExceptionInfo e e)))))))
+
+(deftest a-draft-must-be-a-record-test
+  (testing "a type whose fields could change between reads is refused"
+    (is (= 500 (:status-code (thrown-data #(pt/parse (reify pt/Draft (declaration [_] rename-card-declaration)))))))))
+
 (deftest parsed-refuses-anything-parse-did-not-issue-test
   (let [real (pt/parse (->RenameCardDraft 1 1 "New"))]
     (doseq [[label x] [["nil" nil]
@@ -257,7 +301,7 @@
                        ["a parsed type built with its constructor" (->RenameCard 1 3 "pwned")]
                        ["a value equal to a parsed one, built by hand" (->RenameCard 1 1 "New")]
                        ["a parsed value of another type" (pt/parse (->OtherDraft 1 3 "pwned"))]
-                       ["an edn round trip" (edn/read-string (pr-str real))]]]
+                       ["an edn round trip" (edn/read-string {:default (fn [_ m] m)} (pr-str real))]]]
       (testing label
         (is (= {:status-code 500, :expected RenameCard, :got (type x)}
                (thrown-data #(pt/parsed RenameCard x))))
@@ -283,3 +327,61 @@
                           (extend-type RenameCardDraft
                             pt/Draft
                             (declaration [_] {:parses-to RenameCard, :checks []}))))))
+
+(pt/defparsed Claimed [a])
+
+(def ^:private claim-a-declaration {:parses-to Claimed, :checks []})
+(def ^:private claim-b-declaration {:parses-to Claimed, :checks []})
+
+(defrecord ClaimADraft [a]
+  pt/Draft
+  (declaration [_] claim-a-declaration))
+
+(defrecord ClaimBDraft [a]
+  pt/Draft
+  (declaration [_] claim-b-declaration))
+
+(deftest one-draft-type-per-parsed-type-test
+  (testing "a second draft type with the same fields may not parse to a type another already parses to"
+    (is (pt/parsed? Claimed (pt/parse (->ClaimADraft 1))))
+    (is (re-find #"Claimed is parsed from another draft type"
+                 (ex-message (try (pt/parse (->ClaimBDraft 1)) (catch clojure.lang.ExceptionInfo e e)))))))
+
+(pt/defparsed Honest [a])
+
+(def ^:private lying-declaration
+  {:parses-to Honest
+   :checks    [{:name ::a-positive, :doc "a is positive.", :kind :pure, :reads [:a], :f (fn [a] (pos-int? a))}]})
+
+;; Claims to be a record, and answers `get` with a value its field does not hold.
+(deftype LyingDraft [a]
+  clojure.lang.IRecord
+  clojure.lang.ILookup
+  (valAt [_ k] (when (= :a k) -999))
+  (valAt [_ k not-found] (if (= :a k) -999 not-found))
+  pt/Draft
+  (declaration [_] lying-declaration))
+
+(deftest fields-are-read-once-from-the-record-test
+  (testing "the checks and the issued value both see the field, not what get answers"
+    (let [parsed (pt/parse (->LyingDraft 5))]
+      (is (= {:a 5} parsed)))))
+
+(pt/defparsed Closure [a])
+
+(def ^:private fetch-closure-declaration
+  {:parses-to Closure
+   :checks    [{:name ::known, :doc "a is in the db.", :kind :external, :fetches [::row]
+                :f    (fn [row] (some? row))}]
+   :fetches   [{:name  ::row
+                :reads [:a]
+                :f     (let [db {1 :one}] (fn [tuples] (into {} (map (fn [[a :as t]] [t (get db a)])) tuples)))}]})
+
+(defrecord ClosureDraft [a]
+  pt/Draft
+  (declaration [_] fetch-closure-declaration))
+
+(deftest a-fetch-may-close-over-a-local-test
+  (testing "a fetch reads the world, so it may hold a database handle; only pure checks must close over nothing"
+    (is (= {:a 1} (pt/parse (->ClosureDraft 1))))
+    (is (= 403 (:status-code (thrown-data #(pt/parse (->ClosureDraft 2))))))))
