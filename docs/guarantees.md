@@ -7,17 +7,20 @@ The README covers how to use the library; this page covers what it promises and 
 
 | Guarantee | Mechanism | Tested by |
 |---|---|---|
-| `pt/parsed` accepts only values `parse` made | A parsed value has a hidden `parse-proof` field. `parse` sets it to a private token; `pt/parsed` checks it with `identical?` | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parsed-refuses-anything-parse-did-not-issue-test` |
+| `pt/parsed` accepts only values `parse` made | A parsed value has a hidden `parse-proof` field. `parse` sets it to a private token. `pt/parsed` first checks that the value's class is one `defparsed` registered, by identity, then asks the value `(issuedWith token)`, which compares inside the type | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parsed-refuses-anything-parse-did-not-issue-test` |
+| The token never leaves the value | The field is `volatile-mutable`, which Clojure compiles to a non-public field that interop can't read, and nothing sets it after the constructor. No public method returns it. A hand-written class is refused before it is asked, so it never sees the token | `the-proof-never-leaves-the-value-test` |
+| A hand-written type is refused, even with the same name | `pt/parsed` requires the class `defparsed` registered, by identity. The class name decides only which declared type a value counts as | `a-hand-written-class-with-the-same-name-is-refused-test` |
 | A parsed value can't be built by accident | `defparsed` removes the parsed type's `->Name` factory, so `(->Debit ...)` doesn't compile. `(Debit. a b c nil)` compiles, and `pt/parsed` refuses it | `the-positional-factory-is-removed-test`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The proof is not part of the map | `parse-proof` isn't a key, and isn't in `seq`, `count`, equality, hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
 | A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type. `defparsed-type` and `defdraft-type` are private, so calling them doesn't compile, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
 | A declaration error is found when the `defparsed` loads, at the latest | The macro refuses what it can see when it expands. The expansion builds and checks the plan when it loads, and throws `::bad-declaration` then | `compile-errors-test`, `declaration-errors-at-load-test` |
-| A parsed value never equals a plain map or its draft | The type's equality checks the class; it isn't marked map-equivalent, so Clojure's maps refuse it too | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test` |
+| A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
+| A parsed value holds only immutable values | `parse` walks every field of every draft in the tree, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test`, `a-mutable-value-in-a-child-is-refused-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `java-map-interface-test` |
 | A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `draft-test` |
 | A field may be named like any `clojure.core` function | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
-| Equality is a record's: same type, each field `=` | `equiv` checks the class, then compares fields with `=`, so `1.0M` equals `1.00M` | `equality-test` |
+| Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | The checks see the values that are issued | Each field is read once, from the type's own Java field, by a fn `defparsed` generates. The issued value holds the same field values the checks saw | `parse-matches-the-tree-model` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`, `parse-matches-the-tree-model`: each against a model written by hand, down to every path, `:blocked-by`, `:blocked` and `:failed-kinds` |
 | Malformed input never reaches a fetch or an external check, anywhere in a tree | Fetches and external checks wait on every pure check in the tree | `nothing-touches-the-world-until-every-pure-check-passes`, `nothing-in-a-failing-tree-fetches` |
@@ -32,19 +35,24 @@ The README covers how to use the library; this page covers what it promises and 
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others. A pure check that closes over a local is refused when it loads | `compile-errors-test`, `declaration-errors-at-load-test` |
 | After a REPL re-evaluates a type, code defined before it accepts the new class | Parsed types compare by class name, in `pt/parsed`, `parsed?`, sums, a child field's shape check and `match` | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
 
-## How far the proof goes
+## Accepted limits
 
-The proof makes a parsed value impossible to build by accident. It doesn't stop a deliberate forgery:
+The proof makes a parsed value impossible to build by accident, and hard to forge by mistake. These ways around it,
+and these gaps, are accepted:
 
-- Code can name the private token through its var, as in `@#'parsed-types.core/parse-token`, and pass it to the
-  constructor.
-- Code can read the field of a real parsed value, as in `(.-parse-proof x)` or `(.parseProof x)`, and pass it on.
-- Code can call the private `register!` through its var, and record a plan of its own.
-- Reflection can always forge a value.
+- **Reflection can forge.** `setAccessible` reads or writes any field, the proof field included.
+- **The token's var.** Code can name the private token as `@#'parsed-types.core/parse-token` and pass it to the
+  constructor. The same goes for the private `register!`, which records a plan. The clj-kondo config this library
+  ships flags both outside `parsed-types.core`.
+- **`with-redefs` on library fns.** Rebinding `pt/parsed?` or a private fn changes what the library checks.
+- **Reader syntax.** `#ns.Debit[...]` calls the constructor, so it builds a value without the proof. That fails
+  closed: `pt/parsed` refuses it.
+- **Mutable values are refused by a walk of known classes.** It trusts a class's interfaces: a type that implements
+  `IPersistentVector` mutably passes. There is no opt-out for mutable values yet.
+- **External checks can go stale.** An external check reads the world at the moment of `parse`. A balance that
+  passed can change later, so parse right before you act.
 
-Each of these names something conspicuous, so it stands out in a diff. The clj-kondo config this library ships flags
-`parsed-types.core/parse-token` and `parsed-types.core/register!` outside `parsed-types.core`. It can't flag a read of
-the `parse-proof` field, which is Java interop, not a var. Search for `parse-proof` and `parseProof` in review.
+Reading the token from a real value is no longer possible without reflection.
 
 ## Errors
 
@@ -57,8 +65,8 @@ message says what went wrong and how to fix it.
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, or `empty` on either | `:parsed` or `:draft`, `:op` |
 | `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields` |
-| `::bad-input` | `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, or a tree is over the limits | depends on the cause |
-| `::bad-declaration` | a declaration error, when `defparsed` expands or loads, or `check` named a check that doesn't exist | `:draft` when found at load |
+| `::bad-input` | `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
+| `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
 Class names in ex-data are strings, so ex-data can be serialized. For `::invalid`:
@@ -103,10 +111,10 @@ The expansion builds and checks the plan when it loads, before any `parse`. It t
 - **Reading unknown keys.** A one-argument lookup throws: `(:k x)`, `(get x :k)`, `(x :k)` and destructuring. With a
   default, `(get x :k ::none)` returns it, and so does `:or` in `let`, which reads with a default. `contains?` is
   false, `find` is nil, `select-keys` leaves the key out, and `java.util.Map.get` returns null.
-- **Equality.** Like a record, a value equals only a value of its own type with the same fields: a parsed value never
-  equals a plain map or its draft. A `Debit` built by hand still equals one `parse` made, because the proof isn't
-  part of equality, so a set of parsed values can't tell a forgery apart. Proof is `pt/parsed`, never `=`. Java
-  `.equals` is one-sided, unlike a record, whose `.equals` compares contents both ways: a `HashMap` or a Clojure
+- **Equality.** Like a record, a value equals only a value of its own type with the same fields, and a parsed value
+  also only one with the same proof. So equality no longer confuses a parsed value with one built by hand, but sinks
+  still check with `pt/parsed`. Two values built without the proof, such as the views parent checks see, are equal
+  when their fields are. Java `.equals` is one-sided, unlike a record, whose `.equals` compares contents both ways: a `HashMap` or a Clojure
   map's `.equals` compares contents and says true, while the value's own `.equals` says false. So a Java `HashSet`
   holding a parsed value can report that it contains an equal plain map.
 - **No empty version.** `empty` throws, and so does anything built on `(into (empty x) ...)`, such as
@@ -116,14 +124,19 @@ The expansion builds and checks the plan when it loads, before any `parse`. It t
   the token. The issued value equals what the checks saw, but it is a different object. A parent's pure checks run
   before any external check. A parent's external checks run after the children's, and one that reads a child that
   failed an external check is held, so it can't throw over the child's failure.
-- **Every check runs every time.** `check` and `check-all` return `true` or the failures, and issue nothing. `parse`
-  runs every check again.
+- **Every check runs every time.** `parse` and `parse-all` run every check of every draft in the tree. There is no
+  way to run some of them.
+- **Immutable values only.** Every field of every draft in the tree is walked, keys included, except child fields,
+  whose drafts are walked as their own nodes. Accepted: nil; `Boolean`, `Character`, `String`, keywords, symbols,
+  `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`, `Float`, `BigInt`, `Ratio`, and `BigDecimal` and
+  `BigInteger` by exact class, since they can be subclassed; classes; final classes of the `java.time` package; values
+  `parse` issued; and persistent vectors, maps (records and drafts included), sets, lists and queues whose contents
+  pass. Refused: everything else, including lazy and other seqs, since realizing one could run side effects or never
+  end; pass `(vec ...)`. Nesting deeper than 1000 levels is refused too.
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field throws
   `::bad-input`.
-- **`check` with some names.** Children run all their pure checks. A tree fetches and runs external checks only when
-  every pure check in it ran and passed, so a child's external checks may not run.
 - **Failed kinds in a tree.** One tree never holds both: its external checks run only when every pure check in it
   passed. `parse-all` can report both, from different drafts.
 - **Exceptions.** An exception thrown by a check or fetch propagates out of `parse` and stops `parse-all` at that
@@ -151,8 +164,17 @@ of the same class, which for a parsed value would look like proof, and `map->` t
 
 **Proof is in the value.** A value carries the fact that it was checked, in a hidden field that only `parse` sets to
 a private token. A weak identity map of issued values did the same job, but kept that fact apart from the value. The
-field isn't part of the map, so it changes no lookup, equality or printing. It makes a parsed value impossible to
-build by accident, not impossible to forge: see "How far the proof goes".
+field isn't a key, so it changes no lookup or printing. Equality does read it, so a forgery never equals a parsed
+value. The token goes into the value and only a boolean comes out. It makes a parsed value impossible to build by
+accident, not impossible to forge: see "Accepted limits".
+
+**Only immutable values.** A check proves the value it saw. If a field held an atom or an array, the parsed value
+would keep something that can change under the proof. An allowlist of known immutable classes, walked all the way
+down, is simpler to trust than a denylist, which misses what it doesn't name.
+
+**No partial checks.** `check` and `check-all` ran checks without issuing anything, and a subset of names left a tree
+half-proven, which needed its own rules. A failure tree is also truthy, so `(when (pt/check d nil) ...)` read as a
+pass. Only `parse` and `parse-all` remain.
 
 **Only `defparsed` makes types.** The draft type and the parsed type are defined in one form, so the draft type is the
 only one that parses to its parsed type, with no table of claims. Declarations are no longer written by hand as data.
@@ -191,13 +213,15 @@ would throw a `ClassCastException`. Read fields by keyword.
 `clojure -X:test` runs:
 
 - `bank-test`: transfers, payrolls, budgets and payments, against an in-memory bank;
-- `core-test`: each behavior, the proof, and the ways to forge or change a value we know of;
+- `core-test`: each behavior, the proof, mutable values, and the ways to forge or change a value we know of;
 - `defparsed-test`: compile errors, load errors, unknown keys, field names, REPL reloads;
 - `properties-test`: `test.check` properties over random drafts and trees, against a model written by hand;
 - `tree-properties-test`: `test.check` properties over random trees with `:one` and `:many` children, malformed
   children and edits to child fields, against a model of the whole failure map.
 
-Each of these deliberately broken copies of this version fails at least one test: `pt/parsed` ignoring the proof; the
+Each of these deliberately broken copies of this version fails at least one test: the proof field public; a method
+handing the token out; the registry not consulted before asking a value for its proof; equality ignoring the proof;
+the immutability walk shallow, skipping map keys, or accepting seqs; `pt/parsed` ignoring the proof; the
 `->Name` factory kept; the proof in a value's `seq`; a field named `parse-proof` allowed; `defparsed-type` or
 `defdraft-type` public; no checks when a `defparsed` loads; parent checks seeing children built with the token; the
 issued root holding children built without it; types compared by identity; `match` testing with `instance?`; `empty`
@@ -207,7 +231,7 @@ Each of these broken copies of earlier versions failed a test that is still in t
 type; an external check waiting only on its fetches; a truthy return counted as a pass; a tree fetching after a pure
 check failed; tuples not deduplicated; a missing fetch answer allowed; `draft-of` leaving a child parsed; checks or
 fetches seeing children as drafts or as open maps; `:blocked-by` naming one child; `:failed-kinds` missing a kind; a
-grandchild failure not holding the grandparent; `check` on a subset letting a tree fetch; an unknown key returning
+grandchild failure not holding the grandparent; an unknown key returning
 `nil`; a literal `pt/draft` leaving a field out; reserved check names allowed; a map-type method calling a function a
 field can shadow; the depth limit off or missing; `match` binding a value `parse` didn't make.
 
