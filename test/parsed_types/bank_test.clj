@@ -176,6 +176,13 @@
       (is (every? #(instance? TransferDraft %) (:transfers draft))))
     (is (= 25M (:amount (second (:transfers (pt/parse edited))))))))
 
+(deftest a-mutable-value-in-a-child-is-refused-test
+  (testing "every draft in the tree is screened, and the tree fetches nothing"
+    (is (= {:type ::pt/bad-input, :draft "parsed_types.bank_test.TransferDraft", :field :amount}
+           (select-keys (thrown-data #(pt/parse (->PayrollDraft :ada 1 [(->TransferDraft :ada 1 2 (atom 1M))])))
+                        [:type :draft :field])))
+    (is (= [] @fetched))))
+
 ;;; A budget: a tree of one type
 
 (pt/defparsed Budget [name amount parts]

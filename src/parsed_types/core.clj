@@ -639,11 +639,40 @@
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
+(defn- mutable-kind
+  "What `v` is when it is a value that can change after it is checked, or nil. Looks at `v` itself, not inside it.
+  A denylist of the usual mutable holders, so an opaque immutable value still passes."
+  [v]
+  (cond
+    (nil? v)                                        nil
+    (.isArray (class v))                            "a Java array"
+    (instance? clojure.lang.IAtom v)                "an atom"
+    (instance? clojure.lang.IRef v)                 "a reference type"
+    (instance? clojure.lang.Volatile v)             "a volatile"
+    (= "java.util.concurrent.atomic"
+       (.getPackageName (class v)))                 "an atomic value"
+    (and (or (instance? java.util.Collection v) (instance? java.util.Map v))
+         (not (instance? clojure.lang.IPersistentCollection v))) "a mutable Java collection"))
+
+(defn- refuse-mutable!
+  "Throws `::bad-input` when a field of `draft` holds a value that can change after it is checked: the checks would
+  prove a value the parsed value does not keep."
+  [draft values]
+  (doseq [[field v] values
+          :let [kind (mutable-kind v)]
+          :when kind]
+    (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field " holds " kind " (" (.getName (class v))
+                         "), which can change after it is checked. Hold an immutable value: deref the atom, or copy"
+                         " the array or collection into a vector or map.")
+                    {:type ::bad-input, :draft (.getName (class draft)), :field field, :got (.getName (class v))}))))
+
 (defn- start [draft]
-  (let [plan (plan-for draft)]
+  (let [plan   (plan-for draft)
+        ;; every field read once, so the checks and the parsed value see the same values
+        values ((:read-draft plan) draft)]
+    (refuse-mutable! draft values)
     {:draft   draft
-     ;; every field read once, so the checks and the parsed value see the same values
-     :values  ((:read-draft plan) draft)
+     :values  values
      :plan    plan
      :fetched {}
      :failed  {}     ; check name -> failure entry

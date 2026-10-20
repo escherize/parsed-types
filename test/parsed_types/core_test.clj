@@ -257,6 +257,32 @@
       (is (= ::pt/cannot-change (:type (thrown-data #(walk/postwalk identity {:rename [real]})))))
       (is (= ::pt/cannot-change (:type (thrown-data #(walk/prewalk identity [real]))))))))
 
+(deftest mutable-field-values-are-refused-test
+  (testing "a field that holds a value that can change after it is checked is bad input, before any check runs"
+    (doseq [[label v] [["an array" (int-array [1])]
+                       ["an atom" (atom "New")]
+                       ["a ref" (ref "New")]
+                       ["an agent" (agent "New")]
+                       ["a volatile" (volatile! "New")]
+                       ["an atomic value" (java.util.concurrent.atomic.AtomicLong. 1)]
+                       ["a Java list" (java.util.ArrayList. ["New"])]
+                       ["a Java map" (java.util.HashMap. {:a 1})]
+                       ["a Java set" (java.util.HashSet. #{1})]]]
+      (testing label
+        (is (= {:type ::pt/bad-input, :draft "parsed_types.core_test.RenameCardDraft", :field :title
+                :got (.getName (class v))}
+               (thrown-data #(pt/parse (->RenameCardDraft 1 1 v)))))
+        (is (= [] (runs #(thrown-data (fn [] (pt/parse (->RenameCardDraft 1 1 v))))))))))
+  (testing "the message names the field and the fix"
+    (is (= (str "RenameCardDraft: the field :title holds an atom (clojure.lang.Atom), which can change after it is"
+                " checked. Hold an immutable value: deref the atom, or copy the array or collection into a vector or"
+                " map.")
+           (try (pt/parse (->RenameCardDraft 1 1 (atom "New"))) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))))
+  (testing "a denylist, one level deep: persistent collections and opaque values pass, and so does mutability nested
+            inside a field"
+    (is (some? (pt/parse (->OtherDraft {:a [1]} #{1} (Object.)))))
+    (is (some? (pt/parse (->OtherDraft [(atom 1)] {:a (int-array 1)} nil))))))
+
 (deftest error-messages-name-the-fix-test
   (let [real    (pt/parse (->RenameCardDraft 1 1 "New"))
         message (fn [thunk] (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
