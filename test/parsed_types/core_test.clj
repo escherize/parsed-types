@@ -454,3 +454,22 @@
       (let [message (try (pt/parse (->OtherDraft 1 1 v)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]
         (is (str/includes? (str message) fix) (str (class v)))
         (is (some? (pt/parse (->OtherDraft 1 1 (convert v)))) (str (class v)))))))
+
+(pt/defparsed Line [n] (pure ::n-int "n is an integer." [n] (int? n)))
+
+(pt/defparsed Entry [lines x y]
+  (children lines Line)
+  (pure ::x-int "x is an integer." [x] (int? x))
+  (pure ::y-int "y is an integer." [y] (int? y))
+  (pure ::sum-under-x "The lines add up to less than x." [lines x] (< (reduce + (map :n lines)) x))
+  (pure ::x-under-y "x is below y." [x y] (< x y)))
+
+(deftest a-held-check-holds-nothing-test
+  (testing "a check held by a failed child did not run, so a later check that shares a field with it still runs"
+    (is (= {:lines        {0 {::n-int {:doc "n is an integer.", :returned false}}}
+            ::sum-under-x {:doc "The lines add up to less than x.", :blocked-by [[:lines 0]]}
+            ::x-under-y   {:doc "x is below y.", :returned false}}
+           (:failures (thrown-data #(pt/parse (->EntryDraft [(->LineDraft :bad)] 5 1)))))))
+  (testing "while a check that ran and failed holds it"
+    (is (= {::sum-under-x {:doc "The lines add up to less than x.", :returned false, :blocked [::x-under-y]}}
+           (:failures (thrown-data #(pt/parse (->EntryDraft [(->LineDraft 100)] 5 1))))))))

@@ -148,12 +148,14 @@
                                                                     :returned false
                                                                     :blocked  [::source-exists ::destination-exists
                                                                                ::owns-source ::funds-available]}}}
-                          ;; held: it reads transfers, and transfer 1 failed; it holds every later check that
-                          ;; reads transfers
-                          ::some-transfers   {:doc        "A payroll pays someone."
-                                              :blocked-by [[:transfers 1]]
-                                              :blocked    [::no-repeat-payee ::one-source ::one-payer
-                                                           ::covers-total]}}}
+                          ;; each held: it reads transfers, and transfer 1 failed. A held check did not run, so
+                          ;; it holds nothing, and the external check is not run in a tree that failed
+                          ::some-transfers   {:doc "A payroll pays someone.", :blocked-by [[:transfers 1]]}
+                          ::no-repeat-payee  {:doc "No account is paid twice.", :blocked-by [[:transfers 1]]}
+                          ::one-source       {:doc "Every transfer draws on the payroll's account."
+                                              :blocked-by [[:transfers 1]]}
+                          ::one-payer        {:doc "Every transfer is made by the payroll's user."
+                                              :blocked-by [[:transfers 1]]}}}
            (select-keys (thrown-data #(pt/parse (payroll :ada 1  2 10M  3 -5M))) [:failed-kinds :failures])))
     (is (= [] @fetched)))
   (testing "each transfer fits the balance, but together they don't: only the parent can see that"

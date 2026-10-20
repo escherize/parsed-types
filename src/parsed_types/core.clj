@@ -828,7 +828,7 @@
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
 
   Pure checks run in the order written, after the shape checks of the child fields. A pure check is held, not run,
-  when one before it that shares a field failed. A pure check written before one that reads a proper subset of its
+  when one before it that shares a field ran and failed. A held check holds nothing. A pure check written before one that reads a proper subset of its
   fields is a compile error: move the smaller one first.
 
   Write `defparsed` at the top level of a namespace: inside another form it throws `::bad-declaration`.
@@ -922,7 +922,7 @@
       (syntax-error! &form ::rule/pure-check-order
                      (str "the pure check " (:name big) " reads " (mapv symbol (:reads big)) ", and is written before "
                           (:name small) ", which reads only " (mapv symbol (:reads small)) ". Pure checks run in the"
-                          " order written, and a check holds every later one that shares a field with it, so a check"
+                          " order written, and a check that fails holds every later one that shares a field with it, so a check"
                           " on fewer fields goes first. Move " (:name small) " before " (:name big) ".")))
     (when-let [reserved (seq (filter #(= "parsed-types.child" (namespace %)) names))]
       (syntax-error! &form ::rule/reserved-name
@@ -1062,8 +1062,8 @@
 (defn- compile-plan
   "Order the checks, and work out what each waits on.
 
-  - A pure check waits on every pure check before it that shares a field with it. The shape checks of the child
-    fields come first, so a check that reads a child field waits on its shape. It also waits on the children's own
+  - A pure check waits on every pure check before it that shares a field with it, and is held when one of those ran
+    and failed: one held in turn holds nothing. The shape checks of the child fields come first, so a check that reads a child field waits on its shape. It also waits on the children's own
     pure checks, through [[failed-children]].
   - A fetch waits on every pure check, so malformed input never reads the world.
   - An external check waits on its fetches and on every pure check.
@@ -1328,8 +1328,7 @@
      :plan    plan
      :fetched {}
      :failed  {}     ; check name -> failure entry
-     :order   []     ; failed check names, in the order they failed
-     :roots   {}}))  ; blocked check or fetch name -> the failed checks that blocked it
+     :order   []}))  ; failed check names, in the order they failed
 
 (defn- child-path [path field i]
   (if i (conj path field i) (conj path field)))
@@ -1380,17 +1379,18 @@
       (vec (rseq pre)))))
 
 (defn- roots-of
-  "The failed checks behind `prereqs`, or nil when none failed."
+  "The checks among `prereqs` that ran and failed, or nil. A held check did not run, so it holds nothing."
   [st prereqs]
-  (seq (distinct (mapcat #(if (contains? (:failed st) %) [%] (get-in st [:roots %])) prereqs))))
+  (seq (filter #(contains? (get-in st [:failed %]) :returned) prereqs)))
 
-(defn- block [st n roots check?]
-  (cond-> (assoc-in st [:roots n] roots)
-    check? (as-> st (reduce #(update-in %1 [:failed %2 :blocked] (fnil conj []) n) st roots))))
+(defn- block
+  "`st` with the check `n` listed under `:blocked` of each of `roots`, the checks that held it."
+  [st n roots]
+  (reduce #(update-in %1 [:failed %2 :blocked] (fnil conj []) n) st roots))
 
 (defn- run-check [st {n :name, :keys [prereqs f doc reads fetches], :as c}]
   (if-let [roots (roots-of st prereqs)]
-    (block st n roots true)
+    (block st n roots)
     (let [result (apply f (concat (map #(get (if (:shape? c) (:values st) (:inputs st)) %) reads)
                                   (map #(get-in st [:fetched %]) fetches)))]
       (if (true? result)
@@ -1453,10 +1453,16 @@
 
 (defn- external-phase
   "Run every node's external checks, children before parents, holding a parent's checks over children that failed
-  theirs. A node in a tree that failed a pure check runs them only to record what its own failures blocked."
+  theirs. In a tree that failed a pure check, none runs: each is only listed under the pure checks of its node that
+  failed."
   [nodes]
-  (first (reduce (fn [[out bad] {:keys [tree path child-paths world? failed], :as st}]
-                   (let [st   (if (or world? (seq failed)) (run-checks st (get-in st [:plan :external]) bad) st)
+  (first (reduce (fn [[out bad] {:keys [tree path child-paths world?], :as st}]
+                   (let [externals (get-in st [:plan :external])
+                         st        (if world?
+                                     (run-checks st externals bad)
+                                     (reduce (fn [st {n :name, :keys [prereqs]}]
+                                               (if-let [roots (roots-of st prereqs)] (block st n roots) st))
+                                             st externals))
                          bad? (or (seq (:failed st)) (some #(bad [tree %]) (apply concat (vals child-paths))))]
                      [(conj out st) (cond-> bad bad? (conj [tree path]))]))
                  [[] #{}]

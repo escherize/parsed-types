@@ -30,7 +30,7 @@ The README covers how to use the library; this page covers what it promises and 
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | The checks see the values that are issued | Each field is read once, from the type's own Java field, by a fn `defparsed` generates. The issued value holds the same field values the checks saw | `parse-matches-the-tree-model` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`, `parse-matches-the-tree-model`: each against a model written by hand, down to every path, `:blocked-by`, `:blocked` and `:failed-kinds` |
-| Pure checks run in the order written, and a failure holds the later checks on its fields | After the shape checks of the child fields, each pure check runs in its written place, held when a pure check before it that shares a field failed. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `parse-matches-the-model`, `parse-matches-the-tree-model` |
+| Pure checks run in the order written, and a failure holds the later checks on its fields | After the shape checks of the child fields, each pure check runs in its written place, held when a pure check before it that shares a field ran and failed. A held check didn't run, so it holds nothing and lists nothing under `:blocked`. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `a-held-check-holds-nothing-test`, `parse-matches-the-model`, `parse-matches-the-tree-model` |
 | Malformed input never reaches a fetch or an external check, anywhere in a tree | Fetches and external checks wait on every pure check in the tree | `nothing-touches-the-world-until-every-pure-check-passes`, `nothing-in-a-failing-tree-fetches` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | Tuples gathered across the call and deduplicated; a missing answer throws `::bad-fetch` | `parse-all-fetches-once-with-each-distinct-tuple`, `fetches-see-checked-values-and-run-once`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Fetches grouped by declaration | `parse-all-agrees-with-parse-across-declarations`, `parse-all-agrees-with-parse-on-trees` |
@@ -178,6 +178,10 @@ until the `defparsed` is fixed and re-evaluated.
 two are not equal. A parent's pure checks run
   before any external check. A parent's external checks run after the children's, and one that reads a child that
   failed an external check is held, so it can't throw over the child's failure.
+- **What a held check reports.** A held check didn't run, so it has no `:returned`, and it holds no other check: a
+  later check that shares a field with it runs, unless a check that ran and failed holds it too. In a tree that
+  failed a pure check, no external check runs. Each is listed under `:blocked` of the pure checks of its node that
+  ran and failed, and under none when every failure in its node was held.
 - **Every check runs every time.** `parse` and `parse-all` run every check of every draft in the tree. There is no
   way to run some of them.
 - **Immutable values only.** Every field of every draft in the tree is walked, keys included, except child fields,

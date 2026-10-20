@@ -162,7 +162,7 @@
 
 (defn- model
   "`{:failed-kinds :failures}`, the failures as `{[path check] entry}`, or `:ok`. A held check failed nothing itself,
-  so its kind is not counted."
+  so its kind is not counted, and it holds no other check."
   [crate]
   (let [nodes    (crate-nodes crate)
         failing  (filter (comp seq :failures) nodes)]
@@ -176,8 +176,11 @@
                              :let  [failed (set (map first failures))]
                              [n e] failures]
                          [[path n]
+                          ;; a held check did not run, so it holds nothing
                           (assoc (entry e) :blocked
-                                 (into (set (remove failed (get blocks n #{}))) (map first externals)))]))}
+                                 (if (contains? e :blocked-by)
+                                   #{}
+                                   (into (set (remove failed (get blocks n #{}))) (map first externals))))]))}
       (let [ext-failures (for [{:keys [path externals]} nodes
                                [n e kind ok?] externals
                                :when (not ok?)]

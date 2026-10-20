@@ -28,6 +28,8 @@
         (log! ::b-short)
         (or (<= (count (str b)) 3) {:length (count (str b))}))
   (pure ::a-below-c "a is below c." [a c] (log! ::a-below-c) (< a c))
+  ;; shares c with ::c-int and ::a-below-c, and nothing with ::a-int: held only when one of those two ran and failed
+  (pure ::user-3-c-even "User 3's c is even." [user-id c] (log! ::user-3-c-even) (or (not= 3 user-id) (even? c)))
   (external ::may-use-row "User 1 may use the row for a."
             [user-id] [row ::row]
             (log! ::may-use-row)
@@ -40,7 +42,7 @@
 
 (def ^:private fields [:user-id :a :b :c])
 
-(def ^:private pure-names #{::a-int ::b-string ::c-int ::b-short ::a-below-c})
+(def ^:private pure-names #{::a-int ::b-string ::c-int ::b-short ::a-below-c ::user-3-c-even})
 
 (def ^:private touches-world? #{::may-use-row ::user-known ::row})
 
@@ -173,10 +175,15 @@
                     (or (failed ::a-int) (failed ::c-int)) :blocked
                     (< a c)                                :passed
                     :else                                  :failed)
+        ;; a held check did not run, so it holds nothing: ::a-below-c held by ::a-int does not hold ::user-3-c-even
+        even-held (or (failed ::c-int) (= :failed relation))
         failed    (cond-> failed
-                    (= :failed relation) (assoc ::a-below-c {:doc "a is below c.", :returned false}))
+                    (= :failed relation) (assoc ::a-below-c {:doc "a is below c.", :returned false})
+                    (and (not even-held) (= 3 user-id) (not (even? c)))
+                    (assoc ::user-3-c-even {:doc "User 3's c is even.", :returned false}))
         blocked   (fn [n] (vec (concat (when (= ::b-string n) [::b-short])
                                        (when (and (= :blocked relation) (#{::a-int ::c-int} n)) [::a-below-c])
+                                       (when (#{::c-int ::a-below-c} n) [::user-3-c-even])
                                        externals)))]
     (if (seq failed)
       {:type         ::pt/invalid
