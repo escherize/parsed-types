@@ -96,18 +96,12 @@
            (runs #(pt/parse (->RenameCardDraft 1 1 "New"))))))
   (testing "a failed pure check holds up every fetch and external check, even one that does not read its field"
     (is (= [::card-id-positive ::title-not-blank]
-           (runs #(pt/check (->RenameCardDraft 1 -1 "New") nil))))
+           (runs #(thrown-data (fn [] (pt/parse (->RenameCardDraft 1 -1 "New")))))))
     (is (= [::card-id-positive ::title-not-blank]
-           (runs #(pt/check (->RenameCardDraft 1 1 " ") nil))))))
+           (runs #(thrown-data (fn [] (pt/parse (->RenameCardDraft 1 1 " ")))))))))
 
-(deftest check-test
+(deftest assoc-test
   (let [draft (->RenameCardDraft 1 1 "New")]
-    (testing "check runs what it names and what that waits on"
-      (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id]
-             (runs #(is (true? (pt/check draft [::title-not-the-card-id])))))))
-    (testing "a check issues nothing: parse runs every check again"
-      (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
-             (runs #(pt/parse draft)))))
     (testing "assoc builds a new draft"
       (let [renamed (assoc draft :title "Newer")]
         (is (= (->RenameCardDraft 1 1 "Newer") renamed))
@@ -149,7 +143,7 @@
 (deftest a-draft-must-be-a-draft-type-test
   (testing "anything but a draft of a type defparsed defined is refused, even one that implements DraftValue"
     (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (reify parsed_types.core.DraftValue))))))
-    (is (= ::pt/bad-input (:type (thrown-data #(pt/check (reify parsed_types.core.DraftValue) nil)))))))
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse-all [(reify parsed_types.core.DraftValue)])))))))
 
 (deftest parsed-refuses-anything-parse-did-not-issue-test
   (let [real (pt/parse (->RenameCardDraft 1 1 "New"))]

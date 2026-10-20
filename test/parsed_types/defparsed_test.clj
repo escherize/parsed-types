@@ -223,7 +223,7 @@
           (is (every? #(pt/parsed? (class (pt/parse new-kid)) %) (:kids p)))))
       (testing "a draft of the old class still parses, with the plan it was defined with"
         (is (some? (pt/parse parent)))
-        (is (true? (pt/check old-kid nil))))
+        (is (some? (pt/parse old-kid))))
       (testing "a sink compiled before the reload accepts values of the new class"
         (is (= {:n 2} (into {} (sink (pt/parse new-kid)))))
         (is (= ::pt/not-parsed (:type (try (sink new-kid) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))))))))

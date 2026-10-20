@@ -139,9 +139,11 @@
                 :failed-kinds (apply set/union (keep :failed-kinds each))
                 :failures     failures})))))
 
+(declare model)
+
 (defspec parse-all-fetches-once-with-each-distinct-tuple 300
   (prop/for-all [drafts (gen/vector gen-draft 0 8)]
-    (let [pure-ok? (fn [d] (true? (pt/check (fresh d) (vec pure-names))))
+    (let [pure-ok? (fn [d] (not= #{:pure} (:failed-kinds (model d))))
           expected (into [] (comp (filter pure-ok?) (map (fn [d] [(:a d)])) (distinct)) drafts)]
       (reset! ran [])
       (outcome #(pt/parse-all (mapv fresh drafts)))

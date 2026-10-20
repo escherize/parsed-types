@@ -602,8 +602,7 @@
      :pure            (vec (sort-by (comp count reads-set) pure'))
      :fetches         (vec fetches')
      :external        (vec external')
-     :checks-by-name  (into {} (map (juxt :name identity)) (concat pure' external'))
-     :fetches-by-name (into {} (map (juxt :name identity)) fetches')}))
+     :checks-by-name  (into {} (map (juxt :name identity)) (concat pure' external'))}))
 
 (defn- describe
   "`x` for an error message: nil, a plain map, or a value of its type."
@@ -640,31 +639,12 @@
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
-(defn- needed
-  "`names` and everything they wait on, transitively."
-  [plan names]
-  (loop [todo (vec names), seen #{}]
-    (if-let [[n & more] (seq todo)]
-      (if (seen n)
-        (recur (vec more) seen)
-        (let [x (or ((:checks-by-name plan) n)
-                    ((:fetches-by-name plan) n)
-                    (bad-declaration! (:draft-class plan)
-                                      (str "no check or fetch is named " (pr-str n) ". Name one of "
-                                           (vec (sort (concat (keys (:checks-by-name plan))
-                                                              (keys (:fetches-by-name plan)))))
-                                           ", or pass nil to run every check.")
-                                      {:check n}))]
-          (recur (into (vec more) (:prereqs x)) (conj seen n))))
-      seen)))
-
-(defn- start [draft names]
+(defn- start [draft]
   (let [plan (plan-for draft)]
     {:draft   draft
      ;; every field read once, so the checks and the parsed value see the same values
      :values  ((:read-draft plan) draft)
      :plan    plan
-     :needed  (needed plan (or names (keys (:checks-by-name plan))))
      :fetched {}
      :failed  {}     ; check name -> failure entry
      :order   []     ; failed check names, in the order they failed
@@ -685,18 +665,17 @@
   (throw (ex-info message {:type ::bad-input, :max-depth max-depth, :max-nodes max-nodes})))
 
 (defn- flatten-tree
-  "The drafts of the tree under `root`, children before parents, each with its `:path` from the root. `names` applies
-  to the root; every child runs all its checks."
-  [tree root names]
-  (loop [stack (list [root [] names 1]), pre []]
-    (if-let [[draft path nm depth] (first stack)]
+  "The drafts of the tree under `root`, children before parents, each with its `:path` from the root."
+  [tree root]
+  (loop [stack (list [root [] 1]), pre []]
+    (if-let [[draft path depth] (first stack)]
       (let [_    (when (< max-depth depth)
                    (too-big! (str "The tree is deeper than " max-depth " levels, counting the root. Parse a shallower"
                                   " tree.")))
             _    (when (<= max-nodes (count pre))
                    (too-big! (str "The tree holds more than " max-nodes " drafts, counting a draft each time it"
                                   " appears. Parse it in smaller parts.")))
-            st   (assoc (start draft nm) :tree tree :path path)
+            st   (assoc (start draft) :tree tree :path path)
             kids (for [[field {:keys [kind type]}] (get-in st [:plan :children])
                        :let  [v (get-in st [:values field])]
                        :when (children-of-type? kind type v)
@@ -705,7 +684,7 @@
             st   (assoc st :child-paths (reduce (fn [m [field p]] (update m field (fnil conj []) p)) {} kids))]
         ;; pushing the children in order pops the last first, so the reverse of this pre-order is a post-order with
         ;; the children in order
-        (recur (into (rest stack) (map (fn [[_ p d]] [d p nil (inc depth)])) kids) (conj pre st)))
+        (recur (into (rest stack) (map (fn [[_ p d]] [d p (inc depth)])) kids) (conj pre st)))
       (vec (rseq pre)))))
 
 (defn- roots-of
@@ -749,7 +728,7 @@
                   (update :order conj n))
               (run-check st c)))
           st
-          (filter (comp (:needed st) :name) checks)))
+          checks))
 
 (defn- run-pure [st bad]
   (run-checks st (get-in st [:plan :pure]) bad))
@@ -796,8 +775,7 @@
   ;; only nodes of trees whose every pure check passed reach the world, so no fetch here waits on a failure
   (let [wanted (for [[i st] (map-indexed vector sts)
                      :when  (:world? st)
-                     fd     (get-in st [:plan :fetches])
-                     :when  ((:needed st) (:name fd))]
+                     fd     (get-in st [:plan :fetches])]
                  {:i i, :fd fd})
         tuple  (fn [{:keys [i fd]}] (mapv #(get (:inputs (nth sts i)) %) (:reads fd)))]
     (reduce
@@ -821,13 +799,9 @@
 
 (defn- run-all
   "Run the checks of every draft, and of every draft under it, and return one vector of nodes per draft."
-  [drafts names]
-  (let [nodes        (pure-phase (into [] (comp (map-indexed (fn [i d] (flatten-tree i d names))) cat) drafts))
-        unproven     (into #{}
-                           (comp (filter (fn [{:keys [failed needed plan]}]
-                                           (or (seq failed) (not-every? (comp needed :name) (:pure plan)))))
-                                 (map :tree))
-                           nodes)
+  [drafts]
+  (let [nodes        (pure-phase (into [] (comp (map-indexed (fn [i d] (flatten-tree i d))) cat) drafts))
+        unproven     (into #{} (comp (filter (comp seq :failed)) (map :tree)) nodes)
         ;; nothing in a tree touches the world until every pure check in it has run and passed
         nodes        (mapv #(assoc % :world? (not (unproven (:tree %)))) nodes)
         nodes        (fetch-phase nodes)
@@ -888,20 +862,6 @@
 
 ;;; ------------------------------------------------ API ------------------------------------------------
 
-(defn check-all
-  "Run the checks named in `names` (nil for all) against each draft, with what they wait on, and every pure check of
-  every draft under it. A tree fetches and runs external checks only when every pure check in it ran and passed, so
-  with a subset of `names` the children's external checks may not run. Returns a vector aligned with `drafts`: `true`,
-  or the failures, shaped like the tree. Each fetch is called once per declaration for all the drafts. Issues
-  nothing: a pass here is not proof, so [[parse]] runs every check again."
-  [drafts names]
-  (mapv #(or (tree-failures %) true) (run-all drafts names)))
-
-(defn check
-  "[[check-all]] for one draft."
-  [draft names]
-  (first (check-all [draft] names)))
-
 (defn assoc-draft
   "`draft` with `field` set to `v`: a new draft. This is what `assoc` on a draft does; call `assoc`."
   [draft field v]
@@ -916,7 +876,7 @@
   like [[parse]]'s, and `:failed-kinds` holds the kinds of check that failed in any of them. Exceptions out of a check
   or fetch propagate, so an external check that throws stops the call."
   [drafts]
-  (let [trees    (run-all drafts nil)
+  (let [trees    (run-all drafts)
         failures (into (sorted-map) (keep-indexed (fn [i nodes] (some->> (tree-failures nodes) (vector i)))) trees)]
     (when (seq failures)
       (let [failing (map #(nth trees %) (keys failures))]
@@ -938,7 +898,7 @@
 
   Exceptions out of a check or fetch propagate."
   [draft]
-  (let [nodes (first (run-all [draft] nil))]
+  (let [nodes (first (run-all [draft]))]
     (when-let [failures (tree-failures nodes)]
       (invalid! (.getSimpleName ^Class (:parses-to (:plan (peek nodes)))) (failed-names nodes) nodes
                 {:draft (.getName (class draft)), :failures failures}))

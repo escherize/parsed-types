@@ -214,11 +214,6 @@
            (:failures (thrown-data #(pt/parse (budget "company" 100M
                                                       (budget "eng" 60M (budget "infra" 50M) (budget "tools" 30M))))))))))
 
-(deftest check-on-a-subset-does-not-touch-the-world-test
-  (testing "checking some of a payroll's pure checks leaves the rest unproven, so nothing in the tree fetches"
-    (is (true? (pt/check (payroll :ada 1  2 10M) [::no-repeat-payee])))
-    (is (= [] @fetched))))
-
 ;;; Grandchildren, and the limits on a tree's size
 
 (pt/defparsed Leaf [amount]
