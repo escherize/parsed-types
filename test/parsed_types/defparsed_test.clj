@@ -327,8 +327,8 @@
     (is (identical? d (conj d nil)))
     (is (thrown? IllegalArgumentException (conj d [:amount 5M :extra])))))
 
-(deftest a-field-cannot-shadow-the-declaration-test
-  (testing "a field named like the generated declaration var does not replace the checks"
+(deftest a-field-cannot-replace-the-checks-test
+  (testing "a field named like a declaration, holding one, is only a field: the checks stay those defparsed wrote"
     (eval-here '(pt/defparsed Shadow [ShadowDraft-declaration]
                   (pure ::never "Never passes." [ShadowDraft-declaration] false)))
     (let [d ((resolve 'parsed-types.defparsed-test/->ShadowDraft) {:parses-to (resolve 'parsed-types.defparsed-test/Shadow)
