@@ -102,9 +102,43 @@
     (is (= {:x 2, :y 2} (into {} (pt/parse (->PointDraft 2 2)))))
     (is (= #{:pure} (:failed-kinds (try (pt/parse (->PointDraft 1 :y)) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
-(pt/defparsed-type Other [x z])
+(pt/defparsed Other [x z])
 
 (pt/defsum Shape [Point Other])
+
+(deftest only-defparsed-makes-types-test
+  (testing "the macros that defined a parsed type or a draft type alone are private, so calling them does not compile"
+    (is (re-find #"defdraft-type is not public" (str (compile-error '(pt/defdraft-type HandDraft [a] {})))))
+    (is (re-find #"defparsed-type is not public" (str (compile-error '(pt/defparsed-type Hand [a])))))))
+
+(defn- eval-here [form]
+  (binding [*ns* (the-ns 'parsed-types.defparsed-test)] (eval form)))
+
+(defn- load-error
+  "The ex-data and message of the error loading `form` in this namespace, or nil when it loads."
+  [form]
+  (try (binding [*ns* (the-ns 'parsed-types.defparsed-test)] (eval form)) nil
+       (catch Throwable e
+         (let [e (if (ex-data e) e (ex-cause e))] [(ex-data e) (ex-message e)]))))
+
+(deftest declaration-errors-at-load-test
+  (testing "what defparsed cannot see when it expands throws ::bad-declaration when the form loads, before any parse"
+    (doseq [[label form re]
+            [["a fetch that is not a fn"
+              '(pt/defparsed Loaded [a] (external ::c "d" [] [r ::f] (some? r)) (fetch ::f [a] 42))
+              #"the fetch :parsed-types.defparsed-test/f is 42, not a fn"]
+             ["a child type that is not a parsed type"
+              '(pt/defparsed Loaded [a] (child a String))
+              #"the child field :a holds java.lang.String, which is not a type defined with defparsed"]]]
+      (testing label
+        (let [[data message] (load-error form)]
+          (is (= ::pt/bad-declaration (:type data)))
+          (is (re-find re (str message)))))))
+  (testing "a pure check that closes over a local: defparsed inside a let, which compiles once the type exists"
+    (eval-here '(pt/defparsed Guarded [a]))
+    (let [[data message] (load-error '(let [x 1] (pt/defparsed Guarded [a] (pure ::c "d" [a] (= a x)))))]
+      (is (= ::pt/bad-declaration (:type data)))
+      (is (re-find #"the pure check :parsed-types.defparsed-test/c closes over locals \[x\]" (str message))))))
 
 (deftest match-compile-errors-test
   (doseq [[label form re]
@@ -170,9 +204,6 @@
 
 ;;; REPL reloads
 
-(defn- eval-here [form]
-  (binding [*ns* (the-ns 'parsed-types.defparsed-test)] (eval form)))
-
 (defn- thrown [thunk]
   (try (thunk) nil
        (catch clojure.lang.ExceptionInfo e [(ex-message e) (ex-data e)])))
@@ -186,10 +217,8 @@
     (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
     (let [new-kid ((resolve 'parsed-types.defparsed-test/->KidDraft) 2)]
       (testing "after the child type is re-evaluated, the parent says it is stale, for the old child and the new"
-        (doseq [[label thunk] [["the old child" #(pt/parse parent)]
-                               ["the new child" #(pt/parse ((resolve 'parsed-types.defparsed-test/->ParentDraft)
-                                                            [new-kid]))]
-                               ["check" #(pt/check parent nil)]]]
+        (doseq [[label thunk] [["the new child" #(pt/parse ((resolve 'parsed-types.defparsed-test/->ParentDraft)
+                                                            [new-kid]))]]]
           (testing label
             (is (= ["Parent was defined against an older Kid. Re-evaluate the defparsed for Parent."
                     {:type   ::pt/stale-type
@@ -197,7 +226,8 @@
                      :field  :kids
                      :child  "parsed_types.defparsed_test.Kid"}]
                    (thrown thunk))))))
-      (testing "a draft of the old class does not stop the new class from parsing"
+      (testing "a draft of the old class still parses with its own plan, and the new class parses too"
+        (is (some? (pt/parse parent)))
         (is (some? (pt/check old-kid nil)))
         (is (some? (pt/parse new-kid))))
       (testing "re-evaluating the parent makes it accept the new child"

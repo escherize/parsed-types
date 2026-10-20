@@ -14,50 +14,31 @@
 
 (def ^:private writable-card-ids #{1 2})
 
-(pt/defparsed-type RenameCard [user-id card-id title])
+(defn- card-rows [arg-tuples]
+  (log! [::card arg-tuples])
+  (into {} (map (fn [[id :as t]] [t {:id id, :writable? (contains? writable-card-ids id)}])) arg-tuples))
 
-(def ^:private rename-card-declaration
-  {:parses-to RenameCard
-   :checks    [{:name  ::card-id-positive
-                :doc   "The card id is a positive integer."
-                :kind  :pure
-                :reads [:card-id]
-                :f     (fn [card-id] (log! ::card-id-positive) (pos-int? card-id))}
-               {:name  ::title-not-blank
-                :doc   "The title is a non-blank string."
-                :kind  :pure
-                :reads [:title]
-                :f     (fn [title]
-                         (log! ::title-not-blank)
-                         (or (and (string? title) (not (str/blank? title)))
-                             {:title title}))}
-               {:name  ::title-not-the-card-id
-                :doc   "The title is not the card id."
-                :kind  :pure
-                :reads [:card-id :title]
-                :f     (fn [card-id title] (log! ::title-not-the-card-id) (not= (str card-id) title))}
-               {:name    ::may-write-card
-                :doc     "User 1 may write the card."
-                :kind    :external
-                :reads   [:user-id]
-                :fetches [::card]
-                :f       (fn [user-id card] (log! ::may-write-card) (and (= 1 user-id) (:writable? card)))}]
-   :fetches   [{:name  ::card
-                :reads [:card-id]
-                :f     (fn [arg-tuples]
-                         (log! [::card arg-tuples])
-                         (into {} (map (fn [[id :as t]] [t {:id id, :writable? (contains? writable-card-ids id)}]))
-                               arg-tuples))}]})
+(pt/defparsed RenameCard [user-id card-id title]
+  (pure ::card-id-positive "The card id is a positive integer."
+        [card-id]
+        (log! ::card-id-positive)
+        (pos-int? card-id))
+  (pure ::title-not-blank "The title is a non-blank string."
+        [title]
+        (log! ::title-not-blank)
+        (or (and (string? title) (not (str/blank? title)))
+            {:title title}))
+  (pure ::title-not-the-card-id "The title is not the card id."
+        [card-id title]
+        (log! ::title-not-the-card-id)
+        (not= (str card-id) title))
+  (external ::may-write-card "User 1 may write the card."
+            [user-id] [card ::card]
+            (log! ::may-write-card)
+            (and (= 1 user-id) (:writable? card)))
+  (fetch ::card [card-id] card-rows))
 
-(pt/defdraft-type RenameCardDraft [user-id card-id title]
-  rename-card-declaration)
-
-(pt/defparsed-type Other [user-id card-id title])
-
-(def ^:private other-declaration {:parses-to Other, :checks []})
-
-(pt/defdraft-type OtherDraft [user-id card-id title]
-  other-declaration)
+(pt/defparsed Other [user-id card-id title])
 
 (defn- thrown-data [thunk]
   (try (thunk) nil
@@ -163,85 +144,10 @@
                                         (->RenameCardDraft 1 3 "b")
                                         (->RenameCardDraft 1 -1 "c")]))))))
 
-;; The declaration under test. Each one is a new map, so each is planned afresh.
-(def ^:private bad-declaration (atom nil))
-
-(pt/defparsed-type BadParsed [a])
-(pt/defparsed-type WrongFields [b])
-
-(pt/defdraft-type BadDraft [a]
-  @bad-declaration)
-
-(deftest declaration-errors-test
-  (let [x 1]
-    (doseq [[label decl]
-            [["no :parses-to"
-              {:checks []}]
-             ["a :parses-to that is not a parsed type"
-              {:parses-to String, :checks []}]
-             ["a :parses-to that is a record, which assoc would change"
-              {:parses-to BadDraft, :checks []}]
-             ["a parsed type with other fields"
-              {:parses-to WrongFields, :checks []}]
-             ["a check that closes over a local"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (fn [a] (= a x))}]}]
-             ["a check built with constantly"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (constantly true)}]}]
-             ["a check built with partial"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (partial = 1)}]}]
-             ["a check built with comp"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (comp boolean pos-int?)}]}]
-             ["a check whose :f is a keyword, not a fn"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f :a}]}]
-             ["a check with no :f"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a]}]}]
-             ["an unqualified name"
-              {:parses-to BadParsed, :checks [{:name :c, :doc "d", :kind :pure, :reads [:a], :f (fn [_] true)}]}]
-             [":reads that is not a vector"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads :a, :f (fn [_] true)}]}]
-             [":reads that names a field twice"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a :a], :f (fn [_ _] true)}]}]
-             ["a type another draft parses to"
-              {:parses-to RenameCard, :checks []}]
-             ["a child field the draft does not have"
-              {:parses-to BadParsed, :checks [], :children {:b {:kind :many, :type BadParsed}}}]
-             ["a child that is not {:kind :type}"
-              {:parses-to BadParsed, :checks [], :children {:a {:kind :lots, :type BadParsed}}}]
-             ["a check built with memoize"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (memoize pos-int?)}]}]
-             ["a field the draft does not have"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:b], :f (fn [_] true)}]}]
-             ["no :doc"
-              {:parses-to BadParsed, :checks [{:name ::c, :kind :pure, :reads [:a], :f (fn [_] true)}]}]
-             ["no :kind"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :reads [:a], :f (fn [_] true)}]}]
-             ["a pure check that fetches"
-              {:parses-to BadParsed
-               :checks    [{:name ::c, :doc "d", :kind :pure, :fetches [::f], :f (fn [_] true)}]
-               :fetches   [{:name ::f, :reads [], :f (fn [_] {})}]}]
-             ["an undeclared fetch"
-              {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :external, :fetches [::f], :f (fn [_] true)}]}]
-             ["a name used twice"
-              {:parses-to BadParsed
-               :checks    [{:name ::c, :doc "d", :kind :pure, :f (fn [] true)}
-                           {:name ::c, :doc "d", :kind :pure, :f (fn [] true)}]}]]]
-      (testing label
-        (reset! bad-declaration decl)
-        (is (= ::pt/bad-declaration (:type (thrown-data #(pt/parse (->BadDraft 1))))))))))
-
-(pt/defdraft-type BadDraft2 [a]
-  @bad-declaration)
-
-(deftest shared-declaration-test
-  (testing "two draft types may not share one declaration: the second would parse to a type the first owns"
-    (reset! bad-declaration {:parses-to BadParsed, :checks []})
-    (pt/parse (->BadDraft 1))
-    (is (re-find #"BadParsed is parsed from another draft type"
-                 (ex-message (try (pt/parse (->BadDraft2 1)) (catch clojure.lang.ExceptionInfo e e)))))))
-
 (deftest a-draft-must-be-a-draft-type-test
-  (testing "anything but a type defparsed or defdraft-type made is refused"
-    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (reify pt/Draft (declaration [_] rename-card-declaration)))))))))
+  (testing "anything but a draft of a type defparsed defined is refused, even one that implements DraftValue"
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (reify parsed_types.core.DraftValue))))))
+    (is (= ::pt/bad-input (:type (thrown-data #(pt/check (reify parsed_types.core.DraftValue) nil)))))))
 
 (deftest parsed-refuses-anything-parse-did-not-issue-test
   (let [real (pt/parse (->RenameCardDraft 1 1 "New"))]
@@ -271,81 +177,34 @@
     (testing "the draft type is a record, and the parse is still the only way to the parsed one"
       (is (= ::pt/cannot-change (:type (thrown-data #(assoc real :card-id 3))))))))
 
-(deftest extend-cannot-replace-the-checks-test
-  (testing "Clojure refuses to extend a draft to Draft when it implements it inline, so its checks cannot be emptied"
-    (is (thrown-with-msg? IllegalArgumentException #"already directly implements"
-                          (extend-type RenameCardDraft
-                            pt/Draft
-                            (declaration [_] {:parses-to RenameCard, :checks []}))))))
-
-(pt/defparsed-type Claimed [a])
-
-(def ^:private claim-a-declaration {:parses-to Claimed, :checks []})
-(def ^:private claim-b-declaration {:parses-to Claimed, :checks []})
-
-(pt/defdraft-type ClaimADraft [a]
-  claim-a-declaration)
-
-(pt/defdraft-type ClaimBDraft [a]
-  claim-b-declaration)
-
-(deftest one-draft-type-per-parsed-type-test
-  (testing "a second draft type with the same fields may not parse to a type another already parses to"
-    (is (pt/parsed? Claimed (pt/parse (->ClaimADraft 1))))
-    (is (re-find #"Claimed is parsed from another draft type"
-                 (ex-message (try (pt/parse (->ClaimBDraft 1)) (catch clojure.lang.ExceptionInfo e e)))))))
-
-(pt/defparsed-type Honest [a])
-
-(def ^:private lying-declaration
-  {:parses-to Honest
-   :checks    [{:name ::a-positive, :doc "a is positive.", :kind :pure, :reads [:a], :f (fn [a] (pos-int? a))}]})
-
 ;; Claims to be a draft, and answers `get` with a value its field does not hold.
 (deftype LyingDraft [a]
   parsed_types.core.DraftValue
   clojure.lang.ILookup
   (valAt [_ k] (when (= :a k) -999))
-  (valAt [_ k not-found] (if (= :a k) -999 not-found))
-  pt/Draft
-  (declaration [_] lying-declaration))
+  (valAt [_ k not-found] (if (= :a k) -999 not-found)))
 
-(deftest fields-are-read-once-from-the-record-test
-  (testing "the checks and the issued value both see the field, not what get answers"
-    (let [parsed (pt/parse (->LyingDraft 5))]
-      (is (= {:a 5} (into {} parsed))))))
+(deftest a-hand-made-draft-type-is-refused-test
+  (testing "a deftype written by hand has no plan, so it parses to nothing"
+    (is (= {:type ::pt/bad-input, :got "parsed_types.core_test.LyingDraft"}
+           (thrown-data #(pt/parse (->LyingDraft 5)))))))
 
-(pt/defparsed-type Closure [a])
-
-(def ^:private fetch-closure-declaration
-  {:parses-to Closure
-   :checks    [{:name ::known, :doc "a is in the db.", :kind :external, :fetches [::row]
-                :f    (fn [row] (some? row))}]
-   :fetches   [{:name  ::row
-                :reads [:a]
-                :f     (let [db {1 :one}] (fn [tuples] (into {} (map (fn [[a :as t]] [t (get db a)])) tuples)))}]})
-
-(pt/defdraft-type ClosureDraft [a]
-  fetch-closure-declaration)
+(pt/defparsed Closure [a]
+  (external ::known "a is in the db." [] [row ::row] (some? row))
+  (fetch ::row [a] (let [db {1 :one}] (fn [tuples] (into {} (map (fn [[id :as t]] [t (get db id)])) tuples)))))
 
 (deftest a-fetch-may-close-over-a-local-test
   (testing "a fetch reads the world, so it may hold a database handle; only pure checks must close over nothing"
     (is (= {:a 1} (into {} (pt/parse (->ClosureDraft 1)))))
     (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (->ClosureDraft 2))))))))
 
-(deftest a-hand-written-declaration-may-not-use-reserved-names-test
-  (reset! bad-declaration {:parses-to BadParsed
-                           :checks    [{:name :parsed-types.child/a, :doc "d", :kind :pure, :reads [:a], :f (fn [_] true)}]})
-  (is (re-find #"reserved for child-field checks"
-               (ex-message (try (pt/parse (->BadDraft 1)) (catch clojure.lang.ExceptionInfo e e))))))
-
 (deftest error-messages-name-the-fix-test
   (let [real    (pt/parse (->RenameCardDraft 1 1 "New"))
         message (fn [thunk] (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
     (is (= "RenameCard is a parsed value and cannot be changed with assoc. Use (pt/draft-of x), assoc, then pt/parse."
            (message #(assoc real :title "x"))))
-    (is (= (str "Expected a parsed RenameCard, got a RenameCard that parse did not issue. Build a draft that parses to"
-                " RenameCard and call pt/parse.")
+    (is (= (str "Expected a parsed RenameCard, got a RenameCard that parse did not issue. Build a RenameCardDraft and"
+                " call pt/parse.")
            (message #(pt/parsed RenameCard (->RenameCard 1 1 "New")))))
     (is (= "Expected a parsed RenameCard, got a RenameCardDraft. Call pt/parse on it first."
            (message #(pt/parsed RenameCard (->RenameCardDraft 1 1 "New")))))

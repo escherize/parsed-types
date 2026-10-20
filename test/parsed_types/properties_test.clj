@@ -14,55 +14,26 @@
 
 (defn- log! [x] (swap! ran conj x) true)
 
-(pt/defparsed-type Triple [user-id a b c])
+(defn- rows [arg-tuples]
+  (log! [::row arg-tuples])
+  (into {} (map (fn [[a :as t]] [t {:ok? (even? a)}])) arg-tuples))
 
-(def ^:private triple-declaration
-  {:parses-to Triple
-   :checks    [{:name  ::a-int
-                :doc   "a is an integer."
-                :kind  :pure
-                :reads [:a]
-                :f     (fn [a] (log! ::a-int) (int? a))}
-               {:name  ::b-string
-                :doc   "b is a string."
-                :kind  :pure
-                :reads [:b]
-                :f     (fn [b] (log! ::b-string) (string? b))}
-               {:name  ::c-int
-                :doc   "c is an integer."
-                :kind  :pure
-                :reads [:c]
-                :f     (fn [c] (log! ::c-int) (int? c))}
-               {:name  ::b-short
-                :doc   "b has at most 3 characters."
-                :kind  :pure
-                :reads [:b]
-                ;; same fields as ::b-string, so it runs whatever that returns, and must accept any b
-                :f     (fn [b] (log! ::b-short) (or (<= (count (str b)) 3) {:length (count (str b))}))}
-               {:name  ::a-below-c
-                :doc   "a is below c."
-                :kind  :pure
-                :reads [:a :c]
-                :f     (fn [a c] (log! ::a-below-c) (< a c))}
-               {:name    ::may-use-row
-                :doc     "User 1 may use the row for a."
-                :kind    :external
-                :reads   [:user-id]
-                :fetches [::row]
-                :f       (fn [user-id row] (log! ::may-use-row) (and (= 1 user-id) (:ok? row)))}
-               {:name  ::user-known
-                :doc   "The user is known. An external check with no fetch."
-                :kind  :external
-                :reads [:user-id]
-                :f     (fn [user-id] (log! ::user-known) (contains? #{1 2} user-id))}]
-   :fetches   [{:name  ::row
-                :reads [:a]
-                :f     (fn [arg-tuples]
-                         (log! [::row arg-tuples])
-                         (into {} (map (fn [[a :as t]] [t {:ok? (even? a)}])) arg-tuples))}]})
-
-(pt/defdraft-type TripleDraft [user-id a b c]
-  triple-declaration)
+(pt/defparsed Triple [user-id a b c]
+  (pure ::a-int "a is an integer." [a] (log! ::a-int) (int? a))
+  (pure ::b-string "b is a string." [b] (log! ::b-string) (string? b))
+  (pure ::c-int "c is an integer." [c] (log! ::c-int) (int? c))
+  ;; same fields as ::b-string, so it runs whatever that returns, and must accept any b
+  (pure ::b-short "b has at most 3 characters." [b] (log! ::b-short) (or (<= (count (str b)) 3) {:length (count (str b))}))
+  (pure ::a-below-c "a is below c." [a c] (log! ::a-below-c) (< a c))
+  (external ::may-use-row "User 1 may use the row for a."
+            [user-id] [row ::row]
+            (log! ::may-use-row)
+            (and (= 1 user-id) (:ok? row)))
+  (external ::user-known "The user is known. An external check with no fetch."
+            [user-id]
+            (log! ::user-known)
+            (contains? #{1 2} user-id))
+  (fetch ::row [a] rows))
 
 (def ^:private fields [:user-id :a :b :c])
 
@@ -217,33 +188,30 @@
 
 ;;; Several declarations in one call, sharing a fetch name with different fetches
 
-(pt/defparsed-type Pair [mode a])
+(defn- pos-rows [tuples] (into {} (map (fn [[a :as t]] [t {:ok? (and (int? a) (pos? a))}])) tuples))
 
-(def ^:private pair-row-declaration
-  {:parses-to Pair
-   :checks    [{:name ::pair-ok, :doc "The row for a is ok.", :kind :external, :fetches [::row]
-                :f    (fn [row] (true? (:ok? row)))}]
-   :fetches   [{:name ::row, :reads [:a]
-                :f    (fn [tuples] (into {} (map (fn [[a :as t]] [t {:ok? (and (int? a) (pos? a))}])) tuples))}]})
+(defn- neg-rows [tuples] (into {} (map (fn [[a :as t]] [t {:ok? (and (int? a) (neg? a))}])) tuples))
 
-(def ^:private pair-other-row-declaration
-  {:parses-to Pair
-   :checks    [{:name ::pair-ok, :doc "The row for a is ok.", :kind :external, :fetches [::row]
-                :f    (fn [row] (true? (:ok? row)))}]
-   :fetches   [{:name ::row, :reads [:a]
-                :f    (fn [tuples] (into {} (map (fn [[a :as t]] [t {:ok? (and (int? a) (neg? a))}])) tuples))}]})
+;; Both fetch ::row, differently.
+(pt/defparsed PosPair [a]
+  (external ::pair-ok "The row for a is ok." [] [row ::row] (true? (:ok? row)))
+  (fetch ::row [a] pos-rows))
 
-;; The declaration varies with a field, and both fetch ::row, differently.
-(pt/defdraft-type PairDraft [mode a]
-  (if (= :pos mode) pair-row-declaration pair-other-row-declaration))
+(pt/defparsed NegPair [a]
+  (external ::pair-ok "The row for a is ok." [] [row ::row] (true? (:ok? row)))
+  (fetch ::row [a] neg-rows))
 
 (def ^:private gen-mixed-draft
   (gen/one-of [gen-draft
-               (gen/fmap (fn [[m a]] (->PairDraft m a)) (gen/tuple (gen/elements [:pos :neg]) gen/small-integer))]))
+               (gen/fmap (fn [[positive? a]] (if positive? (->PosPairDraft a) (->NegPairDraft a)))
+                         (gen/tuple gen/boolean gen/small-integer))]))
 
 (defspec parse-all-agrees-with-parse-across-declarations 300
   (prop/for-all [drafts (gen/vector gen-mixed-draft 0 8)]
-    (let [fresh-any (fn [d] (if (instance? TripleDraft d) (fresh d) (->PairDraft (:mode d) (:a d))))
+    (let [fresh-any (fn [d] (cond
+                              (instance? TripleDraft d)  (fresh d)
+                              (instance? PosPairDraft d) (->PosPairDraft (:a d))
+                              :else                      (->NegPairDraft (:a d))))
           each      (mapv #(outcome (fn [] (pt/parse (fresh-any %)))) drafts)
           all       (outcome #(pt/parse-all (mapv fresh-any drafts)))
           failures  (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
@@ -255,28 +223,14 @@
 
 ;;; Trees: a node holds child nodes, and one parse covers them all
 
-(pt/defparsed-type Node [v kids])
+(defn- v-rows [tuples] (log! [::v-row tuples]) (into {} (map (fn [[v :as t]] [t {:v v}])) tuples))
 
-(def ^:private node-declaration
-  {:parses-to Node
-   :children  {:kids {:kind :many, :type Node}}
-   :checks    [{:name ::v-int, :doc "v is an integer.", :kind :pure, :reads [:v], :f (fn [v] (log! ::v-int) (int? v))}
-               {:name  ::kids-below
-                :doc   "Every child's v is below this one's."
-                :kind  :pure
-                :reads [:v :kids]
-                :f     (fn [v kids] (log! ::kids-below) (every? #(< (:v %) v) kids))}
-               {:name    ::v-known
-                :doc     "v is not 13."
-                :kind    :external
-                :fetches [::v-row]
-                :f       (fn [row] (log! ::v-known) (not= 13 (:v row)))}]
-   :fetches   [{:name  ::v-row
-                :reads [:v]
-                :f     (fn [tuples] (log! [::v-row tuples]) (into {} (map (fn [[v :as t]] [t {:v v}])) tuples))}]})
-
-(pt/defdraft-type NodeDraft [v kids]
-  node-declaration)
+(pt/defparsed Node [v kids]
+  (children kids Node)
+  (pure ::v-int "v is an integer." [v] (log! ::v-int) (int? v))
+  (pure ::kids-below "Every child's v is below this one's." [v kids] (log! ::kids-below) (every? #(< (:v %) v) kids))
+  (external ::v-known "v is not 13." [] [row ::v-row] (log! ::v-known) (not= 13 (:v row)))
+  (fetch ::v-row [v] v-rows))
 
 (def ^:private gen-tree
   (gen/recursive-gen (fn [inner]
@@ -359,19 +313,19 @@
 
 ;;; Sums
 
-(pt/defsum TripleOrPair [Triple Pair])
+(pt/defsum TripleOrPair [Triple PosPair])
 
 (defn- which [x]
   (pt/match TripleOrPair x
-    Triple t [:triple (:a t)]
-    Pair   p [:pair (:a p)]))
+    Triple  t [:triple (:a t)]
+    PosPair p [:pair (:a p)]))
 
 (def ^:private gen-candidate
   "A parsed member, a forged member, a draft, or a parsed value of another type."
   (gen/one-of [(gen/fmap (fn [d] [:parsed d]) gen-valid-draft)
-               (gen/fmap (fn [a] [:parsed (->PairDraft :pos a)]) (gen/fmap inc gen/nat))
+               (gen/fmap (fn [a] [:parsed (->PosPairDraft a)]) (gen/fmap inc gen/nat))
                (gen/fmap (fn [d] [:forged d]) gen-any-draft)
-               (gen/fmap (fn [a] [:draft (->PairDraft :pos a)]) gen/small-integer)
+               (gen/fmap (fn [a] [:draft (->PosPairDraft a)]) gen/small-integer)
                (gen/fmap (fn [v] [:other (->NodeDraft v [])]) gen/small-integer)]))
 
 (defspec match-runs-only-on-parsed-members 300

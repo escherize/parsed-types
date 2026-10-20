@@ -37,9 +37,3 @@
        ~sum-name
        [~@(for [[t b e] (partition 3 clauses)]
             `(let [~b ~v] ~t ~e))])))
-
-(defmacro defdraft-type
-  "The type, and the declaration expression with the fields in scope."
-  [name fields declaration-expr]
-  `(do (deftype ~name ~fields)
-       (fn [~@fields] ~@fields ~declaration-expr)))

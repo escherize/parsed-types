@@ -39,39 +39,16 @@
    (clojure.lang Reflector)
    (com.google.common.collect MapMaker)
    (java.lang.reflect Field Modifier)
-   (java.util Map)
-   (java.util.concurrent ConcurrentMap)))
+   (java.util Map)))
 
 (set! *warn-on-reflection* true)
-
-(defprotocol Draft
-  "A draft that [[parse]] turns into a parsed type. [[defparsed]] and [[defdraft-type]] implement it."
-  (declaration [draft]
-    "`{:parses-to ParsedType, :checks [check ...], :fetches [fetch ...], :children {field child}}`. Return the same
-    `def`ed map every time. [[defparsed]] writes it for you.
-
-    `:parses-to` is a class [[defparsed-type]] defined. Its fields must be the draft's fields, in the same order, and no
-    other draft type may parse to it.
-
-    A check is `{:name :doc :kind :reads :fetches :f}`. `:kind` is `:pure`, for a check that reads only its
-    arguments, or `:external`, for one that reads the world. Only an external check may name `:fetches`.
-
-    A pure check's `:f` must close over no locals, so that it reads only what it declares. This refuses `constantly`,
-    `partial`, `comp`, `memoize` and `with-meta` on a fn, which close over their arguments: write a `fn`. It does not
-    see globals: a pure check must not read one that can change, such as an atom.
-
-    A fetch is `{:name :reads :f}`. Its `:f` takes every distinct tuple of the fields it reads, across all the drafts
-    with this declaration in the call, and returns a map from each tuple to what it fetched.
-
-    A child is `{:kind :one|:many, :type ParsedType}`. The field holds nil or a draft that parses to `ParsedType`
-    (`:one`), or a vector of them (`:many`)."))
 
 (definterface ParsedValue)
 
 (definterface DraftValue)
 
 (defn final!
-  "Throws `::cannot-change`: a parsed value cannot be changed. Called by the types [[defparsed-type]] defines."
+  "Throws `::cannot-change`: a parsed value cannot be changed. Called by the parsed types [[defparsed]] defines."
   [parsed op]
   (let [n (.getSimpleName (class parsed))]
     (throw (ex-info (if (= "with-meta" op)
@@ -81,7 +58,7 @@
                     {:type ::cannot-change, :parsed (.getName (class parsed)), :op op}))))
 
 (defn fixed!
-  "Throws `::cannot-change`: a draft's fields are fixed. Called by the types [[defdraft-type]] defines."
+  "Throws `::cannot-change`: a draft's fields are fixed. Called by the draft types [[defparsed]] defines."
   [draft op]
   (let [n (.getSimpleName (class draft))]
     (throw (ex-info (case op
@@ -93,8 +70,8 @@
                     {:type ::cannot-change, :draft (.getName (class draft)), :op op}))))
 
 (defn no-field!
-  "Throws `::no-field`: `x` has no field `k`. Called by the types [[defparsed-type]] and [[defdraft-type]] define,
-  when a key that is not a field is read without a default, or set on a draft."
+  "Throws `::no-field`: `x` has no field `k`. Called by the types [[defparsed]] defines, when a key that is not a
+  field is read without a default, or set on a draft."
   [x k]
   (let [fields (vec (keys x))]
     (throw (ex-info (str (.getSimpleName (class x)) " has no field " (pr-str k) ". Use one of its fields " fields
@@ -215,35 +192,28 @@
      (.write w# (str "#" (.getName (class x#))))
      (print-method (into {} x#) w#)))
 
-(defmacro defparsed-type
-  "Define `name`, a bare parsed type with `fields`: a map that only [[parse]] issues. `assoc`, `dissoc` and `with-meta`
-  throw, and so does reading a key that is not a field. [[defparsed]] calls this; use it directly only with a
-  declaration written by hand."
+(defn- defparsed-type
+  "The form that defines `name`, a bare parsed type with `fields`: a map that only [[parse]] issues. `assoc`, `dissoc`
+  and `with-meta` throw, and so does reading a key that is not a field. Only [[defparsed]] calls this, when it
+  expands: it is private, so a parsed type cannot be defined apart from its draft and its checks."
   [name fields]
-  (check-field-names! &form fields)
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
     `(do
        (deftype ~name [~@fields]
          parsed_types.core.ParsedValue
          ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!))
-       ~(print-method-form name)
-       ~name)))
+       ~(print-method-form name))))
 
-(defmacro defdraft-type
-  "Define `name`, a bare draft type with `fields` and the declaration `declaration-expr`, evaluated with the fields in
-  scope. `assoc` sets a field; `dissoc` and `with-meta` throw, and so do reading or setting a key that is not a field. [[defparsed]] calls this; use it
-  directly only with a declaration written by hand."
-  [name fields declaration-expr]
-  (check-field-names! &form fields)
+(defn- defdraft-type
+  "The form that defines `name`, a bare draft type with `fields`. `assoc` sets a field; `dissoc` and `with-meta` throw,
+  and so do reading or setting a key that is not a field. Only [[defparsed]] calls this, when it expands."
+  [name fields]
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
     `(do
        (deftype ~name [~@fields]
          parsed_types.core.DraftValue
-         Draft
-         (~'declaration [~this] ~declaration-expr)
          ~@(map-type-methods fields this k v `(assoc-draft ~this ~k ~v) `fixed!))
-       ~(print-method-form name)
-       ~name)))
+       ~(print-method-form name))))
 
 ;;; ------------------------------------------------ Sums ------------------------------------------------
 
@@ -415,13 +385,14 @@
   - `(child field ParsedType)`: the field holds nil or a draft that parses to `ParsedType`.
 
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
-  Defines `<parsed-name>Draft-declaration`, private, holding the declaration."
+
+  The plan [[parse]] follows is built and checked when the form loads, so every declaration error throws
+  `::bad-declaration` then, not at the first parse. Only `defparsed` defines parsed types: the draft type and the
+  parsed type are defined together, so the draft type is the only one that parses to its parsed type."
   [parsed-name fields & clauses]
   (when-not (simple-symbol? parsed-name)
     (syntax-error! &form "write (defparsed Name [fields] clauses ...), with a symbol for Name."))
-  (when-not (and (vector? fields) (every? simple-symbol? fields))
-    (syntax-error! &form "fields must be a vector of symbols. Write them like [user-id amount]."))
-  (when-not (apply distinct? ::sentinel fields) (syntax-error! &form "a field is named twice. Name each field once."))
+  (check-field-names! &form fields)
   (doseq [c clauses]
     (when-not (and (seq? c) (symbol? (first c)) ('#{pure external fetch child children} (symbol (name (first c)))))
       (syntax-error! c (str "a clause is (pure ...), (external ...), (fetch ...), (child ...) or (children ...). Use"
@@ -443,23 +414,17 @@
                       (syntax-error! &form (str "a field is declared as a child twice. Declare it once, with child or"
                                                 " children.")))
         names       (concat (map :name checks) (map :name fetches))
-        draft-name  (symbol (str parsed-name "Draft"))
-        decl-sym    (symbol (str draft-name "-declaration"))]
+        draft-name  (symbol (str parsed-name "Draft"))]
     (when-not (apply distinct? ::sentinel names)
       (syntax-error! &form "a check or fetch name is used twice. Give each its own name."))
     (when-let [reserved (seq (filter #(= "parsed-types.child" (namespace %)) names))]
       (syntax-error! &form (str "names in parsed-types.child are reserved for child-field checks: " (vec reserved)
                                 ". Name them in your own namespace.")))
     `(do
-       (defparsed-type ~parsed-name ~fields)
-       (def ~(vary-meta decl-sym assoc :private true)
-         {:parses-to ~parsed-name
-          :checks    ~checks
-          :fetches   ~fetches
-          :children  ~children})
-       ;; through `var`, which ignores locals, so a field named like the declaration cannot shadow it
-       (defdraft-type ~draft-name ~fields (deref (var ~decl-sym)))
-       (register-draft! ~parsed-name ~draft-name)
+       ~(defparsed-type parsed-name fields)
+       ~(defdraft-type draft-name fields)
+       ;; through `var`, because `register!` is private: only this expansion may record a plan
+       ((var register!) ~parsed-name ~draft-name {:checks ~checks, :fetches ~fetches, :children ~children})
        ~parsed-name)))
 
 ;;; ------------------------------------------------ State ------------------------------------------------
@@ -471,25 +436,10 @@
 (defonce ^:private ^Map issued
   (.makeMap (.weakKeys (MapMaker.))))
 
-;; Parsed type -> the name of the one draft class that may parse to it. By name, not identity, so re-evaluating a
-;; `defrecord` at a REPL does not lock its parsed type away; another class with that name can only come from the same
-;; namespace.
-(defonce ^:private ^ConcurrentMap claims
+;; Draft type -> its plan, and parsed type -> the same plan, by identity. Written once per class, when its `defparsed`
+;; loads. Weak, so the classes a REPL replaces can be collected.
+(defonce ^:private ^Map registry
   (.makeMap (.weakKeys (MapMaker.))))
-
-;; Declaration -> draft class -> plan, both by identity. Keyed by both, so after a REPL re-evaluates a draft type, a
-;; draft of the old class that reads the new declaration cannot claim the new declaration's plan for itself.
-(defonce ^:private ^ConcurrentMap plans
-  (.makeMap (.weakKeys (MapMaker.))))
-
-;; Parsed type -> its draft type, for [[draft]]. Written by [[defparsed]].
-(defonce ^:private ^ConcurrentMap drafts-by-parsed-type
-  (.makeMap (.weakKeys (MapMaker.))))
-
-(defn register-draft!
-  "Record that `draft-type` is the draft of `parsed-type`. Called by [[defparsed]]."
-  [parsed-type draft-type]
-  (.put drafts-by-parsed-type parsed-type draft-type))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
 
@@ -510,77 +460,31 @@
 (defn- basis [^Class cls]
   (mapv keyword (Reflector/invokeStaticMethod cls "getBasis" (object-array 0))))
 
-(defn- draft-value? [x]
-  (and (instance? DraftValue x) (satisfies? Draft x)))
+(defn- draft-value?
+  "Whether `x` is a draft of a type [[defparsed]] defined. A type that only implements `DraftValue` is not."
+  [x]
+  (and (instance? DraftValue x) (some? (.get registry (class x)))))
 
-(defn- validate-declaration! [draft-class {:keys [parses-to checks fetches children]}]
-  (let [fields      (set (basis draft-class))
-        fetch-names (into #{} (map :name) fetches)
-        names       (concat (map :name checks) (map :name fetches))]
-    (when-not (parsed-type? parses-to)
-      (bad-declaration! draft-class (str ":parses-to must be a type defined with defparsed, got " (pr-str parses-to)
-                                         ". Set it to the parsed type this draft parses to.")
-                        {:parses-to (pr-str parses-to)}))
-    (when-not (= (basis draft-class) (basis parses-to))
-      (bad-declaration! draft-class (str "the parsed type's fields " (basis parses-to) " must be the draft's fields "
-                                         (basis draft-class) ", in order. Give both types the same fields.")
-                        {:draft-fields (basis draft-class), :parsed-fields (basis parses-to)}))
-    (when-let [dupes (seq (for [[n c] (frequencies names) :when (< 1 c)] n))]
-      (bad-declaration! draft-class (str "a check or fetch name is used twice: " (vec dupes)
-                                         ". Give each its own name.")
-                        {:names dupes}))
-    (when-let [reserved (seq (filter #(and (keyword? %) (= "parsed-types.child" (namespace %))) names))]
-      (bad-declaration! draft-class (str "names in parsed-types.child are reserved for child-field checks: "
-                                         (vec reserved) ". Name them in your own namespace.")
-                        {:names reserved}))
-    (doseq [[field {:keys [kind type]}] children]
-      (when-not (contains? fields field)
-        (bad-declaration! draft-class (str "the child field " field " is not a field of the draft. Declare children"
-                                           " only on its fields " (vec (sort fields)) ".")
-                          {:field field}))
-      (when-not (and (#{:one :many} kind) (or (parsed-type? type) (sum? type)))
-        (bad-declaration! draft-class (str "the child " field " must be {:kind :one|:many, :type ParsedType-or-sum}."
-                                           " Write it in that shape.")
-                          {:field field})))
-    (doseq [{n :name, :keys [doc kind reads f], fs :fetches} (concat checks fetches)
-            :let [check? (contains? (set (map :name checks)) n)]]
-      (when-not (and (or (nil? reads) (sequential? reads))
-                     (every? keyword? reads)
-                     (= (count reads) (count (set reads))))
-        (bad-declaration! draft-class (str (pr-str n) ": :reads must be a vector of distinct field keywords. Write it"
-                                           " like [:amount].")
-                          {:name n, :reads reads}))
-      (when-not (qualified-keyword? n)
-        (bad-declaration! draft-class (str "the name " (pr-str n) " must be a qualified keyword. Write it like"
-                                           " ::amount-positive.")
-                          {:name n}))
-      (when-not (fn? f)
-        (bad-declaration! draft-class (str n ": :f must be a fn. Set :f to a fn of what it reads.") {:name n}))
-      (when (and check? (not (string? doc)))
-        (bad-declaration! draft-class (str "the check " n " has no :doc. Add a :doc string that says what it checks.")
-                          {:name n}))
-      (when (and check? (not (#{:pure :external} kind)))
-        (bad-declaration! draft-class (str "the check " n " has :kind " (pr-str kind) ". Set it to :pure or"
-                                           " :external.")
-                          {:name n, :kind kind}))
-      (when (and check? (= :pure kind) (seq fs))
-        (bad-declaration! draft-class (str "the pure check " n " names :fetches. Make it :external, or remove its"
-                                           " :fetches.")
-                          {:name n}))
-      (when-let [unknown (seq (remove fields reads))]
-        (bad-declaration! draft-class (str n " reads " (vec unknown) ", which are not fields of the draft. Read only"
-                                           " its fields " (vec (sort fields)) ".")
-                          {:name n, :unknown-fields unknown, :fields fields}))
-      (when-let [unknown (seq (remove fetch-names fs))]
-        (bad-declaration! draft-class (str "the check " n " names fetches that are not declared: " (vec unknown)
-                                           ". Declare them under :fetches.")
-                          {:name n, :unknown-fetches unknown}))
-      (when-let [locals (and check? (= :pure kind) (seq (closed-over-locals f)))]
-        (bad-declaration! draft-class (str "the pure check " n " closes over locals " (vec locals) ". A pure check"
-                                           " reads only the fields it names. Read the value from a field, make the"
-                                           " check external, or write a fn in place of constantly, partial, comp or"
-                                           " memoize.")
-                          {:name n, :locals locals})))))
+(defn- validate-declaration!
+  "Throw `::bad-declaration` for what `defparsed` cannot see when it expands, only when it loads: a child type that is
+  not a parsed type or a sum, a fetch that is not a fn, and a pure check that closes over a local."
+  [draft-class {:keys [checks fetches children]}]
+  (doseq [[field {:keys [type]}] children]
+    (when-not (or (parsed-type? type) (sum? type))
+      (bad-declaration! draft-class (str "the child field " field " holds " (pr-str type) ", which is not a type defined"
+                                         " with defparsed or a sum defined with defsum. Name one of those.")
+                        {:field field})))
+  (doseq [{n :name, :keys [f]} fetches]
+    (when-not (fn? f)
+      (bad-declaration! draft-class (str "the fetch " n " is " (pr-str f) ", not a fn. Write a fn of the tuples it"
+                                         " fetches.")
+                        {:name n})))
+  (doseq [{n :name, :keys [kind f]} checks]
+    (when-let [locals (and (= :pure kind) (seq (closed-over-locals f)))]
+      (bad-declaration! draft-class (str "the pure check " n " closes over locals " (mapv symbol locals) ". A pure check"
+                                         " reads only the fields it names. Read the value from a field, or make the"
+                                         " check external.")
+                        {:name n, :locals locals}))))
 
 (defn- stale-type!
   "Throws `::stale-type`: `parent` declared `field` against `old`, a class a REPL has since replaced with another of
@@ -636,14 +540,8 @@
   - An external check waits on its fetches and on every pure check.
 
   Pure checks run first, fewest fields first, then fetches, then external checks, each in declaration order."
-  [draft-class {:keys [parses-to checks fetches children], :as decl}]
+  [parses-to draft-class {:keys [checks fetches children], :as decl}]
   (validate-declaration! draft-class decl)
-  (let [claimed (.putIfAbsent claims parses-to (.getName ^Class draft-class))]
-    (when (and claimed (not= claimed (.getName ^Class draft-class)))
-      (bad-declaration! draft-class (str (.getSimpleName ^Class parses-to) " is parsed from another draft type."
-                                         " One draft type owns each parsed type, so a parsed value means its checks"
-                                         " passed. Give this draft its own parsed type.")
-                        {:parses-to (.getName ^Class parses-to), :owner claimed})))
   (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check parses-to field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
         external  (filterv #(= :external (:kind %)) checks)
@@ -664,6 +562,7 @@
                     (assoc c :prereqs (into all-pure (:fetches c))))]
     {:draft-class     draft-class
      :parses-to       parses-to
+     :declaration     (assoc decl :parses-to parses-to)
      :fields          (basis draft-class)
      :children        children
      :pure            (vec (sort-by (comp count reads-set) pure'))
@@ -681,22 +580,28 @@
          (not (instance? DraftValue x)))                "a plain map"
     :else                                               (str "a " (.getSimpleName (class x)))))
 
+(defn- register!
+  "Build and check the plan of `draft-type`, which parses to `parsed-type`, and record it for both. Called by the
+  expansion of [[defparsed]], when it loads; throws `::bad-declaration` then."
+  [parsed-type draft-type decl]
+  (let [plan (compile-plan parsed-type draft-type decl)]
+    (.put registry draft-type plan)
+    (.put registry parsed-type plan)))
+
 (defn- plan-for [draft]
   (when-not (draft-value? draft)
-    (throw (ex-info (str "Expected a draft defined with defparsed or defdraft-type, got " (describe draft) "."
+    (throw (ex-info (str "Expected a draft defined with defparsed, got " (describe draft) "."
                          (if (instance? ParsedValue draft)
                            " It is already parsed: call (pt/draft-of x) to get its draft."
                            " Build one with its ->NameDraft constructor or pt/draft."))
                     {:type ::bad-input, :got (some-> draft class .getName)})))
-  (let [decl     (declaration draft)
-        cls      (class draft)
-        by-class (or (.get plans decl)
-                     (let [m (.makeMap (.weakKeys (MapMaker.)))]
-                       (or (.putIfAbsent plans decl m) m)))]
-    (or (.get ^ConcurrentMap by-class cls)
-        ;; two threads may compile the same plan; both keep the one that won
-        (let [plan (compile-plan cls decl)]
-          (or (.putIfAbsent ^ConcurrentMap by-class cls plan) plan)))))
+  (.get registry (class draft)))
+
+(defn declaration
+  "The declaration `defparsed` wrote for `draft`'s type: `{:parses-to :checks :fetches :children}`, as data. Throws
+  `::bad-input` for anything but a draft."
+  [draft]
+  (:declaration (plan-for draft)))
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
@@ -1015,8 +920,8 @@
     (str "Build a draft of a member (" (clojure.string/join " or " (map type-name (:members type)))
          ") and call pt/parse.")
 
-    (.get drafts-by-parsed-type type)
-    (str "Build a " (.getSimpleName ^Class (.get drafts-by-parsed-type type)) " and call pt/parse.")
+    (.get registry type)
+    (str "Build a " (.getSimpleName ^Class (:draft-class (.get registry type))) " and call pt/parse.")
 
     :else
     (str "Build a draft that parses to " (type-name type) " and call pt/parse.")))
@@ -1029,7 +934,7 @@
   (when-not (parsed? parsed-type x)
     (throw (ex-info (str "Expected a parsed " (type-name parsed-type) ", got " (describe x)
                          (cond
-                           (and (draft-value? x) (member? parsed-type (:parses-to (declaration x))))
+                           (and (draft-value? x) (member? parsed-type (:parses-to (plan-for x))))
                            ". Call pt/parse on it first."
 
                            (member? parsed-type (class x))
@@ -1088,7 +993,7 @@
   [parsed-type m]
   (let [refuse! (fn [message] (throw (ex-info message {:type ::bad-input})))
         cls     (resolve parsed-type)
-        dcls    (when (class? cls) (.get drafts-by-parsed-type cls))
+        dcls    (when (and (parsed-type? cls) (.get registry cls)) (:draft-class (.get registry cls)))
         _       (when-not dcls
                   (refuse! (str "draft: " parsed-type " is not a type defined with defparsed. Name a parsed type that"
                                 " defparsed defined, not a sum or a draft.")))
