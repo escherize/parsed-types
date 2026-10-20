@@ -516,13 +516,16 @@
 
 (defn- defdraft-type
   "The form that defines `name`, a bare draft type with `fields`. `assoc` sets a field; `dissoc` and `with-meta` throw,
-  and so do reading or setting a key that is not a field. Only [[defparsed]] calls this, when it expands."
+  and so do reading or setting a key that is not a field. The positional factory `->NameDraft` is removed: [[draft]]
+  builds a draft, naming every field. Only [[defparsed]] calls this, when it expands."
   [name fields]
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
     `(do
        (deftype ~name [~@fields]
          parsed_types.core.DraftValue
          ~@(map-type-methods fields this k v `((var assoc-draft) ~this ~k ~v) `(var fixed!) nil))
+       ;; positional, so reordering the fields would silently swap values: pt/draft names every field instead
+       (ns-unmap *ns* '~(symbol (str "->" name)))
        ~(print-method-form name))))
 
 (defn- not-loaded!
@@ -624,14 +627,27 @@
   [nss]
   (str "(require " (clojure.string/join " " (map #(str "'" %) (distinct nss))) " :reload)"))
 
+(defn- draft-hint
+  "The code that builds a draft of the parsed class `c`, naming its fields, for an error message."
+  [^Class c]
+  (str "(pt/draft " (.getSimpleName c) " {"
+       (clojure.string/join ", " (map #(str % " ...") (:fields (.get registry c))))
+       "})"))
+
+(defn- parse-hint
+  "The code that makes a parsed value of `type`, a parsed class or a sum, for an error message."
+  [type]
+  (if (sum? type)
+    (clojure.string/join " or " (map #(str "(pt/parse " (draft-hint %) ")") (sum-members type)))
+    (str "(pt/parse " (draft-hint type) ")")))
+
 (defn- stale-value!
   "Throws `::stale-type`: `what`, a value or draft of the parsed class `c`, is from before `c`'s `defparsed` was
   re-evaluated, and the code that got it expects the class defined since."
   [where what ^Class c]
   (throw (ex-info (str where " got " what " of " (.getName c) " from before " (defined-in c) " was re-evaluated. Types"
                        " compare by class, like records, and re-evaluating a defparsed makes new classes. Build it"
-                       " again from a new draft, as in (pt/parse (->" (.getSimpleName c) "Draft ...)), or re-run the"
-                       " code that built it.")
+                       " again from a new draft, as in " (parse-hint c) ", or re-run the code that built it.")
                   {:type ::stale-type, :rule ::rule/stale-value, :class (.getName c)})))
 
 (defn- type-name [type]
@@ -904,7 +920,7 @@
 
 (defmacro defparsed
   "Define `parsed-name`, a parsed type with `fields`, its draft type `<parsed-name>Draft` with the same fields, and the
-  checks [[parse]] runs to turn a draft into a parsed value. Build a draft with `->NameDraft` or [[draft]].
+  checks [[parse]] runs to turn a draft into a parsed value. Build a draft with [[draft]].
 
     (defparsed Order [customer-id lines subtotal]
       (pure ::lines-parsed \"Every line is a parsed OrderLine.\"
@@ -938,7 +954,8 @@
   defined, so a re-evaluation they refuse leaves the type as it was. Only `defparsed` defines parsed types: the draft
   type and the parsed type are defined together, so the draft type is the only one that parses to its parsed type.
 
-  The parsed type has no `->Name` factory: only [[parse]] builds a value of it that [[parsed]] accepts."
+  Neither type has a positional factory: only [[draft]] builds a draft, naming every field, and only [[parse]]
+  builds a value that [[parsed]] accepts."
   [parsed-name fields & clauses]
   ;; Inside another form, the whole form compiles before any of it runs, so the classes would be defined before the
   ;; checks below them run, and their names would not resolve. `&env` holds the locals, and `Compiler/METHOD` is bound
@@ -1113,16 +1130,11 @@
                              (instance? ParsedValue draft)
                              (str " It is a " (.getSimpleName (class draft)) " that pt/parse did not issue: a value"
                                   " with no proof. Build a draft and pass that, as in "
-                                  (call (str "(->" (.getSimpleName (class draft)) "Draft ...)")) ".")
-
-                             (map? draft)
-                             (str " Build a draft from its fields, naming every field, as in "
-                                  (call "(pt/draft Debit {:user-id u, ...})") ", or with " (call "(->DebitDraft ...)")
-                                  ".")
+                                  (call (draft-hint (class draft))) ".")
 
                              :else
-                             (str " Build one with its constructor, as in " (call "(->DebitDraft ...)")
-                                  ", or with pt/draft.")))
+                             (str " Build a draft with pt/draft, naming every field, as in "
+                                  (call "(pt/draft Debit {:user-id u, :account-id a, :amount n})") ".")))
                       {:type ::bad-input, :rule ::rule/not-a-draft, :fn fn-name, :got (some-> draft class .getName)}))))
   (.get registry (class draft)))
 
@@ -1156,8 +1168,6 @@
   (into [java.time.Clock]
         (keep #(try (Class/forName %) (catch ClassNotFoundException _ nil)))
         ["java.time.InstantSource"]))
-
-(declare parse-hint)
 
 (defn- children-or-refusal
   "What the walk in [[not-immutable]] does with `v`, at `path`: `[:refuse rule what fix]`, or `[:walk frames]`, a
@@ -1526,17 +1536,6 @@
        (member? parsed-type (class x))
        (issued? x)))
 
-(defn- parse-hint
-  "The code that makes a parsed value of `type`, for an error message."
-  [type]
-  (let [one (fn [^Class c] (str "(pt/parse (->" (if-let [plan (.get registry c)]
-                                                  (.getSimpleName ^Class (:draft-class plan))
-                                                  (str (.getSimpleName c) "Draft"))
-                                " ...))"))]
-    (if (sum? type)
-      (clojure.string/join " or " (map one (sum-members type)))
-      (one type))))
-
 (defn parsed
   "`x`, which must be a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`. Throws
   `::not-parsed` otherwise, and `::stale-type` as [[parsed?]] says. Read its fields by keyword, as in `(:amount x)`: a
@@ -1629,14 +1628,13 @@
       (throw (ex-info (if (instance? DraftValue parsed)
                         (str "pt/draft-of got " (describe parsed) ", which is already a draft. draft-of turns a value"
                              " pt/parse issued back into a draft. Use the draft as it is.")
-                        (let [plan (when (instance? ParsedValue parsed) (.get registry (class parsed)))
-                              [t d] (if plan
-                                      [(.getSimpleName ^Class (:parses-to plan)) (.getSimpleName ^Class (:draft-class plan))]
-                                      ["Debit" "DebitDraft"])]
-                          (str "pt/draft-of got " (describe parsed)
-                               (when (instance? ParsedValue parsed) " that pt/parse did not issue")
-                               ". draft-of takes only a value pt/parse issued. Build a draft with its constructor"
-                               " instead, as in (->" d " ...), or with (pt/draft " t " {...}).")))
+                        (str "pt/draft-of got " (describe parsed)
+                             (when (instance? ParsedValue parsed) " that pt/parse did not issue")
+                             ". draft-of takes only a value pt/parse issued. Build a draft with pt/draft instead, as in "
+                             (if (parsed-type? (class parsed))
+                               (draft-hint (class parsed))
+                               "(pt/draft Debit {:user-id u, :account-id a, :amount n})")
+                             "."))
                       {:type ::not-parsed
                        :rule (if (instance? DraftValue parsed) ::rule/draft-of-a-draft ::rule/draft-of-unissued)
                        :got  (some-> parsed class .getName)})))
@@ -1648,8 +1646,8 @@
   "A draft of the parsed type `parsed-type`, defined with [[defparsed]], with the fields in `m`.
 
   `m` is a literal map that names every field, and only fields: anything else is a compile error, so write `nil` for
-  a field you mean to leave empty. For values read at run time, name each field, as in `{:amount (:amount body)}`,
-  or call `->NameDraft`.
+  a field you mean to leave empty. For values read at run time, name each field, as in `{:amount (:amount body)}`.
+  This is the only way to build a draft: there is no positional `->NameDraft`.
 
     (pt/draft Debit {:user-id u, :account-id 1, :amount 30M})
 
@@ -1681,8 +1679,7 @@
       (refuse! ::rule/draft-not-a-literal-map
                (str "pt/draft: " (pr-str m) " is not a literal map. pt/draft checks the keys when it compiles, so it"
                     " takes a map written in place that names every field, and only fields. Write one, as in (pt/draft "
-                    parsed-type " {" (clojure.string/join ", " (map #(str % " ...") flds)) "}), or call (->"
-                    (.getSimpleName ^Class dcls) " ...).")
+                    parsed-type " {" (clojure.string/join ", " (map #(str % " ...") flds)) "}).")
                {:got (pr-str m), :fields flds}))
     (when-let [unknown (seq (remove (set flds) (keys m)))]
       (refuse! ::rule/draft-literal-unknown-keys

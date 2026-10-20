@@ -50,17 +50,17 @@
   (gen/one-of [gen/small-integer gen/small-integer gen/string-alphanumeric (gen/return nil)]))
 
 (def ^:private gen-any-draft
-  (gen/fmap (fn [[u a b c]] (->TripleDraft u a b c))
+  (gen/fmap (fn [[u a b c]] (pt/draft Triple {:user-id u, :a a, :b b, :c c}))
             (gen/tuple (gen/elements [1 2 3]) gen-value gen-value gen-value)))
 
 (def ^:private gen-well-formed-draft
   "A draft that passes every pure check, and any user and parity, so the external checks fail about half the time."
-  (gen/fmap (fn [[u a b gap]] (->TripleDraft u a (subs b 0 (min 3 (count b))) (+ a gap 1)))
+  (gen/fmap (fn [[u a b gap]] (pt/draft Triple {:user-id u, :a a, :b (subs b 0 (min 3 (count b))), :c (+ a gap 1)}))
             (gen/tuple (gen/elements [1 1 2 3]) gen/small-integer gen/string-alphanumeric gen/nat)))
 
 (def ^:private gen-valid-draft
   "A draft that passes every check: user 1, an even a, a short b, and c above a."
-  (gen/fmap (fn [[half b gap]] (->TripleDraft 1 (* 2 half) (subs b 0 (min 3 (count b))) (+ (* 2 half) gap 1)))
+  (gen/fmap (fn [[half b gap]] (pt/draft Triple {:user-id 1, :a (* 2 half), :b (subs b 0 (min 3 (count b))), :c (+ (* 2 half) gap 1)}))
             (gen/tuple gen/small-integer gen/string-alphanumeric gen/nat)))
 
 (def ^:private gen-draft
@@ -70,7 +70,7 @@
 (defn- fresh
   "A new draft with the same fields as `draft`."
   [draft]
-  (->TripleDraft (:user-id draft) (:a draft) (:b draft) (:c draft)))
+  (pt/draft Triple {:user-id (:user-id draft), :a (:a draft), :b (:b draft), :c (:c draft)}))
 
 (defn- outcome
   "What `thunk` returned, as a plain value, or the type, failed kinds and failures it threw."
@@ -223,15 +223,15 @@
 
 (def ^:private gen-mixed-draft
   (gen/one-of [gen-draft
-               (gen/fmap (fn [[positive? a]] (if positive? (->PosPairDraft a) (->NegPairDraft a)))
+               (gen/fmap (fn [[positive? a]] (if positive? (pt/draft PosPair {:a a}) (pt/draft NegPair {:a a})))
                          (gen/tuple gen/boolean gen/small-integer))]))
 
 (defspec parse-all-agrees-with-parse-across-declarations 300
   (prop/for-all [drafts (gen/vector gen-mixed-draft 0 8)]
     (let [fresh-any (fn [d] (cond
                               (instance? TripleDraft d)  (fresh d)
-                              (instance? PosPairDraft d) (->PosPairDraft (:a d))
-                              :else                      (->NegPairDraft (:a d))))
+                              (instance? PosPairDraft d) (pt/draft PosPair {:a (:a d)})
+                              :else                      (pt/draft NegPair {:a (:a d)})))
           each      (mapv #(outcome (fn [] (pt/parse (fresh-any %)))) drafts)
           all       (outcome #(pt/parse-all (mapv fresh-any drafts)))
           failures  (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
@@ -253,10 +253,10 @@
 (def ^:private gen-candidate
   "A parsed member, a forged member, a draft, or a parsed value of another type."
   (gen/one-of [(gen/fmap (fn [d] [:parsed d]) gen-valid-draft)
-               (gen/fmap (fn [a] [:parsed (->PosPairDraft a)]) (gen/fmap inc gen/nat))
+               (gen/fmap (fn [a] [:parsed (pt/draft PosPair {:a a})]) (gen/fmap inc gen/nat))
                (gen/fmap (fn [d] [:forged d]) gen-any-draft)
-               (gen/fmap (fn [a] [:draft (->PosPairDraft a)]) gen/small-integer)
-               (gen/fmap (fn [a] [:other (->NegPairDraft a)]) (gen/fmap #(- -1 %) gen/nat))]))
+               (gen/fmap (fn [a] [:draft (pt/draft PosPair {:a a})]) gen/small-integer)
+               (gen/fmap (fn [a] [:other (pt/draft NegPair {:a a})]) (gen/fmap #(- -1 %) gen/nat))]))
 
 (defspec match-runs-only-on-parsed-members 300
   (prop/for-all [[kind d] gen-candidate]

@@ -61,9 +61,9 @@
      (require '[parsed-types.core :as pt])
      (eval form)))
 
-(def ^:private real (pt/parse (->DebitDraft 1 2 30M)))
+(def ^:private real (pt/parse (pt/draft Debit {:user-id 1, :account-id 2, :amount 30M})))
 
-(def ^:private draft (->DebitDraft 1 2 30M))
+(def ^:private draft (pt/draft Debit {:user-id 1, :account-id 2, :amount 30M}))
 
 (def ^:private examples
   "`[rule thunk substring ...]`: the thunk throws the rule, and its message holds every substring."
@@ -153,7 +153,8 @@
     "(defparsed E3 ...) is inside another form" "Write defparsed at the top level of a namespace" "(def limit 10)"]
    [:type-not-loaded #(do ((compiling '(pt/defparsed E4 [a])))
                           (try ((compiling '(pt/defparsed E4 [a] (pure ::c "d" [a] (no-such-fn a))))) (catch Exception _))
-                          (pt/parse ((compiling '(->E4Draft 1)))))
+                          ;; pt/draft refuses the type, so the draft is built with its constructor
+                          (pt/parse ((compiling '(parsed_types.errors_test.E4Draft. 1)))))
     "pt/parse got a draft of parsed_types.errors_test.E4Draft, but the defparsed E4 in parsed-types.errors-test failed to load"
     "Fix that error and re-evaluate the defparsed E4" "(require 'parsed-types.errors-test :reload)"]
    [:class-name-taken #(do ((in-ns-named 'errs.my-app '(pt/defparsed Owned [x])))
@@ -163,50 +164,50 @@
    ;; parsing
    [:parse-all-not-a-vector #(pt/parse-all draft) "pt/parse-all got a DebitDraft" "(pt/parse-all [draft])"
     "(pt/parse draft)"]
-   [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit {:user-id u, ...}))"]
-   [:draft-in-field #(pt/parse (->CreditDraft [(->CreditDraft 1)]))
+   [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit {:user-id u, :account-id a, :amount n}))"]
+   [:draft-in-field #(pt/parse (pt/draft Credit {:amount [(pt/draft Credit {:amount 1})]}))
     "CreditDraft: the field :amount at [0] holds a draft, a CreditDraft (parsed_types.errors_test.CreditDraft)"
     "never drafts" "(pt/parse d)" "(pt/parse-all ds)"]
-   [:unissued-in-field #(pt/parse (->CreditDraft (Credit. 1 nil)))
+   [:unissued-in-field #(pt/parse (pt/draft Credit {:amount (Credit. 1 nil)}))
     "CreditDraft: the field :amount holds a Credit that pt/parse did not issue" "carries no proof"
-    "(pt/parse (->CreditDraft ...))"]
-   [:mutable-value #(pt/parse (->DebitDraft 1 2 (atom 1))) "the field :amount holds an atom (clojure.lang.Atom)"
+    "(pt/parse (pt/draft Credit {:amount ...}))"]
+   [:mutable-value #(pt/parse (pt/draft Debit {:user-id 1, :account-id 2, :amount (atom 1)})) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
-   [:value-too-deep #(pt/parse (->DebitDraft 1 2 (reduce (fn [x _] [x]) 1 (range 1001))))
+   [:value-too-deep #(pt/parse (pt/draft Debit {:user-id 1, :account-id 2, :amount (reduce (fn [x _] [x]) 1 (range 1001))}))
     "the field :amount at [0 0 0 0 0 0 0 0] and 993 levels more holds a value nested deeper than 1000 levels"
     "(vec (flatten v))" "(pr-str v)"]
-   [:fetch-missing-tuples #(pt/parse (->LossyDraft 1)) "returned no entry for [[1]]"
+   [:fetch-missing-tuples #(pt/parse (pt/draft Lossy {:id 1})) "returned no entry for [[1]]"
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
-   [:fetch-not-a-map #(pt/parse (->OddDraft 1)) "returned a PersistentVector, not a map"
+   [:fetch-not-a-map #(pt/parse (pt/draft Odd {:id 1})) "returned a PersistentVector, not a map"
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
-   [:checks-failed #(pt/parse (->DebitDraft 1 :x -5)) "Invalid Debit: 2 checks failed"
+   [:checks-failed #(pt/parse (pt/draft Debit {:user-id 1, :account-id :x, :amount -5})) "Invalid Debit: 2 checks failed"
     ":parsed-types.errors-test/amount-positive (The amount is positive.)" "Change the draft so they pass"]
    ;; sinks
    [:not-a-parsed-type #(pt/parsed :x real) "pt/parsed got :x as its type" "(pt/parsed Debit x)"]
-   [:got-nil #(pt/parsed Debit nil) "got nil" "Write (pt/parse (->DebitDraft ...)) and pass the result"]
+   [:got-nil #(pt/parsed Debit nil) "got nil" "Write (pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...})) and pass the result"]
    [:got-draft #(pt/parsed Debit draft) "got a DebitDraft" "(pt/parse draft)"]
    [:got-unissued #(pt/parsed Debit (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue"
-    "Write (pt/parse (->DebitDraft ...)) and pass the result"]
-   [:got-plain-map #(pt/parsed Debit {:amount 1}) "got a plain map" "(pt/parse (->DebitDraft ...))"]
-   [:got-other-type #(pt/parsed Debit (pt/parse (->CreditDraft 1))) "got a Credit" "(pt/parse (->DebitDraft ...))"]
+    "Write (pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...})) and pass the result"]
+   [:got-plain-map #(pt/parsed Debit {:amount 1}) "got a plain map" "(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))"]
+   [:got-other-type #(pt/parsed Debit (pt/parse (pt/draft Credit {:amount 1}))) "got a Credit" "(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))"]
    [:draft-of-a-draft #(pt/draft-of draft) "got a DebitDraft, which is already a draft" "Use the draft as it is"]
-   [:draft-of-unissued #(pt/draft-of (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue" "(->DebitDraft ...)"]
+   [:draft-of-unissued #(pt/draft-of (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue" "(pt/draft Debit {:user-id ..., :account-id ..., :amount ...})"]
    [:match-compiled-before-member
     ;; what a match on Growing compiled when it held only Debit does once Credit joins
     #((var parsed-types.core/match-fell-through!) (#'pt/sum 'Growing [Debit Credit]) [Debit] 'parsed-types.errors-test
-      'parsed-types.errors-test (pt/parse (->CreditDraft 1)))
+      'parsed-types.errors-test (pt/parse (pt/draft Credit {:amount 1})))
     "got a parsed Credit, but this match was compiled before Credit joined the sum" "Re-evaluate the match"]
    ;; a REPL re-evaluated a defparsed, and code evaluated before it keeps the old class
    [:stale-value (in-ns-named 'errs.stale-value '(do (pt/defparsed V [x])
-                                                      (def old (pt/parse (->VDraft 1)))
+                                                      (def old (pt/parse (pt/draft V {:x 1})))
                                                       (pt/defparsed V [x])
                                                       (pt/parsed V old)))
     "pt/parsed got a parsed V of errs.stale_value.V from before the defparsed V in errs.stale-value was re-evaluated"
-    "(pt/parse (->VDraft ...))"]
+    "(pt/parse (pt/draft V {:x ...}))"]
    [:stale-sink (in-ns-named 'errs.stale-sink '(do (pt/defparsed S [x])
                                                     (defn sink [v] (pt/parsed S v))
                                                     (pt/defparsed S [x])
-                                                    (sink (pt/parse (->SDraft 1)))))
+                                                    (sink (pt/parse (pt/draft S {:x 1})))))
     "the code calling (pt/parsed S ...) was compiled before the defparsed S in errs.stale-sink was re-evaluated"
     "Re-evaluate the namespace that calls pt/parsed" "(clojure.tools.namespace.repl/refresh)"]
    [:stale-match (in-ns-named 'errs.stale-match '(do (pt/defparsed M1 [x])
@@ -214,7 +215,7 @@
                                                       (pt/defsum MS [M1 M2])
                                                       (defn f [v] (pt/match MS v M1 a 1 M2 b 2))
                                                       (pt/defparsed M1 [x])
-                                                      (f (pt/parse (->M1Draft 1)))))
+                                                      (f (pt/parse (pt/draft M1 {:x 1})))))
     "match on MS, compiled in the namespace errs.stale-match, got a parsed errs.stale_match.M1"
     "(require 'errs.stale-match :reload)"]
    [:stale-sum (in-ns-named 'errs.stale-sum '(do (pt/defparsed N1 [x])
@@ -229,7 +230,7 @@
     "Rename one of the types, as in (defparsed Foo2 ...)"]
    ;; pt/draft
    [:draft-not-a-literal-map (compiling '(fn [m] (pt/draft Debit m))) "pt/draft: m is not a literal map"
-    "(pt/draft Debit {:user-id ..., :account-id ..., :amount ...})" "(->DebitDraft ...)"]
+    "(pt/draft Debit {:user-id ..., :account-id ..., :amount ...})."]
    [:draft-type-not-a-symbol (compiling '(pt/draft "Credit" {:amount 1})) "the type \"Credit\" is not a symbol"
     "(pt/draft Credit {:amount 1})"]
    [:draft-not-a-parsed-type (compiling '(pt/draft String {})) "String is not a type defined with defparsed"
@@ -314,10 +315,10 @@
   (is (str/includes? (:message (error #(.clear ^java.util.Map draft))) "(assoc d :field v)")))
 
 (deftest invalid-names-the-first-five-checks-test
-  (is (str/includes? (:message (error #(pt/parse (->SevenDraft :a :b :c :d :e :f :g))))
+  (is (str/includes? (:message (error #(pt/parse (pt/draft Seven {:a :a, :b :b, :c :c, :d :d, :e :e, :f :f, :g :g}))))
                      "Invalid Seven: 7 checks failed: :parsed-types.errors-test/a (a is an integer.), ")
       "each failed check with its doc")
-  (is (str/includes? (:message (error #(pt/parse (->SevenDraft :a :b :c :d :e :f :g))))
+  (is (str/includes? (:message (error #(pt/parse (pt/draft Seven {:a :a, :b :b, :c :c, :d :d, :e :e, :f :f, :g :g}))))
                      "(e is an integer.), and 2 more.")))
 
 (pt/defparsed Unit [])
@@ -337,8 +338,8 @@
 (deftest every-suggested-fix-applies-test
   (testing "a type with no fields says to add one, rather than naming a field it does not have"
     (is (= "Unit has no field :x: it has no fields at all, so every key read without a default throws. Add the field to its defparsed, as in (defparsed Unit [x])."
-           (:message (error #(:x (pt/parse (->UnitDraft)))))))
-    (is (str/includes? (:message (error #(assoc (->UnitDraft) :x 1))) "(defparsed Unit [x])")))
+           (:message (error #(:x (pt/parse (pt/draft Unit {})))))))
+    (is (str/includes? (:message (error #(assoc (pt/draft Unit {}) :x 1))) "(defparsed Unit [x])")))
   (testing "a key that is not a field, on a parsed value, is reported first, so the fix names a field"
     (let [{:keys [type message]} (error #(assoc real :acount-id 1))]
       (is (= ::pt/no-field type))
@@ -364,10 +365,10 @@
       (testing "meant the field: add it to the argument vector"
         (is (parses? '(pt/defparsed Order [items count] (pure ::counted "count counts items." [items count]
                                                                (= count (clojure.core/count items))))
-                     '(->OrderDraft [1 2] 2))))
+                     '(pt/draft Order {:items [1 2], :count 2}))))
       (testing "meant the core fn: write its qualified name"
         (is (parses? '(pt/defparsed Order [items count] (pure ::two "Two items." [items] (= 2 (clojure.core/count items))))
-                     '(->OrderDraft [1 2] 7))))
+                     '(pt/draft Order {:items [1 2], :count 7}))))
       (testing "meant a fn of this namespace: the message offers its qualified name, which works"
         (is (str/includes? (:message (error (compiling '(pt/defparsed Priced [amount qty]
                                                           (pure ::small "Small." [qty] (< (amount qty) 10))))))
@@ -376,21 +377,21 @@
                                 " write parsed-types.errors-test/amount.")))
         (is (parses? '(pt/defparsed Priced [amount qty]
                         (pure ::small "Small." [qty] (< (parsed-types.errors-test/amount qty) 10)))
-                     '(->PricedDraft 1 2))))
+                     '(pt/draft Priced {:amount 1, :qty 2}))))
       (testing "a let-local named like a field is refused, and the message says to rename it"
         (is (str/includes? (:message (error (compiling '(pt/defparsed Pair [a b]
                                                           (pure ::same "a is 1." [a] (let [b 1] (= a b)))))))
                            (str "the check :parsed-types.errors-test/same uses the field `b` without naming it. Add it"
                                 " to the argument vector: [a b]. If it is a local, rename the local, as in b-value.")))
         (is (parses? '(pt/defparsed Pair [a b] (pure ::same "a is 1." [a] (let [b-value 1] (= a b-value))))
-                     '(->PairDraft 1 2))))
+                     '(pt/draft Pair {:a 1, :b 2}))))
       (testing "a quoted symbol named like a field is refused too: the rule is syntactic"
         (is (= :parsed-types.rule/check-uses-unnamed-field
                (:rule (error (compiling '(pt/defparsed Quoted [x y] (pure ::q "x is y." [x] (= x 'y)))))))))))
   (testing "parse of a value built by hand says it has no proof, and to build a draft"
     (let [{:keys [rule message]} (error #(pt/parse (Debit. 1 2 30M nil)))]
       (is (= :parsed-types.rule/not-a-draft rule))
-      (is (str/includes? message "It is a Debit that pt/parse did not issue: a value with no proof. Build a draft and pass that, as in (pt/parse (->DebitDraft ...))."))
+      (is (str/includes? message "It is a Debit that pt/parse did not issue: a value with no proof. Build a draft and pass that, as in (pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))."))
       (is (not (str/includes? message "already parsed")))))
   (testing "a type or sum named by something other than a symbol: each fix the message names compiles"
     (doseq [[form fixed?] [['(pt/draft "Credit" {:amount 1}) #(instance? CreditDraft %)]
@@ -409,10 +410,10 @@
           (is (str/includes? message (str "Write Debit for " (pr-str clause) ", naming one of [Debit Credit].")))))
       (is (fn? ((compiling '(fn [x] (pt/match Txn x Debit d 1 Credit c 2))))))))
   (testing "a fn that takes a draft names itself, and its fix calls it"
-    (doseq [[thunk fn-name fix] [[#(pt/declaration nil) "pt/declaration" "(pt/declaration (->DebitDraft ...))"]
+    (doseq [[thunk fn-name fix] [[#(pt/declaration nil) "pt/declaration" "(pt/declaration (pt/draft Debit {:user-id u, :account-id a, :amount n}))"]
                                  [#(pt/declaration real) "pt/declaration" "(pt/declaration (pt/draft-of x))"]
-                                 [#(pt/parse-all [5]) "pt/parse-all" "(pt/parse-all [(->DebitDraft ...)])"]
-                                 [#(pt/parse 5) "pt/parse" "(pt/parse (->DebitDraft ...))"]]]
+                                 [#(pt/parse-all [5]) "pt/parse-all" "(pt/parse-all [(pt/draft Debit {:user-id u, :account-id a, :amount n})])"]
+                                 [#(pt/parse 5) "pt/parse" "(pt/parse (pt/draft Debit {:user-id u, :account-id a, :amount n}))"]]]
       (let [{:keys [rule message]} (error thunk)]
         (is (= :parsed-types.rule/not-a-draft rule))
         (is (str/starts-with? message (str fn-name " got ")) message)
@@ -420,8 +421,17 @@
     (is (= Debit (:parses-to (let [x real] (pt/declaration (pt/draft-of x))))) "and the fix works"))
   (testing "draft-of of a value built by hand names the value's own type"
     (let [message (:message (error #(pt/draft-of (Credit. 1 nil))))]
-      (is (str/includes? message "as in (->CreditDraft ...), or with (pt/draft Credit {...})") message)
+      (is (str/includes? message "Build a draft with pt/draft instead, as in (pt/draft Credit {:amount ...}).") message)
       (is (instance? CreditDraft (pt/draft Credit {:amount 1})))))
+  (testing "every message that names a constructor names pt/draft with the type's fields, which parses once filled in"
+    (doseq [thunk [#(pt/parsed Debit nil) #(pt/parsed Debit {:amount 1}) #(pt/parsed Debit (Debit. 1 2 30M nil))
+                   #(pt/draft-of (Debit. 1 2 30M nil)) #(pt/parse (Debit. 1 2 30M nil))
+                   #(pt/parse (pt/draft Credit {:amount (Debit. 1 2 30M nil)}))]]
+      (let [message (:message (error thunk))
+            fix     (re-find #"\(pt/draft Debit \{:user-id \.\.\., :account-id \.\.\., :amount \.\.\.\}\)" (str message))]
+        (is (some? fix) message)
+        (is (not (str/includes? message "->")) message)
+        (is (pt/parsed? Debit (pt/parse ((compiling (read-string (str/replace (str fix) "..." "1"))))))))))
   (testing "parse of a value parse issued says it is already parsed"
     (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
 

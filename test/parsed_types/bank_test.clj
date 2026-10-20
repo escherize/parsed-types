@@ -84,21 +84,21 @@
                                              :returned false
                                              :blocked  [::source-exists ::destination-exists ::owns-source
                                                         ::funds-available]}}}
-           (select-keys (thrown-data #(pt/parse (->TransferDraft :ada 1 1 30))) [:failed-kinds :failures])))
+           (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 1, :amount 30}))) [:failed-kinds :failures])))
     (is (= [] @fetched)))
   (testing "a missing account, and someone else's account, fail external checks"
-    (let [missing (thrown-data #(pt/parse (->TransferDraft :ada 9 2 1M)))]
+    (let [missing (thrown-data #(pt/parse (pt/draft Transfer {:user-id :ada, :from-id 9, :to-id 2, :amount 1M})))]
       (is (= #{:external} (:failed-kinds missing)))
       (is (contains? (:failures missing) ::source-exists)))
     (is (= {:failed-kinds #{:external}
             :failures     {::owns-source {:doc "The user owns the source account.", :returned false}}}
-           (select-keys (thrown-data #(pt/parse (->TransferDraft :bob 1 2 1M))) [:failed-kinds :failures]))))
+           (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :bob, :from-id 1, :to-id 2, :amount 1M}))) [:failed-kinds :failures]))))
   (testing "more than the balance fails an external check (bob's account holds 40M after the first transfer)"
     (is (= {::funds-available {:doc "The source account holds the amount.", :returned false}}
-           (:failures (thrown-data #(pt/parse (->TransferDraft :bob 2 1 41M)))))))
+           (:failures (thrown-data #(pt/parse (pt/draft Transfer {:user-id :bob, :from-id 2, :to-id 1, :amount 41M})))))))
   (testing "the sink refuses a transfer built by hand"
     (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (Transfer. :ada 1 2 1000M nil))))))
-    (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (->TransferDraft :ada 1 2 1000M))))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 1000M}))))))))
 
 ;;; A payroll: one account pays several people. Its transfers are parsed first, together, and the payroll holds them
 
@@ -132,8 +132,8 @@
 (defn- payroll
   "The draft of a payroll, its transfers parsed first in one call."
   [& [user-id from-id & pays]]
-  (->PayrollDraft user-id from-id (pt/parse-all (mapv (fn [[to amount]] (->TransferDraft user-id from-id to amount))
-                                                      (partition 2 pays)))))
+  (pt/draft Payroll {:user-id user-id, :from-id from-id, :transfers (pt/parse-all (mapv (fn [[to amount]] (pt/draft Transfer {:user-id user-id, :from-id from-id, :to-id to, :amount amount}))
+                                                      (partition 2 pays)))}))
 
 (deftest payroll-test
   (testing "the transfers parse in one call, then the payroll, with one fetch per declaration and fetch"
@@ -163,22 +163,22 @@
 
 (deftest a-field-holds-parsed-values-not-drafts-test
   (testing "a draft in a field is refused, because no check of this parse looks inside it"
-    (let [data (thrown-data #(pt/parse (->PayrollDraft :ada 1 [(->TransferDraft :ada 1 2 1M)])))]
+    (let [data (thrown-data #(pt/parse (pt/draft Payroll {:user-id :ada, :from-id 1, :transfers [(pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 1M})]})))]
       (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/draft-in-field, :field :transfers, :path [0]
               :got "parsed_types.bank_test.TransferDraft"}
              (select-keys data [:type :rule :field :path :got]))))
     (is (= [] @fetched) "and nothing is fetched")
     (testing "and the fix the message names parses"
-      (is (pt/parsed? Payroll (pt/parse (->PayrollDraft :ada 1 (pt/parse-all [(->TransferDraft :ada 1 2 1M)])))))))
+      (is (pt/parsed? Payroll (pt/parse (pt/draft Payroll {:user-id :ada, :from-id 1, :transfers (pt/parse-all [(pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 1M})])}))))))
   (testing "a value of a parsed type that parse did not issue is refused too"
     (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/unissued-in-field, :field :transfers, :path [0]}
-           (select-keys (thrown-data #(pt/parse (->PayrollDraft :ada 1 [(Transfer. :ada 1 2 1M nil)])))
+           (select-keys (thrown-data #(pt/parse (pt/draft Payroll {:user-id :ada, :from-id 1, :transfers [(Transfer. :ada 1 2 1M nil)]})))
                         [:type :rule :field :path])))))
 
 (deftest edit-a-parsed-payroll-test
   (let [p      (pt/parse (payroll :ada 1  2 10M  3 20M))
         draft  (pt/draft-of p)
-        edited (assoc-in draft [:transfers 1] (pt/parse (->TransferDraft :ada 1 3 25M)))]
+        edited (assoc-in draft [:transfers 1] (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 3, :amount 25M})))]
     (testing "draft-of returns a draft of the payroll, which still holds the parsed transfers"
       (is (every? #(pt/parsed? Transfer %) (:transfers draft))))
     (is (= 25M (:amount (second (:transfers (pt/parse edited))))))))
@@ -198,17 +198,17 @@
 
 (deftest sum-test
   (testing "match runs the branch for the member, with the value as that type"
-    (pay! (pt/parse (->TransferDraft :ada 1 2 5M)))
+    (pay! (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 5M})))
     (pay! (pt/parse (payroll :ada 1  2 5M  3 5M)))
     (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3]))))
   (testing "match refuses anything parse did not issue, member type or not"
     (is (= ::pt/not-parsed (:type (thrown-data #(pay! (Transfer. :ada 1 2 1000M nil))))))
-    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (->TransferDraft :ada 1 2 1M))))))
-    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (pt/parse (->MemoDraft "hi")))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 1M}))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (pt/parse (pt/draft Memo {:text "hi"})))))))
     (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3])) "nothing moved"))
   (testing "parsed and parsed? take a sum"
-    (is (pt/parsed? Payment (pt/parse (->TransferDraft :ada 1 2 1M))))
-    (is (not (pt/parsed? Payment (pt/parse (->MemoDraft "hi")))))))
+    (is (pt/parsed? Payment (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 1M}))))
+    (is (not (pt/parsed? Payment (pt/parse (pt/draft Memo {:text "hi"})))))))
 
 ;;; A fetch that leaves out a tuple
 
@@ -220,9 +220,9 @@
 
 (deftest a-fetch-must-answer-every-tuple-test
   (testing "a missing tuple throws, never a nil row a check could pass on"
-    (is (= ::pt/bad-fetch (:type (thrown-data #(pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)])))))
+    (is (= ::pt/bad-fetch (:type (thrown-data #(pt/parse-all [(pt/draft Forgot {:id 1}) (pt/draft Forgot {:id 2})])))))
     (is (= (str "Fetch :parsed-types.bank-test/row returned no entry for [[1]]. A fetch answers every tuple it is given,"
                 " so no check reads a nil it did not mean. Return a key for every tuple, with nil for not found, as in"
                 " (into {} (map (fn [t] [t (lookup t)])) tuples).")
-           (try (pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)]) nil
+           (try (pt/parse-all [(pt/draft Forgot {:id 1}) (pt/draft Forgot {:id 2})]) nil
                 (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
