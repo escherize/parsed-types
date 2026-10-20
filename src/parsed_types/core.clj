@@ -1060,7 +1060,8 @@
 
 (defn parsed
   "`x`, which must be a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`. Throws
-  `::not-parsed` otherwise. Hint the result with the type to read its fields with `.-`."
+  `::not-parsed` otherwise. Read its fields by keyword, as in `(:amount x)`: a key that is not a field throws
+  `::no-field`."
   [parsed-type x]
   (when-not (parsed? parsed-type x)
     (throw (ex-info (str "Expected a parsed " (type-name parsed-type) ", got " (describe x)
