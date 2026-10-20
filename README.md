@@ -158,7 +158,8 @@ the children's external checks haven't run yet.
 value, and a second, weaker kind of proof.
 
 Types compare by class identity, like records, so `instance?` and type hints work inside checks. Matching types by
-name was rejected: it let a value of an old class pass where code expected the new one. So there is no `pt/is?`.
+name was rejected: it let a value of an old class pass where code expected the new one, and a type from another
+namespace with the same Java name could stand in for the real one. So there is no `pt/is?`.
 
 The library sets no HTTP status codes. Each caller maps errors to its own responses, as
 [the errors section](#every-error-the-library-throws-has-a-type-a-rule-and-a-fix) shows.
