@@ -182,6 +182,9 @@
     "WideDraft: the child field :parts holds a vector with the metadata" "(with-meta v nil)"]
    [:mutable-value #(pt/parse (->DebitDraft 1 2 (atom 1))) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
+   [:value-too-deep #(pt/parse (->DebitDraft 1 2 (reduce (fn [x _] [x]) 1 (range 1001))))
+    "the field :amount at [0 0 0 0 0 0 0 0] and 993 levels more holds a value nested deeper than 1000 levels"
+    "(vec (flatten v))" "(pr-str v)"]
    [:tree-too-deep #(pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 1000)))
     "deeper than 1000 levels" "Parse a shallower tree"]
    [:tree-too-big #(pt/parse (reduce (fn [w _] (->WideDraft [w w])) (->WideDraft []) (range 20)))

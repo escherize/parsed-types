@@ -414,3 +414,43 @@
         msg    (try (pt/parse (->OtherDraft 1 1 nested)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]
     (is (re-find #"at \[0 0 0 0 0 0 0 0\] and 12 levels more holds an atom" msg))
     (is (= 20 (count (:path (refusal nested)))) "the ex-data keeps the whole path")))
+
+(defn- on-daemon
+  "What `f` returns on a daemon thread within `ms`, or ::timed-out, so a walk that does not finish fails the test and
+  does not hold the JVM open."
+  [ms f]
+  (let [p (promise)]
+    (doto (Thread. ^Runnable #(deliver p (try (f) (catch Throwable t t))))
+      (.setDaemon true)
+      (.start))
+    (deref p ms ::timed-out)))
+
+(deftest a-collection-reached-at-many-depths-is-walked-once-test
+  (testing "a large collection reached at every level of a deep chain costs its size once, not once per level"
+    (let [shared (vec (range 100000))
+          chain  (reduce (fn [acc _] [shared acc]) [] (range 990))]
+      (is (true? (on-daemon 1000 #(some? (pt/parse (->OtherDraft 1 1 chain))))))))
+  (testing "and one whose deepest value is past the limit from where it is reached again is refused there"
+    (let [inner (reduce (fn [x _] [x]) :x (range 600))
+          chain (reduce (fn [acc _] [inner acc]) [] (range 500))]
+      (is (= :parsed-types.rule/value-too-deep (:rule (thrown-data #(pt/parse (->OtherDraft 1 1 chain)))))))))
+
+(deftest a-value-too-deep-test
+  (let [nested (reduce (fn [x _] [x]) 1 (range 1001))
+        data   (thrown-data #(pt/parse (->OtherDraft 1 1 nested)))]
+    (testing "is its own rule, with its path cut to the first steps, and its depth"
+      (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/value-too-deep, :field :title, :path [0 0 0 0 0 0 0 0]
+              :depth 1001}
+             (select-keys data [:type :rule :field :path :depth]))))
+    (testing "and each fix the message names parses"
+      (is (= [1] (:title (pt/parse (->OtherDraft 1 1 (vec (flatten nested)))))))
+      (is (string? (:title (pt/parse (->OtherDraft 1 1 (pr-str nested)))))))))
+
+(deftest java-sql-dates-test
+  (testing "java.sql.Date and java.sql.Time throw on .toInstant, so each message names a conversion that works"
+    (doseq [[v fix convert] [[(java.sql.Date. 0) "(.toLocalDate d)" #(.toLocalDate ^java.sql.Date %)]
+                             [(java.sql.Time. 0) "(.toLocalTime d)" #(.toLocalTime ^java.sql.Time %)]
+                             [(java.sql.Timestamp. 0) "(.toInstant d)" #(.toInstant ^java.sql.Timestamp %)]]]
+      (let [message (try (pt/parse (->OtherDraft 1 1 v)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+        (is (str/includes? (str message) fix) (str (class v)))
+        (is (some? (pt/parse (->OtherDraft 1 1 (convert v)))) (str (class v)))))))

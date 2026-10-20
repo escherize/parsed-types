@@ -21,7 +21,8 @@ The README covers how to use the library; this page covers what it promises and 
 | A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
 | A parsed value holds only immutable values | `parse` walks every field of every draft in the tree, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test`, `a-mutable-value-in-a-child-is-refused-test` |
 | A clock is refused, though its class is a final `java.time` class | `java.time.Clock` and `InstantSource` values are refused before the `java.time` rule | `a-clock-is-refused-test` |
-| The immutability walk can't overflow the stack, or skip the depth limit through shared structure | The walk keeps an explicit stack, and records the deepest level it walked each collection at: one reached again deeper is walked again | `the-walk-keeps-its-own-stack-test`, `shared-structure-is-walked-again-when-reached-deeper-test` |
+| The immutability walk can't overflow the stack, or skip the depth limit through shared structure | The walk keeps an explicit stack, and records the height of each collection it walked: the most levels below it. One reached again is skipped when its deepest value is still within the limit from there, and walked again otherwise | `the-walk-keeps-its-own-stack-test`, `shared-structure-is-walked-again-when-reached-deeper-test` |
+| The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw `::cannot-change` | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `java-map-interface-test` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `java-map-interface-test` |
 | A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `draft-test` |
@@ -98,7 +99,7 @@ without a `:rule`, or a `throw` of anything but an `ex-info`.
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed`. The rule says which, and the message what to re-evaluate (see "REPL reloads") | `:class`, and `:ns`, `:field` or `:parent` where they apply |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
 | `::no-field` | reading a key that isn't a field, or changing one on a draft or a parsed value: a key that isn't a field is reported before the change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
-| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got anything but a literal map that names every field and only fields (found when it compiles), `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
+| `::bad-input` | a field's value nests deeper than 1000 levels (`value-too-deep`, with `:path` cut to its first 8 steps and `:depth`), `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got anything but a literal map that names every field and only fields (found when it compiles), `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads, or a type whose `defparsed` stopped after its `deftype`s (`type-not-loaded`) | `:draft` when found at load; `:class` and `:ns` for `type-not-loaded` |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
@@ -190,10 +191,12 @@ two are not equal. A parent's pure checks run
   custom comparator can read state that changes. Refused: everything else, including lazy and other seqs, since
   realizing one could run side effects or never end; pass `(vec ...)`. For an array the message names
   `(into [] a)`, since `(vec a)` of an object array of 32 or fewer elements shares the array. Nesting deeper than 1000
-  levels is refused too, and the message shows the first 8 steps of a longer path. The walk keeps its own stack, so a
-  thread with a small stack gets the same answer. Each collection is walked once per parse, by identity, so shared
-  structure costs its size, not the number of paths to it; one reached again deeper than before is walked again, so
-  the depth limit holds on every path.
+  levels is refused too, with the rule `value-too-deep`. The message shows the first 8 steps of a longer path, and
+  so does `:path` in the ex-data, with `:depth` for its length. The walk keeps its own stack, so a thread with a small
+  stack gets the same answer. Each collection is walked once per parse, by identity, so shared structure costs its
+  size, not the number of paths to it. One reached again deeper than its height allows is walked again, so the depth
+  limit holds on every path. A `java.sql.Date` is refused with `(.toLocalDate d)` as the fix, a `java.sql.Time` with
+  `(.toLocalTime d)`, since both throw on `.toInstant`, and a `java.sql.Timestamp` with `(.toInstant d)`.
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` takes only a literal map.** It checks the keys when it compiles, so a map built at run time is a

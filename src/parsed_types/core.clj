@@ -1179,107 +1179,114 @@
         (keep #(try (Class/forName %) (catch ClassNotFoundException _ nil)))
         ["java.time.InstantSource"]))
 
+(defn- children-or-refusal
+  "What the walk in [[not-immutable]] does with `v`, at `path`: `[:refuse rule what fix]`, or `[:walk children]`, the
+  values inside it to walk, each as `[value path]`, its metadata first."
+  [v path]
+  (let [c        (class v)
+        refuse   (fn [what fix] [:refuse ::rule/mutable-value what fix])
+        walk     (fn [items] [:walk (cond->> items
+                                      (and (instance? clojure.lang.IObj v) (some? (meta v)))
+                                      (cons [(meta v) (conj path '<meta>)]))])]
+    (cond
+      (contains? immutable-classes c) (walk nil)
+      (class? v)                      (walk nil)
+
+      (some #(.isInstance ^Class % v) clock-classes)
+      (refuse "a clock, which reads the time each time it is asked" "Pass the instant it reads, as in (.instant clock).")
+
+      (java-time-value? c) (walk nil)
+      (issued? v)          (walk nil)
+
+      (and (instance? clojure.lang.Sorted v)
+           (not (identical? clojure.lang.RT/DEFAULT_COMPARATOR (.comparator ^clojure.lang.Sorted v))))
+      (refuse "a sorted collection with a custom comparator, which can read state that changes"
+              "Use (sorted-map ...) or (sorted-set ...), which sort with compare, or a plain map or set.")
+
+      (instance? clojure.lang.IPersistentMap v)
+      (walk (mapcat (fn [[k x]] [[k (conj path '<key>)] [x (conj path k)]]) v))
+
+      (or (instance? clojure.lang.IPersistentVector v) (list? v) (instance? clojure.lang.PersistentQueue v))
+      (walk (map-indexed (fn [i x] [x (conj path i)]) v))
+
+      (instance? clojure.lang.IPersistentSet v)
+      (walk (map (fn [x] [x (conj path '<element>)]) v))
+
+      ;; not (vec a): vec of an Object[] of 32 or fewer elements shares the array
+      (.isArray c)                        (refuse "a Java array" "Copy it into a vector, as in (into [] a).")
+      (instance? clojure.lang.IAtom v)    (refuse "an atom" "Deref it, as in @a.")
+      (instance? clojure.lang.IRef v)     (refuse "a reference type" "Deref it, as in @r.")
+      (instance? clojure.lang.Volatile v) (refuse "a volatile" "Deref it, as in @v.")
+      ;; java.sql.Date and java.sql.Time throw on .toInstant
+      (instance? java.sql.Date v)         (refuse "a mutable date" "Use java.time.LocalDate, as in (.toLocalDate d).")
+      (instance? java.sql.Time v)         (refuse "a mutable time" "Use java.time.LocalTime, as in (.toLocalTime d).")
+      (instance? java.util.Date v)        (refuse "a mutable date" "Use java.time.Instant, as in (.toInstant d).")
+
+      (instance? clojure.lang.LazySeq v)
+      (refuse "a lazy seq, which realizing could run side effects or never end" "Pass a vector, as in (vec s).")
+
+      (instance? clojure.lang.ISeq v) (refuse "a seq, which may be lazy" "Pass a vector, as in (vec s).")
+
+      (or (instance? java.util.Collection v) (instance? java.util.Map v))
+      (refuse "a mutable Java collection" "Copy it into a Clojure collection, as in (vec c) or (into {} m).")
+
+      :else
+      (refuse "a value not known to be immutable"
+              (str "Convert it to an immutable value, such as a string, a number, a java.time value or a persistent"
+                   " collection.")))))
+
 (defn- not-immutable
-  "nil when `v` is known to be immutable all the way down, else `[path what fix class-name]`: where inside the field
-  the first value that is not is, what it is, the fix, and its class. Accepts nil, the values of
+  "nil when `v` is known to be immutable all the way down, else `[rule path what fix class-name]`: the rule, where
+  inside the field the first value that is not is, what it is, the fix, and its class. Accepts nil, the values of
   [[immutable-classes]], classes, `java.time` values but clocks, values [[parse]] issued, and persistent vectors, maps
   (records and drafts included), sets, lists and queues whose contents pass, map keys and metadata included. A sorted
   collection must use the default comparator, since a custom one can read state that changes. Refuses everything
   else, lazy and other seqs too: realizing one could run side effects or never end. Refuses a value nested deeper
-  than [[max-value-depth]].
+  than [[max-value-depth]], with the rule `value-too-deep`.
 
-  The walk keeps its own stack, so its depth does not depend on the thread's. `walked` maps each collection already
-  walked in this parse, by identity, to the deepest level it was walked at: a collection reached again at that level
-  or above is skipped, so shared structure costs its size, not the number of paths to it, and one reached deeper is
-  walked again, so the depth limit holds on every path."
-  [v path ^java.util.IdentityHashMap walked]
-  (loop [stack (list [v path false])]
-    (when-let [[v path meta-walked?] (first stack)]
-      (let [stack  (rest stack)
-            c      (class v)
-            depth  (count path)
-            refuse (fn [what fix] [path what fix (.getName ^Class c)])
-            push   (fn [items] (into stack (reverse items)))]
-        (cond
-          (< max-value-depth depth)
-          (refuse (str "a value nested deeper than " max-value-depth " levels") "Flatten it.")
+  The walk keeps its own stack, so its depth does not depend on the thread's. `heights` maps each value with values
+  inside it that passed in this parse, by identity, to its height: the most levels below it. One reached again is
+  skipped when its deepest value is still within the limit from there, so shared structure costs its size, not the
+  number of paths to it, and the depth limit holds on every path."
+  [v ^java.util.IdentityHashMap heights]
+  ;; A frame is [:visit value path parent] or [:exit value acc parent], where `acc` and `parent` are 1-element arrays
+  ;; that collect the height of a value from its children: each child's height plus one.
+  (let [bump! (fn [^longs parent ^long h] (when parent (aset parent 0 (max (aget parent 0) (inc h)))))]
+    (loop [stack (list [:visit v [] nil])]
+      (when-let [[op x a parent] (first stack)]
+        (let [stack (rest stack)]
+          (if (= :exit op)
+            (let [h (aget ^longs a 0)]
+              (.put heights x h)
+              (bump! parent h)
+              (recur stack))
+            (let [path  a
+                  depth (count path)
+                  known (when (some? x) (.get heights x))]
+              (cond
+                (< max-value-depth depth)
+                [::rule/value-too-deep path (str "a value nested deeper than " max-value-depth " levels")
+                 (str "Store a flatter value: for nested vectors, (vec (flatten v)), or keep it as text, as in"
+                      " (pr-str v).")
+                 (.getName (class x))]
 
-          (nil? v)
-          (recur stack)
+                (nil? x)
+                (do (bump! parent 0) (recur stack))
 
-          (and (not meta-walked?)
-               (instance? clojure.lang.IPersistentCollection v)
-               (let [deepest (.get walked v)] (and deepest (<= depth (long deepest)))))
-          (recur stack)
+                (and known (<= (+ depth (long known)) max-value-depth))
+                (do (bump! parent known) (recur stack))
 
-          ;; the metadata first, then the value itself
-          (and (not meta-walked?) (instance? clojure.lang.IObj v) (some? (meta v)))
-          (do (when (instance? clojure.lang.IPersistentCollection v) (.put walked v depth))
-              (recur (conj stack [v path true] [(meta v) (conj path '<meta>) false])))
-
-          :else
-          (do
-            (when (instance? clojure.lang.IPersistentCollection v) (.put walked v depth))
-            (cond
-              (contains? immutable-classes c)
-              (recur stack)
-
-              (class? v)
-              (recur stack)
-
-              (some #(.isInstance ^Class % v) clock-classes)
-              (refuse "a clock, which reads the time each time it is asked"
-                      "Pass the instant it reads, as in (.instant clock).")
-
-              (java-time-value? c)
-              (recur stack)
-
-              (issued? v)
-              (recur stack)
-
-              (and (instance? clojure.lang.Sorted v)
-                   (not (identical? clojure.lang.RT/DEFAULT_COMPARATOR (.comparator ^clojure.lang.Sorted v))))
-              (refuse "a sorted collection with a custom comparator, which can read state that changes"
-                      "Use (sorted-map ...) or (sorted-set ...), which sort with compare, or a plain map or set.")
-
-              (instance? clojure.lang.IPersistentMap v)
-              (recur (push (mapcat (fn [[k x]] [[k (conj path '<key>) false] [x (conj path k) false]]) v)))
-
-              (or (instance? clojure.lang.IPersistentVector v) (list? v) (instance? clojure.lang.PersistentQueue v))
-              (recur (push (map-indexed (fn [i x] [x (conj path i) false]) v)))
-
-              (instance? clojure.lang.IPersistentSet v)
-              (recur (push (map (fn [x] [x (conj path '<element>) false]) v)))
-
-              ;; not (vec a): vec of an Object[] of 32 or fewer elements shares the array
-              (.isArray c)
-              (refuse "a Java array" "Copy it into a vector, as in (into [] a).")
-
-              (instance? clojure.lang.IAtom v)
-              (refuse "an atom" "Deref it, as in @a.")
-
-              (instance? clojure.lang.IRef v)
-              (refuse "a reference type" "Deref it, as in @r.")
-
-              (instance? clojure.lang.Volatile v)
-              (refuse "a volatile" "Deref it, as in @v.")
-
-              (instance? java.util.Date v)
-              (refuse "a mutable date" "Use java.time.Instant, as in (.toInstant d).")
-
-              (instance? clojure.lang.LazySeq v)
-              (refuse "a lazy seq, which realizing could run side effects or never end" "Pass a vector, as in (vec s).")
-
-              (instance? clojure.lang.ISeq v)
-              (refuse "a seq, which may be lazy" "Pass a vector, as in (vec s).")
-
-              (or (instance? java.util.Collection v) (instance? java.util.Map v))
-              (refuse "a mutable Java collection" "Copy it into a Clojure collection, as in (vec c) or (into {} m).")
-
-              :else
-              (refuse "a value not known to be immutable"
-                      (str "Convert it to an immutable value, such as a string, a number, a java.time value or a"
-                           " persistent collection.")))))))))
+                :else
+                (let [[result & more] (children-or-refusal x path)]
+                  (if (= :refuse result)
+                    (let [[rule what fix] more] [rule path what fix (.getName (class x))])
+                    (let [children (first more)]
+                      (if (empty? children)
+                        (do (bump! parent 0) (recur stack))
+                        (let [acc (long-array 1)]
+                          (recur (into (conj stack [:exit x acc parent])
+                                       (map (fn [[cv cp]] [:visit cv cp acc]))
+                                       (reverse children))))))))))))))))
 
 (defn- refuse-mutable!
   "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable:
@@ -1296,17 +1303,20 @@
                      :field field})))
   (doseq [[field v] values
           :when       (not (contains? children field))
-          :let        [[path what fix got] (not-immutable v [] walked)]
+          :let        [[rule path what fix got] (not-immutable v walked)]
           :when       what]
-    (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field
-                         (when (seq path)
-                           (str " at " (if (< 8 (count path))
-                                         (str (subvec path 0 8) " and " (- (count path) 8) " levels more")
-                                         path)))
-                         " holds " what " (" got "). A parsed value holds only values known to be immutable, so what"
-                         " its checks proved stays true. " fix)
-                    {:type ::bad-input, :rule ::rule/mutable-value, :draft (.getName (class draft)), :field field
-                     :path path, :got got}))))
+    (let [shown (if (< 8 (count path)) (str (subvec path 0 8) " and " (- (count path) 8) " levels more") path)]
+      (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field
+                           (when (seq path) (str " at " shown))
+                           " holds " what " (" got "). A parsed value holds only values known to be immutable, so"
+                           " what its checks proved stays true"
+                           (when (= rule ::rule/value-too-deep) ", and proving it walks a bounded depth")
+                           ". " fix)
+                      (merge {:type ::bad-input, :rule rule, :draft (.getName (class draft)), :field field
+                              :path path, :got got}
+                             ;; a path over the limit is long: the ex-data keeps its first steps and its length
+                             (when (= rule ::rule/value-too-deep)
+                               {:path (subvec path 0 8), :depth (count path)})))))))
 
 (defn- start [draft walked]
   (let [plan   (plan-for draft)
