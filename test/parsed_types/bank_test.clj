@@ -297,3 +297,25 @@
   (let [chain (fn [levels] (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range (dec levels))))]
     (is (pt/parsed? Chain (pt/parse (chain 1000))) "1000 levels, counting the root, parse")
     (is (= 400 (:status-code (thrown-data #(pt/parse (chain 1001))))) "1001 do not")))
+
+;;; A parent check that misspells a child's field
+
+(pt/defparsed Sloppy [transfers]
+  (children transfers Transfer)
+  (pure ::none-frozen "No transfer is frozen." [transfers] (not-any? :frozen? transfers)))
+
+(deftest a-parent-check-cannot-read-a-key-a-child-lacks-test
+  (testing "children are closed values inside parent checks too: a misspelled key throws, never nil"
+    (is (= 500 (:status-code (thrown-data #(pt/parse (->SloppyDraft [(->TransferDraft :ada 1 2 1M)]))))))))
+
+;;; A fetch that leaves out a tuple
+
+(defn- forgetful-rows [tuples] (into {} (map (fn [t] [t {:ok true}])) (rest tuples)))
+
+(pt/defparsed Forgot [id]
+  (external ::row-ok "The row is ok." [] [row ::row] (true? (:ok row)))
+  (fetch ::row [id] forgetful-rows))
+
+(deftest a-fetch-must-answer-every-tuple-test
+  (testing "a missing tuple is a 500, never a nil row a check could pass on"
+    (is (= 500 (:status-code (thrown-data #(pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)])))))))

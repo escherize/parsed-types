@@ -32,8 +32,7 @@
   passes of the checks that do not read the field it sets."
   (:refer-clojure :exclude [let])
   (:require
-   [clojure.set :as set]
-   [potemkin.collections :as p.collections])
+   [clojure.set :as set])
   (:import
    (clojure.lang Reflector)
    (com.google.common.collect MapMaker)
@@ -60,7 +59,7 @@
   (doseq [[form init] (partition 2 bindings)]
     ;; only `(pt/parsed ...)` is checked; resolving first keeps this namespace's own `let`s cheap while it loads
     (clojure.core/let [head (when (seq? init) (first init))
-                       v    (when (symbol? head) (resolve head))]
+                       v    (when (and (symbol? head) (not (contains? &env head))) (resolve head))]
       (when (and (var? v) (= 'parsed-types.core/parsed (symbol v)))
         (check-let-binding! form init))))
   `(clojure.core/let ~bindings ~@body))
@@ -116,22 +115,82 @@
 
 (declare assoc-draft)
 
-(defn- map-type-body
-  "The methods of a map type with exactly `fields`: reading another key throws unless a default is given. `assoc-form`
-  is the body of `assoc`, over `this`, `k` and `v`."
+(defn- map-type-methods
+  "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws unless a default
+  is given. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name` throws for any other change.
+  Every function in these bodies is written qualified, so no field name can shadow it."
   [fields this k v assoc-form final-name]
-  (clojure.core/let [nf     (gensym "not-found")
-                     lookup (fn [missing] `(case ~k ~@(mapcat (fn [f] [(keyword f) f]) fields) ~missing))]
-    `[(~'get [~this ~k ~nf] ~(lookup nf))
+  (clojure.core/let [nf      (gensym "not-found")
+                     f       (gensym "f")
+                     init    (gensym "init")
+                     o       (gensym "o")
+                     kws     (mapv keyword fields)
+                     lookup  (fn [missing] `(case ~k ~@(mapcat (fn [fld] [(keyword fld) fld]) fields) ~missing))
+                     entries `[~@(map (fn [fld] `(clojure.lang.MapEntry/create ~(keyword fld) ~fld)) fields)]]
+    `[clojure.lang.MapEquivalence
+      clojure.lang.IPersistentMap
+      (~'assoc [~this ~k ~v] ~assoc-form)
+      (~'assocEx [~this ~k ~v] (~final-name ~this "assocEx"))
+      (~'without [~this ~k] (~final-name ~this "dissoc"))
+      (~'containsKey [~this ~k] (clojure.core/contains? ~(set kws) ~k))
+      (~'entryAt [~this ~k] (if (clojure.core/contains? ~(set kws) ~k)
+                              (clojure.lang.MapEntry/create ~k (.valAt ~this ~k))
+                              nil))
+      (~'count [~this] ~(count fields))
+      (~'cons [~this ~o] (clojure.core/reduce (fn [m# [k# v#]] (clojure.core/assoc m# k# v#))
+                                              ~this
+                                              (if (clojure.core/map? ~o) ~o (clojure.core/some-> ~o clojure.core/vector))))
+      (~'empty [~this] {})
+      (~'equiv [~this ~o] (clojure.lang.APersistentMap/mapEquals ~this ~o))
+      (~'seq [~this] (clojure.core/seq ~entries))
+      (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
       (~'valAt [~this ~k] ~(lookup `(no-field! ~this ~k)))
       (~'valAt [~this ~k ~nf] ~(lookup nf))
-      (~'invoke [~this ~k] ~(lookup `(no-field! ~this ~k)))
-      (~'invoke [~this ~k ~nf] ~(lookup nf))
-      (~'assoc [~this ~k ~v] ~assoc-form)
-      (~'dissoc [~this ~k] (~final-name ~this "dissoc"))
-      (~'keys [~this] ~(mapv keyword fields))
+
+      clojure.lang.IKVReduce
+      (~'kvreduce [~this ~f ~init]
+       (clojure.core/reduce (fn [acc# [k# v#]] (~f acc# k# v#)) ~init (clojure.core/seq ~entries)))
+
+      clojure.lang.IHashEq
+      (~'hasheq [~this] (clojure.lang.APersistentMap/mapHasheq ~this))
+
+      clojure.lang.IFn
+      (~'invoke [~this ~k] (.valAt ~this ~k))
+      (~'invoke [~this ~k ~nf] (.valAt ~this ~k ~nf))
+      (~'applyTo [~this args#] (clojure.lang.AFn/applyToHelper ~this args#))
+
+      clojure.lang.IObj
       (~'meta [~this] nil)
-      (~'with-meta [~this ~k] (~final-name ~this "with-meta"))]))
+      (~'withMeta [~this ~k] (~final-name ~this "with-meta"))
+
+      java.util.Map
+      (~'get [~this ~k] (.valAt ~this ~k nil))
+      (~'size [~this] ~(count fields))
+      (~'isEmpty [~this] ~(empty? fields))
+      (~'containsValue [~this ~o] (clojure.core/boolean (clojure.core/some #(clojure.core/= ~o %) [~@fields])))
+      (~'keySet [~this] ~(set kws))
+      (~'values [~this] [~@fields])
+      (~'entrySet [~this] (clojure.core/set ~entries))
+      (~'put [~this ~k ~v] (throw (UnsupportedOperationException.)))
+      (~'putAll [~this ~o] (throw (UnsupportedOperationException.)))
+      (~'remove [~this ~k] (throw (UnsupportedOperationException.)))
+      (~'clear [~this] (throw (UnsupportedOperationException.)))
+
+      Object
+      (~'hashCode [~this] (clojure.lang.APersistentMap/mapHash ~this))
+      (~'equals [~this ~o] (clojure.lang.APersistentMap/mapEquals ~this ~o))
+      (~'toString [~this] (clojure.core/str (clojure.core/into {} ~this)))]))
+
+(defn- check-field-names!
+  "Refuse fields that cannot be a type's fields: anything but simple symbols, a name twice, or a special form, which
+  a field cannot shadow."
+  [form fields]
+  (when-not (and (vector? fields) (every? simple-symbol? fields))
+    (throw (ex-info (str "fields must be a vector of simple symbols: " (pr-str form)) {:form form})))
+  (when-not (apply distinct? ::sentinel fields)
+    (throw (ex-info (str "a field is named twice: " (pr-str form)) {:form form})))
+  (when-let [special (seq (filter #(or (special-symbol? %) (= '& %)) fields))]
+    (throw (ex-info (str "a field cannot be named like a special form: " (vec special)) {:form form}))))
 
 (defn- print-method-form [name]
   ;; `#ns.Type{...}`, like a record, so a value is told apart from a plain map at the REPL. The reader cannot build one
@@ -145,11 +204,12 @@
   throw, and so does reading a key that is not a field. [[defparsed]] calls this; use it directly only with a
   declaration written by hand."
   [name fields]
+  (check-field-names! &form fields)
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
     `(do
-       (p.collections/def-map-type ~name [~@fields]
+       (deftype ~name [~@fields]
          parsed_types.core.ParsedValue
-         ~@(map-type-body fields this k v `(final! ~this "assoc") `final!))
+         ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!))
        ~(print-method-form name)
        ~name)))
 
@@ -159,13 +219,14 @@
   `with-meta` throw, and so do reading or setting a key that is not a field. [[defparsed]] calls this; use it
   directly only with a declaration written by hand."
   [name fields declaration-expr]
+  (check-field-names! &form fields)
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
     `(do
-       (p.collections/def-map-type ~name [~@fields]
+       (deftype ~name [~@fields]
          parsed_types.core.DraftValue
          Draft
          (~'declaration [~this] ~declaration-expr)
-         ~@(map-type-body fields this k v `(assoc-draft ~this ~k ~v) `fixed!))
+         ~@(map-type-methods fields this k v `(assoc-draft ~this ~k ~v) `fixed!))
        ~(print-method-form name)
        ~name)))
 
@@ -348,6 +409,8 @@
         draft-name  (symbol (str parsed-name "Draft"))
         decl-sym    (symbol (str draft-name "-declaration"))]
     (when-not (apply distinct? ::sentinel names) (syntax-error! &form "a check or fetch name is used twice"))
+    (when-let [reserved (seq (filter #(= "parsed-types.child" (namespace %)) names))]
+      (syntax-error! &form (str "names in parsed-types.child are reserved for child-field checks: " (vec reserved))))
     `(do
        (defparsed-type ~parsed-name ~fields)
        (def ~(vary-meta decl-sym assoc :private true)
@@ -427,6 +490,9 @@
                         {:draft-fields (basis draft-class), :parsed-fields (basis parses-to)}))
     (when-let [dupes (seq (for [[n c] (frequencies names) :when (< 1 c)] n))]
       (bad-declaration! draft-class "a check or fetch name is used twice" {:names dupes}))
+    (when-let [reserved (seq (filter #(and (keyword? %) (= "parsed-types.child" (namespace %))) names))]
+      (bad-declaration! draft-class "names in parsed-types.child are reserved for child-field checks"
+                        {:names reserved}))
     (doseq [[field {:keys [kind type]}] children]
       (when-not (contains? fields field)
         (bad-declaration! draft-class "a child field is not a field of the draft" {:field field}))
@@ -677,9 +743,12 @@
           st
           (filter (comp (:needed st) :name) (get-in st [:plan :pure]))))
 
+(declare construct)
+
 (defn- pure-phase
-  "Run every node's pure checks, children before parents. A parent's checks see each child as the map of values its
-  own checks saw, and a node is bad when it, or anything under it, failed."
+  "Run every node's pure checks, children before parents, and build each node's value: a value of its parsed type,
+  holding its children's values. A parent's checks see each child as that value, which is closed like any parsed
+  value, and is the one [[parse]] issues if the tree passes. A node is bad when it, or anything under it, failed."
   [nodes]
   (first (reduce (fn [[out bad views] {:keys [tree path child-paths plan values], :as st}]
                    (let [inputs (reduce-kv (fn [m field paths]
@@ -687,9 +756,10 @@
                                                               (views [tree (first paths)])
                                                               (mapv #(views [tree %]) paths))))
                                            values child-paths)
-                         st     (run-pure (assoc st :inputs inputs) bad)
+                         view   (construct (:parses-to plan) (:fields plan) inputs)
+                         st     (run-pure (assoc st :inputs inputs, :view view) bad)
                          bad?   (or (seq (:failed st)) (some #(bad [tree %]) (apply concat (vals child-paths))))]
-                     [(conj out st) (cond-> bad bad? (conj [tree path])) (assoc views [tree path] inputs)]))
+                     [(conj out st) (cond-> bad bad? (conj [tree path])) (assoc views [tree path] view)]))
                  [[] #{} {}]
                  nodes)))
 
@@ -773,20 +843,11 @@
   (Reflector/invokeConstructor cls (object-array (map #(get values %) fields))))
 
 (defn- issue-tree
-  "The parsed root of the tree, its child fields holding the parsed children, every value remembered as issued."
+  "The parsed root of the tree: every node's value, built in the pure phase, remembered as issued."
   [nodes]
-  (get (reduce (fn [by-path {:keys [plan values path child-paths]}]
-                 (let [values (reduce-kv (fn [vs field paths]
-                                           (assoc vs field (if (= :one (get-in plan [:children field :kind]))
-                                                             (by-path (first paths))
-                                                             (mapv by-path paths))))
-                                         values child-paths)
-                       parsed (construct (:parses-to plan) (:fields plan) values)]
-                   (.put issued parsed plan)
-                   (assoc by-path path parsed)))
-               {}
-               nodes)
-       []))
+  (doseq [{:keys [view plan]} nodes]
+    (.put issued view plan))
+  (:view (peek nodes)))
 
 (defn- invalid! [nodes data]
   (throw (ex-info (str "Invalid " (.getSimpleName ^Class (:parses-to (:plan (peek nodes)))))
@@ -921,7 +982,10 @@
           (when-let [missing (seq (remove (set (keys m)) flds))]
             (throw (ex-info (str "draft: " parsed-type " needs every field; missing " (vec missing)
                                  ". Write nil for a field you mean to leave empty.") {})))
-          `(new ~dsym ~@(map #(get m %) flds)))
+          ;; bind in the order written, so the values are evaluated as they read
+          (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
+            `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
+               (new ~dsym ~@(map syms flds)))))
       `(draft-from-map ~dsym ~m))))
 
 (defn- let-fields

@@ -1,6 +1,5 @@
 {:paths ["src" "resources"]
  :deps  {org.clojure/clojure    {:mvn/version "1.12.3"}
-         potemkin/potemkin      {:mvn/version "0.4.8"}
          com.google.guava/guava {:mvn/version "33.5.0-jre"}}
  :aliases
  {:test {:extra-paths ["test"]

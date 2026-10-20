@@ -244,3 +244,58 @@
         (deliver start true)
         (run! deref fs)
         (is (every? #(= #{::a-int} (pt/passed-checks %)) drafts))))))
+
+;;; Field names
+
+(pt/defparsed Awkward [count map set str seq into contains? or when keys]
+  (pure ::count-int "count is an integer." [count] (int? count)))
+
+(deftest fields-named-like-core-functions-test
+  (testing "a field may be named like any clojure.core function or macro"
+    (let [d (->AwkwardDraft 1 2 3 4 5 6 7 8 9 10)
+          p (pt/parse d)]
+      (is (= {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10} p))
+      (is (= 10 (count p) (count d)))
+      (is (contains? p :map))
+      (is (= [:count 1] (first (seq p))))
+      (is (= (hash {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10})
+             (hash p)))
+      (is (string? (str p)))
+      (is (re-find #"#parsed_types.defparsed_test.Awkward\{" (pr-str p)))
+      (is (= 2 (:map (assoc d :map 2))))
+      (is (= 9 (pt/let [{:keys [when]} (pt/parsed Awkward p)] when)))
+      (is (= [:count :map :set :str :seq :into :contains? :or :when :keys] (keys p))))))
+
+(deftest special-form-field-names-test
+  (doseq [field '[if do def fn* let* recur throw & new quote]]
+    (testing (str field)
+      (is (re-find #"special form|simple symbols"
+                   (str (compile-error (list 'pt/defparsed 'Special [field]))))))))
+
+(deftest reserved-check-names-test
+  (testing "parsed-types.child names belong to the child-field checks"
+    (is (re-find #"reserved for child-field checks"
+                 (str (compile-error '(pt/defparsed R [kids]
+                                        (children kids Point)
+                                        (pure :parsed-types.child/kids "d" [kids] false))))))))
+
+(deftest let-checks-every-binding-test
+  (is (re-find #"Point has no field :z"
+               (str (compile-error '(fn [p q] (pt/let [{:keys [x]} (pt/parsed Point p)
+                                                       {:keys [z]} (pt/parsed Point q)]
+                                                [x z])))))))
+
+(deftest let-ignores-a-local-named-parsed-test
+  (testing "in a namespace that refers parsed, a local of that name is not pt/parsed"
+    (let [n (create-ns (gensym "refers-parsed"))]
+      (binding [*ns* n]
+        (eval '(clojure.core/refer-clojure))
+        (eval '(require '[parsed-types.core :as pt :refer [parsed]]))
+        (is (fn? (eval '(fn [parsed m] (pt/let [{:keys [whatever]} (parsed m)] whatever)))))))))
+
+(def ^:private order (atom []))
+
+(deftest draft-evaluates-a-literal-map-in-the-order-written-test
+  (reset! order [])
+  (pt/draft Point {:y (do (swap! order conj :y) 2), :x (do (swap! order conj :x) 1)})
+  (is (= [:y :x] @order)))
