@@ -114,6 +114,18 @@
     (is (re-find #"defdraft-type is not public" (str (compile-error '(pt/defdraft-type HandDraft [a] {})))))
     (is (re-find #"defparsed-type is not public" (str (compile-error '(pt/defparsed-type Hand [a])))))))
 
+(defn- resolve-here [sym] @(ns-resolve 'parsed-types.defparsed-test sym))
+
+(defn- resolve-here-class [sym] (ns-resolve 'parsed-types.defparsed-test sym))
+
+(defn- thrown
+  "The ex-data of what `thunk` threw, with its message as `:message`, through compiler wrapping, or nil."
+  [thunk]
+  (try (thunk) nil
+       (catch Throwable t
+         (when-let [e (loop [e t] (cond (nil? e) nil, (:type (ex-data e)) e, :else (recur (ex-cause e))))]
+           (assoc (ex-data e) :message (ex-message e))))))
+
 (defn- eval-here [form]
   (binding [*ns* (the-ns 'parsed-types.defparsed-test)] (eval form)))
 
@@ -137,12 +149,50 @@
         (let [[data message] (load-error form)]
           (is (= ::pt/bad-declaration (:type data)))
           (is (re-find re (str message)))))))
-  (testing "a pure check may close over a local: defparsed inside a let, which compiles once the type exists"
-    (eval-here '(pt/defparsed Guarded [a]))
-    (eval-here '(let [x 1] (pt/defparsed Guarded [a] (pure ::c "d" [a] (= a x)))))
-    (is (some? (pt/parse (@(ns-resolve 'parsed-types.defparsed-test '->GuardedDraft) 1))))
-    (is (= #{::c} (set (keys (:failures (try (pt/parse (@(ns-resolve 'parsed-types.defparsed-test '->GuardedDraft) 2)) nil
-                                             (catch clojure.lang.ExceptionInfo e (ex-data e))))))))))
+  (testing "a defparsed that fails when it loads changes nothing: the classes, the factory and the plan stay the old ones"
+    (eval-here '(pt/defparsed Kept [a] (pure ::kept-pos "a is positive." [a] (pos? a))))
+    (let [cls     (resolve-here-class 'Kept)
+          factory (resolve-here '->KeptDraft)
+          old     (pt/parse (factory 1))]
+      (doseq [[label form] [["a fetch that is not a fn" '(pt/defparsed Kept [a] (fetch ::f [a] 42))]
+                            ["a child type that is not a parsed type" '(pt/defparsed Kept [a] (child a String))]]]
+        (testing label
+          (is (= ::pt/bad-declaration (:type (first (load-error form)))))
+          (is (identical? cls (resolve-here-class 'Kept)))
+          (is (identical? factory (resolve-here '->KeptDraft)))
+          (is (identical? old (pt/parsed (resolve-here-class 'Kept) old)))
+          (is (= #{::kept-pos} (set (keys (:failures (thrown #(pt/parse ((resolve-here '->KeptDraft) -1))))))))))))
+  (testing "a defparsed that fails after its deftypes, as when a check does not compile, says so wherever its type is used"
+    (eval-here '(pt/defparsed Broken [a]))
+    (is (some? (load-error '(pt/defparsed Broken [a] (pure ::b "b" [a] (no-such-fn a))))))
+    (let [draft ((resolve-here '->BrokenDraft) 1)]
+      (doseq [[label thunk] [["parse" #(pt/parse draft)]
+                             ["parsed" #(pt/parsed (resolve-here-class 'Broken) nil)]
+                             ["draft" #(eval-here '(pt/draft Broken {:a 1}))]
+                             ["a child field" #(do (eval-here '(pt/defparsed BrokenHolder [b] (child b Kept)))
+                                                   (pt/parse ((resolve-here '->BrokenHolderDraft) draft)))]]]
+        (testing label
+          (let [e (thrown thunk)]
+            (is (= {:type ::pt/bad-declaration, :rule :parsed-types.rule/type-not-loaded}
+                   (select-keys e [:type :rule])))
+            (is (re-find #"the defparsed Broken in parsed-types.defparsed-test failed to load.*Fix that error and re-evaluate the defparsed Broken"
+                         (str (:message e)))))))
+      (testing "and the fix it names works"
+        (eval-here '(pt/defparsed Broken [a]))
+        (is (some? (pt/parse ((resolve-here '->BrokenDraft) 1))))))))
+
+(deftest defparsed-only-at-the-top-level-test
+  (doseq [form ['(let [x 1] (pt/defparsed InLet [a] (pure ::c "d" [a] (= a x))))
+                '(when true (pt/defparsed InWhen [a]))]]
+    (let [e (thrown #(eval-here form))]
+      (is (= {:type ::pt/bad-declaration, :rule :parsed-types.rule/defparsed-not-top-level}
+             (select-keys e [:type :rule])))
+      (is (re-find #"Write defparsed at the top level of a namespace" (str (:message e))))))
+  (is (nil? (ns-resolve 'parsed-types.defparsed-test 'InLet)) "and it defines no class")
+  (testing "the fix it names works: a top-level def in place of the local"
+    (eval-here '(def limit 1))
+    (eval-here '(pt/defparsed InLet [a] (pure ::c "d" [a] (= a limit))))
+    (is (some? (pt/parse ((resolve-here '->InLetDraft) 1))))))
 
 (deftest match-compile-errors-test
   (doseq [[label form re]
@@ -207,16 +257,6 @@
         (is (= [:x :y] (keys x)))))))
 
 ;;; REPL reloads
-
-(defn- resolve-here [sym] @(ns-resolve 'parsed-types.defparsed-test sym))
-
-(defn- thrown
-  "The ex-data of what `thunk` threw, with its message as `:message`, through compiler wrapping, or nil."
-  [thunk]
-  (try (thunk) nil
-       (catch Throwable t
-         (when-let [e (loop [e t] (cond (nil? e) nil, (:type (ex-data e)) e, :else (recur (ex-cause e))))]
-           (assoc (ex-data e) :message (ex-message e))))))
 
 (deftest re-evaluating-a-child-type-test
   (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
@@ -361,8 +401,8 @@
                (select-keys e [:type :rule :class :owner :ns])))
         (is (re-find #"already defined by a defparsed in the namespace pt-owner.my-app.bank" (:message e)))
         (is (re-find #"Rename one of the namespaces" (:message e)))))
-    (testing "inside a let too, where the whole form compiles before any of it runs"
-      (is (= :parsed-types.rule/class-name-taken
+    (testing "inside a let too, which is refused before it compiles"
+      (is (= :parsed-types.rule/defparsed-not-top-level
              (:rule (thrown #(eval-in 'pt-owner.my_app.bank '(let [] (pt/defparsed Debit [amount]))))))))
     (testing "and the refused defparsed defined no class: the owner's classes are still the loaded ones"
       (is (identical? real-type (loaded-class "pt_owner.my_app.bank.Debit")))

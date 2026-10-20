@@ -15,6 +15,9 @@ The README covers how to use the library; this page covers what it promises and 
 | The proof is not part of the map | `parse-proof` isn't a key, and isn't in `seq`, `count`, equality, hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
 | A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type, and a class name belongs to the namespace that first defined it. `defparsed-type` and `defdraft-type` are private, so calling them doesn't compile, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
 | A declaration error is found when the `defparsed` loads, at the latest | The macro refuses what it can see when it expands. The expansion builds and checks the plan when it loads, and throws `::bad-declaration` then | `compile-errors-test`, `declaration-errors-at-load-test` |
+| A `defparsed` that fails when it loads changes nothing | The expansion is a top-level `do`, which runs each form before it compiles the next. Its first form evaluates the fetch fns and the child types and checks them, before any class is defined. So a refused re-evaluation leaves the classes, the `->NameDraft` factory and the plan as they were | `declaration-errors-at-load-test` |
+| A type whose `defparsed` stopped after its `deftype`s says so | An error after the `deftype`s, such as a check body that doesn't compile, leaves classes that are claimed but have no plan. `parse`, `parsed`, `parsed?`, `pt/draft`, `match`, `defsum` and child fields throw `::bad-declaration` with the rule `type-not-loaded` for them, and say to fix the error and re-evaluate the `defparsed` | `declaration-errors-at-load-test` |
+| `defparsed` works only at the top level, and says so | Inside a `let`, a `when` or any other form, the whole form compiles before any of it runs, so the classes would exist before the checks that guard them. `defparsed` throws `::bad-declaration` when it has locals (`&env`) or compiles inside a fn body (`Compiler/METHOD` is bound) | `defparsed-only-at-the-top-level-test` |
 | A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
 | A parsed value holds only immutable values | `parse` walks every field of every draft in the tree, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test`, `a-mutable-value-in-a-child-is-refused-test` |
 | A clock is refused, though its class is a final `java.time` class | `java.time.Clock` and `InstantSource` values are refused before the `java.time` rule | `a-clock-is-refused-test` |
@@ -96,7 +99,7 @@ without a `:rule`, or a `throw` of anything but an `ex-info`.
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
 | `::no-field` | reading a key that isn't a field, or changing one on a draft or a parsed value: a key that isn't a field is reported before the change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
 | `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got anything but a literal map that names every field and only fields (found when it compiles), `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
-| `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
+| `::bad-declaration` | a declaration error, when `defparsed` expands or loads, or a type whose `defparsed` stopped after its `deftype`s (`type-not-loaded`) | `:draft` when found at load; `:class` and `:ns` for `type-not-loaded` |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
 Class names in ex-data are strings, so ex-data can be serialized. For `::invalid`:
@@ -128,6 +131,8 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
 - a pure check that binds a fetch;
 - an options map: checks take no options;
 - a type name with a dot in it, as in `C.D`;
+- a `defparsed` inside another form, such as a `let` or a `when`. Write it at the top level of a namespace, and move
+  a local a check or fetch uses into a `def`;
 - a field named twice, named `/`, like a special form, with a dot in it, starting with `__`, named `parse-proof`, or compiling
   to the same Java name as another field (`a-b` and `a_b`);
 - a field declared as a child twice, or a child field that isn't a field;
@@ -145,6 +150,12 @@ The expansion builds and checks the plan when it loads, before any `parse`. It t
 
 - a child field names something that isn't a type defined with `defparsed` or a sum defined with `defsum`;
 - a fetch's function isn't a fn.
+
+Both are checked before the `deftype`s, so a re-evaluation that fails them leaves the type as it was. The fetch fns
+and the child types are evaluated then too, once: a fetch fn can't name the type being defined, and a child field
+names it by its own name, as in `(child next Chain)`. An error later in the form, such as a check body that doesn't
+compile, comes after the `deftype`s. Its classes then have no plan, and every use of them throws `type-not-loaded`
+until the `defparsed` is fixed and re-evaluated.
 
 ## Behavior worth knowing
 
@@ -253,8 +264,8 @@ generation pass where code expected another, and needed a second way to ask a ty
 of proof, kept beside the value, and it cost bitmasks, a 64-check limit and a weak map.
 
 **A check's argument vector is its reads.** One list says what the check reads, and the compiler holds the body to
-it. A check may close over a local, and the library doesn't look: a guard against that caught only a
-`defparsed` re-evaluated inside a `let`, and cost a rule and a reflective scan.
+it. A check can't close over a local, since `defparsed` is refused inside another form. It may read a var, and the
+library doesn't look: a check that reads a var that changes is pure in name only.
 
 **Building and reading need no reflection.** `defparsed` knows each class and its fields when it expands, so it
 generates the fns that build a parsed value, build a draft and read a draft's fields.

@@ -163,6 +163,13 @@
     "(child a java.lang.String)" "Name one of those"]
    [:fetch-not-fn (compiling '(pt/defparsed E2 [a] (external ::c "d" [] [r ::f] (some? r)) (fetch ::f [a] 42)))
     "is 42, not a fn" "(fetch :parsed-types.errors-test/f [a] rows-by-id)"]
+   [:defparsed-not-top-level (compiling '(let [x 1] (pt/defparsed E3 [a] (pure ::c "d" [a] (= a x)))))
+    "(defparsed E3 ...) is inside another form" "Write defparsed at the top level of a namespace" "(def limit 10)"]
+   [:type-not-loaded #(do ((compiling '(pt/defparsed E4 [a])))
+                          (try ((compiling '(pt/defparsed E4 [a] (pure ::c "d" [a] (no-such-fn a))))) (catch Exception _))
+                          (pt/parse ((compiling '(->E4Draft 1)))))
+    "pt/parse got a draft of parsed_types.errors_test.E4Draft, but the defparsed E4 in parsed-types.errors-test failed to load"
+    "Fix that error and re-evaluate the defparsed E4" "(require 'parsed-types.errors-test :reload)"]
    [:class-name-taken #(do ((in-ns-named 'errs.my-app '(pt/defparsed Owned [x])))
                            ((in-ns-named 'errs.my_app '(pt/defparsed Owned [x]))))
     "errs.my_app.Owned is already defined by a defparsed in the namespace errs.my-app" "the namespace errs.my_app"

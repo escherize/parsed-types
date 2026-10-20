@@ -99,6 +99,11 @@
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
   (java.util.concurrent.ConcurrentHashMap.))
 
+;; Parsed class name -> the fetch fns and child types its `defparsed` evaluated and checked before defining any class,
+;; for `register!` to take once the classes exist. A failed `defparsed` leaves its entry, which the next one replaces.
+(defonce ^:private ^java.util.concurrent.ConcurrentHashMap pending
+  (java.util.concurrent.ConcurrentHashMap.))
+
 ;; Parsed class name -> the class its `defparsed` defined last. A class that has the name but is not this one is from
 ;; before a REPL re-evaluated the `defparsed`: stale.
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap latest
@@ -435,6 +440,20 @@
          ~@(map-type-methods fields this k v `((var assoc-draft) ~this ~k ~v) `(var fixed!) nil))
        ~(print-method-form name))))
 
+(defn- not-loaded!
+  "Throws `::bad-declaration` when `c` is a class a `defparsed` claimed and defined but never registered: an error
+  stopped it after its `deftype`s. `where` names what got it. Returns nil for any other class."
+  [where ^Class c]
+  (when (and (or (.isAssignableFrom DraftValue c) (.isAssignableFrom ParsedValue c))
+             (nil? (.get registry c)))
+    (when-let [{:keys [ns type role]} (.get owners (.getName c))]
+      (throw (ex-info (str where " got " (if (= :draft role) "a draft of " "the type ") (.getName c) ", but the"
+                           " defparsed " type " in " ns " failed to load: an error stopped it after it defined its"
+                           " classes, so they have no checks. A type is ready only once its defparsed has loaded. Fix"
+                           " that error and re-evaluate the defparsed " type ", or reload its namespace, as in"
+                           " (require '" ns " :reload). Then build the value again.")
+                      {:type ::bad-declaration, :rule ::rule/type-not-loaded, :class (.getName c), :ns ns})))))
+
 ;;; ------------------------------------------------ Sums ------------------------------------------------
 
 (defn- parsed-type?
@@ -525,6 +544,8 @@
 (defn- sum
   "A sum of parsed types, named `name`. Use [[defsum]]."
   [name members]
+  (when (sequential? members)
+    (doseq [m members :when (class? m)] (not-loaded! (str "defsum " name) m)))
   (when-not (valid-members? members)
     (throw (ex-info (str "defsum " name " got "
                          (if (sequential? members)
@@ -579,6 +600,7 @@
                            {:clauses clauses}))
         triples (partition 3 clauses)
         types   (map (fn [[t]] (let [c (resolve t)]
+                                 (when (class? c) (not-loaded! (str "match on " sum-name) c))
                                  (when-not (class? c)
                                    (refuse! ::rule/match-not-a-type
                                             (str "match on " sum-name ": " t " is not a type. Each clause starts"
@@ -790,12 +812,25 @@
   when one before it that shares a field failed. A pure check written before one that reads a proper subset of its
   fields is a compile error: move the smaller one first.
 
+  Write `defparsed` at the top level of a namespace: inside another form it throws `::bad-declaration`.
+
   The plan [[parse]] follows is built and checked when the form loads, so every declaration error throws
-  `::bad-declaration` then, not at the first parse. Only `defparsed` defines parsed types: the draft type and the
+  `::bad-declaration` then, not at the first parse. The fetch fns and the child types are evaluated and checked
+  before any class is defined, so a re-evaluation they refuse leaves the type as it was. A fetch fn therefore can't
+  name the type being defined; a child field may, by its own name. Only `defparsed` defines parsed types: the draft type and the
   parsed type are defined together, so the draft type is the only one that parses to its parsed type.
 
   The parsed type has no `->Name` factory: only [[parse]] builds a value of it that [[parsed]] accepts."
   [parsed-name fields & clauses]
+  ;; Inside another form, the whole form compiles before any of it runs, so the classes would be defined before the
+  ;; checks below them run, and their names would not resolve. `&env` holds the locals, and `Compiler/METHOD` is bound
+  ;; while a fn body compiles, which a `when` at the top level is.
+  (when (or (seq &env) (some? (.deref clojure.lang.Compiler/METHOD)))
+    (syntax-error! &form ::rule/defparsed-not-top-level
+                   (str "(defparsed " (pr-str parsed-name) " ...) is inside another form. defparsed defines classes,"
+                        " then checks and registers them, one step at a time, which works only at the top level of a"
+                        " namespace. Write defparsed at the top level of a namespace, and move a local a check or"
+                        " fetch uses into a def, as in (def limit 10).")))
   (when (and (simple-symbol? parsed-name) (clojure.string/includes? (name parsed-name) "."))
     (syntax-error! &form ::rule/name-with-dot
                    (str "the name " parsed-name " has a dot. A parsed type is a class in this namespace's package, and"
@@ -842,8 +877,9 @@
                                           ". Declare it once, with child or children.")))
         names       (concat (map :name checks) (map :name fetches))
         draft-name  (symbol (str parsed-name "Draft"))
-        claims      {(str (namespace-munge *ns*) "." parsed-name) :parsed
-                     (str (namespace-munge *ns*) "." draft-name)  :draft}]
+        parsed-class-name (str (namespace-munge *ns*) "." parsed-name)
+        claims      {parsed-class-name                          :parsed
+                     (str (namespace-munge *ns*) "." draft-name) :draft}]
     (when-not (apply distinct? ::sentinel names)
       (syntax-error! &form ::rule/name-used-twice
                      (str "a check or fetch name is used twice: "
@@ -865,52 +901,69 @@
                           ". Name them in your own namespace, as in ::" (name (first reserved)) ".")))
     ;; when it expands, so that a refused defparsed never reaches its deftypes, which would redefine the classes
     (claim-class-names! (ns-name *ns*) parsed-name claims false)
-    `(do
-       ;; when it loads, before the deftypes, which is what records the claim; through `var`, because it is private
-       ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
-       ~(defparsed-type parsed-name fields)
-       ~(defdraft-type draft-name fields)
-       ;; through `var`, because `register!` is private: only this expansion may record a plan
-       ((var register!) ~parsed-name ~draft-name
-                        {:checks ~checks, :fetches ~fetches, :children ~children}
-                        ~(builders parsed-name draft-name fields))
-       ~parsed-name)))
+    (let [self?       #(contains? #{parsed-name (symbol parsed-class-name)} %)
+          child-types (into {} (for [[field {:keys [type]}] children :when (not (self? type))] [field type]))]
+      ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
+      ;; every class as it was. The private fns through `var`.
+      `(do
+         ;; the fetch fns and the child types, evaluated once and checked before any class is defined
+         ((var stage!) ~parsed-class-name ~(str (namespace-munge *ns*) "." draft-name)
+                       '~(mapv #(select-keys % [:name :reads]) fetches) [~@(map :f fetches)]
+                       '~(update-vals children #(select-keys % [:kind])) ~child-types)
+         ;; before the deftypes, which is what records the claim
+         ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
+         ~(defparsed-type parsed-name fields)
+         ~(defdraft-type draft-name fields)
+         ;; only this expansion may record a plan
+         ((var register!) ~parsed-name ~draft-name
+                          {:checks   ~checks
+                           :fetches  '~(mapv #(select-keys % [:name :reads]) fetches)
+                           :children '~(update-vals children #(dissoc % :type))}
+                          ~(builders parsed-name draft-name fields))
+         ~parsed-name))))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
 
 (declare plan-for)
 
 (defn- bad-declaration!
-  "Throws `::bad-declaration` for the declaration of `draft-class`, which broke `rule`, when its `defparsed` loads."
-  [draft-class rule message data]
-  (throw (ex-info (str (.getSimpleName ^Class draft-class) ": " message)
-                  (merge {:type ::bad-declaration, :rule rule, :draft (.getName ^Class draft-class)} data))))
+  "Throws `::bad-declaration` for the declaration of the draft class named `draft-class-name`, which broke `rule`, when
+  its `defparsed` loads."
+  [^String draft-class-name rule message data]
+  (throw (ex-info (str (subs draft-class-name (inc (.lastIndexOf draft-class-name "."))) ": " message)
+                  (merge {:type ::bad-declaration, :rule rule, :draft draft-class-name} data))))
 
 (defn- draft-value?
   "Whether `x` is a draft of a type [[defparsed]] defined. A type that only implements `DraftValue` is not."
   [x]
   (and (instance? DraftValue x) (some? (.get registry (class x)))))
 
-(defn- validate-declaration!
-  "Throw `::bad-declaration` for what `defparsed` cannot see when it expands, only when it loads: a child type that is
-  not a parsed type or a sum, and a fetch that is not a fn. A child field may hold `parses-to`, the type being
-  defined, which is registered only once its plan is."
-  [parses-to draft-class {:keys [fetches children]}]
-  (doseq [[field {:keys [kind type]}] children]
-    (when-not (or (identical? type parses-to) (parsed-type? type) (valid-sum? type))
-      (bad-declaration! draft-class ::rule/child-type-not-parsed
+(defn- stage!
+  "Check what [[defparsed]] cannot see when it expands, only when it loads, before it defines any class: a child type
+  that is not a parsed type or a sum, and a fetch that is not a fn. Throws `::bad-declaration`, so a `defparsed` that
+  fails here changes nothing. Then keep `fetch-fns` and `child-types` for [[register!]]. `fetches` holds each
+  fetch's `:name` and `:reads`, in the order of `fetch-fns`; `children` maps each child field to its `:kind`, and
+  `child-types` maps each child field but those of the type being defined to its type. Called by the expansion of
+  [[defparsed]]."
+  [parsed-class-name draft-class-name fetches fetch-fns children child-types]
+  (doseq [[field type] child-types
+          :let [{:keys [kind]} (children field)]]
+    (when-not (or (parsed-type? type) (valid-sum? type))
+      (bad-declaration! draft-class-name ::rule/child-type-not-parsed
                         (str "the child field " field " holds " (pr-str type) ", which is not a type defined with"
                              " defparsed or a sum defined with defsum, in (" (if (= :one kind) "child" "children") " "
                              (name field) " " (pr-str type) "). A child field holds drafts the parent parses. Name"
                              " one of those.")
                         {:field field, :got (pr-str type)})))
-  (doseq [{n :name, :keys [f reads]} fetches]
+  (doseq [[{n :name, :keys [reads]} f] (map vector fetches fetch-fns)]
     (when-not (fn? f)
-      (bad-declaration! draft-class ::rule/fetch-not-fn
+      (bad-declaration! draft-class-name ::rule/fetch-not-fn
                         (str "the fetch " n " is " (pr-str f) ", not a fn, in (fetch " n " " (mapv symbol reads) " "
                              (pr-str f) "). A fetch is called with the tuples it fetches. Write a fn of the tuples"
                              " it fetches, as in (fetch " n " " (mapv symbol reads) " rows-by-id).")
-                        {:name n, :got (some-> f class .getName)}))))
+                        {:name n, :got (some-> f class .getName)})))
+  (.put pending parsed-class-name {:fetch-fns fetch-fns, :child-types child-types})
+  nil)
 
 (defn- stale-child!
   "Throws `::stale-type`: the child field `field` of the parent `parent`, a plan or `{:parses-to :draft-class}`,
@@ -935,7 +988,10 @@
   the type's class itself, or one of its members. A draft of a class with that name but not the class throws
   `::stale-type`."
   [parent field {:keys [kind], parsed-type :type} v]
-  (let [drafts-it? (fn [d] (and (draft-value? d)
+  (let [drafts-it? (fn [d] (when (instance? DraftValue d)
+                                (not-loaded! (str (.getSimpleName ^Class (:draft-class parent)) ": the child field " field)
+                                             (class d)))
+                              (and (draft-value? d)
                                 (let [c (:parses-to (plan-for d))]
                                   (when (and (named-member parsed-type c) (not (member? parsed-type c)))
                                     (stale-child! parent field parsed-type d c))
@@ -971,7 +1027,6 @@
   [[defparsed]] refuses a pure check written before one that reads a proper subset of its fields, so a check on one
   field runs before a check relating it to another."
   [parses-to draft-class fields {:keys [checks fetches children], :as decl}]
-  (validate-declaration! parses-to draft-class decl)
   (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check {:parses-to parses-to, :draft-class draft-class} field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
         external  (filterv #(= :external (:kind %)) checks)
@@ -1009,11 +1064,17 @@
     :else                                               (str "a " (.getSimpleName (class x)))))
 
 (defn- register!
-  "Build and check the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the
-  `builders` [[defparsed]] generated. Called by the expansion of [[defparsed]], when it loads; throws
-  `::bad-declaration` then."
+  "Build the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the `builders`
+  [[defparsed]] generated and the fetch fns and child types [[stage!]] kept. Called by the expansion of
+  [[defparsed]], when it loads, after its `deftype`s."
   [parsed-type draft-type decl builders]
-  (let [plan (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
+  (let [{:keys [fetch-fns child-types]} (.remove pending (.getName ^Class parsed-type))
+        decl (-> decl
+                 (update :fetches #(mapv (fn [fd f] (assoc fd :f f)) % fetch-fns))
+                 (update :children #(into {} (map (fn [[field child]]
+                                                    [field (assoc child :type (get child-types field parsed-type))]))
+                                          %)))
+        plan (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
     (.put registry draft-type plan)
     (.put registry parsed-type plan)
     (.put latest (.getName ^Class parsed-type) parsed-type)))
@@ -1022,6 +1083,7 @@
 
 (defn- plan-for [draft]
   (when-not (draft-value? draft)
+    (when (instance? DraftValue draft) (not-loaded! "pt/parse" (class draft)))
     (throw (ex-info (str "pt/parse got " (describe draft) ". It parses only drafts of types defparsed defined."
                          (cond
                            (issued? draft)
@@ -1538,6 +1600,7 @@
   [[defsum]] defined."
   [fn-name t]
   (when-not (or (parsed-type? t) (valid-sum? t))
+    (when (class? t) (not-loaded! fn-name t))
     (let [draft-of-type (when (and (class? t) (.isAssignableFrom DraftValue ^Class t))
                           (some-> ^Class (:parses-to (.get registry t)) .getSimpleName symbol))]
       (throw (ex-info (str fn-name " got " (if (class? t) (.getSimpleName ^Class t) (pr-str t)) " as its type. Its"
@@ -1687,6 +1750,7 @@
   [parsed-type m]
   (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
         cls     (resolve parsed-type)
+        _       (when (class? cls) (not-loaded! "pt/draft" cls))
         dcls    (when (and (parsed-type? cls) (.get registry cls)) (:draft-class (.get registry cls)))
         _       (when-not dcls
                   (refuse! ::rule/draft-not-a-parsed-type
