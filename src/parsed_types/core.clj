@@ -104,9 +104,10 @@
                                   :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
                                                 " a plain map.")}
                                  {:rule    ::rule/parsed-value-is-final
-                                  :message (str op " " (pr-str k) " on a " n ": a parsed value never changes, so its"
-                                                " checks stay true. Use (pt/parse (assoc (pt/draft-of x) " (pr-str k)
-                                                (if (= "dissoc" op) " nil" " v") ")) for a changed copy.")})]
+                                  :message (str op (when (some? k) (str " " (pr-str k))) " on a " n ": a parsed value"
+                                                " never changes, so its checks stay true. Use (pt/parse (assoc"
+                                                " (pt/draft-of x) " (if (some? k) (pr-str k) ":field")
+                                                (if (#{"dissoc" "remove"} op) " nil" " v") ")) for a changed copy.")})]
     (throw (ex-info message {:type ::cannot-change, :rule rule, :parsed (.getName (class parsed)), :op op, :key k}))))
 
 (defn fixed!
@@ -125,15 +126,21 @@
                                   :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
                                                 " a plain map.")}
                                  {:rule    ::rule/draft-fields-are-fixed
-                                  :message (str op " " (pr-str k) " on a " n ": a draft has fixed fields, set with"
-                                                " assoc. Use (assoc d " (pr-str k) (if (= "dissoc" op) " nil" " v")
-                                                ").")})]
+                                  :message (str op (when (some? k) (str " " (pr-str k))) " on a " n ": a draft has"
+                                                " fixed fields, set with assoc. Use (assoc d "
+                                                (if (some? k) (pr-str k) ":field")
+                                                (if (#{"dissoc" "remove"} op) " nil" " v") ").")})]
     (throw (ex-info message {:type ::cannot-change, :rule rule, :draft (.getName (class draft)), :op op, :key k}))))
 
 (defn no-field!
   "Throws `::no-field`: `x` has no field `k`. `op` is `\"read\"` when a key that is not a field is read without a
   default, or `\"assoc\"` when one is set on a draft. Called by the types [[defparsed]] defines."
   [x k op]
+  (when-not (or (instance? DraftValue x) (instance? ParsedValue x))
+    (throw (ex-info (str "pt/no-field! got " (pr-str x) ", which is not a draft or parsed value. It reports a missing"
+                         " field of a type defparsed defined, and the types call it. Read a missing key of your own"
+                         " map with (get m k default) instead.")
+                    {:type ::bad-input, :rule ::rule/no-field-not-a-library-value, :got (some-> x class .getName)})))
   (let [fields  (vec (keys x))
         n       (.getSimpleName (class x))
         nearest (nearest k fields)]
@@ -151,6 +158,14 @@
                              :key                                         k
                              :fields                                      fields}
                       nearest (assoc :suggestion nearest))))))
+
+(defn- not-a-pair!
+  "Throws `::bad-input`: `(conj x v)` with a vector `v` that is not a `[key value]` pair. Called by the types
+  [[defparsed]] defines."
+  [x v]
+  (throw (ex-info (str "conj of " (pr-str v) " on a " (.getSimpleName (class x)) ": a map takes a [key value] pair, and"
+                       " this vector has " (count v) " elements. Write (conj x [k v]), or (assoc x k v).")
+                  {:type ::bad-input, :rule ::rule/conj-not-a-pair, :got v})))
 
 (defn- map-type-methods
   "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws unless a default
@@ -187,7 +202,8 @@
          (clojure.core/vector? ~o)
          (if (clojure.core/= 2 (clojure.core/count ~o))
            (clojure.core/assoc ~this (clojure.core/nth ~o 0) (clojure.core/nth ~o 1))
-           (throw (IllegalArgumentException. "Vector arg to map conj must be a pair")))
+           ;; through `var`, because it is private
+           ((var not-a-pair!) ~this ~o))
          :else
          (clojure.core/reduce (fn [m# e#] (clojure.core/assoc m# (.getKey ^java.util.Map$Entry e#)
                                                              (.getValue ^java.util.Map$Entry e#)))
@@ -231,10 +247,11 @@
       (~'keySet [~this] ~(set kws))
       (~'values [~this] [~@fields])
       (~'entrySet [~this] (clojure.core/set ~entries))
-      (~'put [~this ~k ~v] (throw (UnsupportedOperationException.)))
-      (~'putAll [~this ~o] (throw (UnsupportedOperationException.)))
-      (~'remove [~this ~k] (throw (UnsupportedOperationException.)))
-      (~'clear [~this] (throw (UnsupportedOperationException.)))
+      ;; ex-info, a RuntimeException like UnsupportedOperationException, so it is unchecked all the same
+      (~'put [~this ~k ~v] (~final-name ~this "put" ~k))
+      (~'putAll [~this ~o] (~final-name ~this "putAll" nil))
+      (~'remove [~this ~k] (~final-name ~this "remove" ~k))
+      (~'clear [~this] (~final-name ~this "clear" nil))
 
       Object
       (~'hashCode [~this] (clojure.lang.APersistentMap/mapHash ~this))
@@ -260,6 +277,10 @@
   (when-let [twice (seq (for [[f c] (frequencies fields) :when (< 1 c)] f))]
     (syntax-error! form ::rule/field-named-twice
                    (str "a field is named twice: " (vec twice) ". Each field is one key. Name each field once.")))
+  (when (some #(= "/" (name %)) fields)
+    (syntax-error! form ::rule/field-slash
+                   (str "a field cannot be named /: the keyword :/ and the Java field it compiles to do not work as a"
+                        " field. Rename it, as in slash.")))
   (when-let [special (seq (filter #(or (special-symbol? %) (= '& %)) fields))]
     (syntax-error! form ::rule/field-special-form
                    (str "a field cannot be named like a special form: " (vec special) ". A field is a local in the"
@@ -1201,11 +1222,29 @@
        (identical? (class x) (:parses-to (.get registry (class x))))
        (true? (.issuedWith ^ParsedValue x parse-token))))
 
+(defn- check-type!
+  "Throws `::bad-input` unless `t`, the first argument `fn-name` got, is a type [[defparsed]] defined or a sum
+  [[defsum]] defined."
+  [fn-name t]
+  (when-not (or (parsed-type? t) (and (sum? t) (seq (:members t)) (every? parsed-type? (:members t))))
+    (let [draft-of-type (when (and (class? t) (.isAssignableFrom DraftValue ^Class t))
+                          (some-> ^Class (:parses-to (.get registry t)) .getSimpleName symbol))]
+      (throw (ex-info (str fn-name " got " (if (class? t) (.getSimpleName ^Class t) (pr-str t)) " as its type. Its"
+                           " first argument is a type defined with defparsed, or a sum defined with defsum."
+                           (if draft-of-type
+                             (str " That is a draft type: pass its parsed type, as in (" fn-name " " draft-of-type
+                                  " x).")
+                             (str " Pass one, as in (" fn-name " Debit x).")))
+                      {:type ::bad-input, :rule ::rule/not-a-parsed-type, :fn fn-name
+                       :got  (if (class? t) (.getName ^Class t) (pr-str t))})))))
+
 (defn parsed?
   "Whether `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`: a value of
   a class [[defparsed]] defined, whose hidden proof field holds the proof only `parse` sets. Which type `x` counts as
-  is decided by class name, so a value of a class a REPL re-evaluated counts as the type."
+  is decided by class name, so a value of a class a REPL re-evaluated counts as the type. Throws `::bad-input` when
+  `parsed-type` is neither."
   [parsed-type x]
+  (check-type! "pt/parsed?" parsed-type)
   (and (some? x)
        (member? parsed-type (class x))
        (issued? x)))
@@ -1224,8 +1263,9 @@
 (defn parsed
   "`x`, which must be a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`. Throws
   `::not-parsed` otherwise. Read its fields by keyword, as in `(:amount x)`: a key that is not a field throws
-  `::no-field`."
+  `::no-field`. Throws `::bad-input` when `parsed-type` is not a parsed type or a sum."
   [parsed-type x]
+  (check-type! "pt/parsed" parsed-type)
   (when-not (parsed? parsed-type x)
     (let [t                      (type-name parsed-type)
           {:keys [rule message]} (cond
@@ -1313,17 +1353,27 @@
 (defn draft-from-map
   "A draft of `draft-type` with the fields in `m`, nil for each one `m` leaves out. A non-map, or a key that is not a
   field, throws `::bad-input`. Called by [[draft]]."
-  [^Class draft-type m]
-  (let [{:keys [fields make-draft]} (.get registry draft-type)]
+  [draft-type m]
+  (let [{:keys [fields make-draft], :as plan} (when (class? draft-type) (.get registry draft-type))]
+    (when-not (and plan (identical? draft-type (:draft-class plan)))
+      (throw (ex-info (str "pt/draft-from-map got " (pr-str draft-type) ", which is not a draft type defparsed"
+                           " defined. Its first argument is the draft class. Pass one, as in (pt/draft-from-map"
+                           " DebitDraft m), or write (pt/draft Debit m).")
+                      {:type ::bad-input, :rule ::rule/not-a-draft-type, :got (pr-str draft-type)})))
     (when-not (map? m)
-      (throw (ex-info (str "pt/draft got " (describe m) " to build a " (.getSimpleName draft-type) ". A draft is"
-                           " built from a map of its fields. Pass a map with some of its fields " fields ", as in {"
-                           (first fields) " ...}.")
+      (throw (ex-info (str "pt/draft got " (describe m) " to build a " (.getSimpleName ^Class draft-type) ". A draft"
+                           " is built from a map of its fields. "
+                           (if (seq fields)
+                             (str "Pass a map with some of its fields " fields ", as in {" (first fields) " ...}.")
+                             "It has no fields, so pass {}."))
                       {:type ::bad-input, :rule ::rule/draft-from-non-map, :got (some-> m class .getName)})))
     (when-let [unknown (seq (remove (set fields) (keys m)))]
-      (throw (ex-info (str (.getSimpleName draft-type) " has no fields " (vec unknown) "."
+      (throw (ex-info (str (.getSimpleName ^Class draft-type) " has no fields " (vec unknown) "."
                            (did-you-mean (first unknown) fields) " A draft holds only its fields, so a misspelled"
-                           " key is never dropped. Remove them, or use its fields " fields ".")
+                           " key is never dropped. "
+                           (if (seq fields)
+                             (str "Remove them, or use its fields " fields ".")
+                             "It has no fields, so remove them all."))
                       (cond-> {:type           ::bad-input
                                :rule           ::rule/draft-unknown-keys
                                :unknown-fields (vec unknown)

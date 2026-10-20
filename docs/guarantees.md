@@ -17,7 +17,7 @@ The README covers how to use the library; this page covers what it promises and 
 | A declaration error is found when the `defparsed` loads, at the latest | The macro refuses what it can see when it expands. The expansion builds and checks the plan when it loads, and throws `::bad-declaration` then | `compile-errors-test`, `declaration-errors-at-load-test` |
 | A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
 | A parsed value holds only immutable values | `parse` walks every field of every draft in the tree, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test`, `a-mutable-value-in-a-child-is-refused-test` |
-| A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed` |
+| A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw `::cannot-change` | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `java-map-interface-test` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `java-map-interface-test` |
 | A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `draft-test` |
 | A field may be named like any `clojure.core` function | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
@@ -72,16 +72,16 @@ pt/parse on it first, as in (pt/parse draft), and pass the result.
 
 The ex-data holds the same facts as data, so no information is in the prose alone. When a key is not a field, the
 message suggests the nearest field within a couple of edits, as in `Did you mean :account-id?`, and `:suggestion`
-holds it. `errors-test` has one example of every rule, and fails when `core.clj` has a rule with no example or an
-`ex-info` without a `:rule`.
+holds it. `errors-test` has one example of every rule, and fails when `core.clj` has a rule with no example, an `ex-info`
+without a `:rule`, or a `throw` of anything but an `ex-info`.
 
 | `:type` | Thrown when | Other ex-data |
 |---|---|---|
 | `::invalid` | `parse` or `parse-all` ran the checks and some failed. The message names the first five failed checks with their docs | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue. The rule says which: nil, a plain map, a draft of the type, an unchecked value of the type, or a value of another type | `:expected`, `:got` |
-| `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, or `empty` on either | `:parsed` or `:draft`, `:op` |
+| `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
 | `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
-| `::bad-input` | `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
+| `::bad-input` | `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
@@ -105,7 +105,7 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
 - a fetch binding that names no declared fetch, binds a local with a field's name, or binds two fetches to one local;
 - a pure check that binds a fetch;
 - an options map: checks take no options;
-- a field named twice, like a special form, with a dot in it, starting with `__`, named `parse-proof`, or compiling
+- a field named twice, named `/`, like a special form, with a dot in it, starting with `__`, named `parse-proof`, or compiling
   to the same Java name as another field (`a-b` and `a_b`);
 - a field declared as a child twice, or a child field that isn't a field.
 

@@ -79,6 +79,9 @@
    [:draft-fields-are-fixed #(dissoc draft :amount) "dissoc :amount on a DebitDraft" "(assoc d :amount nil)"]
    [:draft-no-metadata #(with-meta draft {}) "with-meta on a DebitDraft" "{:value x, :meta m}"]
    [:draft-no-empty #(empty draft) "DebitDraft has fixed fields" "(into {} x)"]
+   [:conj-not-a-pair #(conj draft [:amount 1 2]) "conj of [:amount 1 2] on a DebitDraft" "has 3 elements"
+    "(conj x [k v]), or (assoc x k v)"]
+   [:no-field-not-a-library-value #(pt/no-field! 5 :k "read") "pt/no-field! got 5" "(get m k default)"]
    [:no-such-field-read #(:amont real) "Debit has no field :amont" "Did you mean :amount?"
     "[:user-id :account-id :amount]" "(:amount x)"]
    [:no-such-field-assoc #(assoc draft :acount-id 1) "DebitDraft has no field :acount-id" "Did you mean :account-id?"
@@ -86,6 +89,7 @@
    ;; field names
    [:fields-not-symbols (compiling '(pt/defparsed E1 [:a])) "the fields [:a]" "[user-id amount]"]
    [:field-named-twice (compiling '(pt/defparsed E1 [a a])) "named twice: [a]" "Name each field once" "In: (pt/defparsed"]
+   [:field-slash (compiling '(pt/defparsed E1 [/])) "cannot be named /" "as in slash"]
    [:field-special-form (compiling '(pt/defparsed E1 [if])) "[if]" "if-value"]
    [:field-with-dot (compiling '(pt/defparsed E1 [a.b])) "[a.b]" "a-b"]
    [:fields-same-java-name (compiling '(pt/defparsed E1 [a-b a_b])) "[a-b a_b]" "Rename one of them"]
@@ -173,6 +177,7 @@
    [:checks-failed #(pt/parse (->DebitDraft 1 :x -5)) "Invalid Debit: 2 checks failed"
     ":parsed-types.errors-test/amount-positive (The amount is positive.)" "Change the draft so they pass"]
    ;; sinks
+   [:not-a-parsed-type #(pt/parsed :x real) "pt/parsed got :x as its type" "(pt/parsed Debit x)"]
    [:got-nil #(pt/parsed Debit nil) "got nil" "Write (pt/parse (->DebitDraft ...)) and pass the result"]
    [:got-draft #(pt/parsed Debit draft) "got a DebitDraft" "(pt/parse draft)"]
    [:got-unissued #(pt/parsed Debit (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue"
@@ -187,6 +192,8 @@
       (pt/parse (->CreditDraft 1)))
     "got a parsed Credit, but this match was compiled before Credit joined the sum" "Re-evaluate the match"]
    ;; pt/draft
+   [:not-a-draft-type #(pt/draft-from-map String {}) "pt/draft-from-map got java.lang.String"
+    "(pt/draft-from-map DebitDraft m)" "(pt/draft Debit m)"]
    [:draft-from-non-map #(pt/draft Debit (identity 5)) "pt/draft got a Long to build a DebitDraft" "{:user-id ...}"]
    [:draft-unknown-keys #(pt/draft Debit (identity {:amont 1})) "DebitDraft has no fields [:amont]"
     "Did you mean :amount?" "[:user-id :account-id :amount]"]
@@ -222,6 +229,23 @@
       (is (seq sites))
       (doseq [site sites]
         (is (some #{:rule} (tree-seq coll? seq (nth site 2))) (pr-str site))))))
+
+(deftest no-other-throws-test
+  (testing "core.clj throws only ex-info: no Java exception escapes without a :type and a :rule"
+    (is (nil? (re-seq #"\(throw \((?!ex-info)[^\s)]*" source)))))
+
+(deftest the-type-argument-is-checked-test
+  (doseq [[label thunk] [["nil" #(pt/parsed nil real)] ["a keyword" #(pt/parsed? :x real)]
+                         ["a draft type" #(pt/parsed DebitDraft real)] ["a bare Sum" #(pt/parsed? (pt/sum 'S [Debit]) nil)]]]
+    (testing label
+      (is (= (if (= "a bare Sum" label) nil :parsed-types.rule/not-a-parsed-type) (:rule (error thunk))))))
+  (is (str/includes? (:message (error #(pt/parsed DebitDraft real))) "pass its parsed type, as in (pt/parsed Debit x)")))
+
+(deftest the-java-map-mutators-throw-ex-info-test
+  (doseq [[op thunk] [["put" #(.put ^java.util.Map real :amount 1)] ["clear" #(.clear ^java.util.Map draft)]]]
+    (is (= ::pt/cannot-change (:type (error thunk))) op))
+  (is (str/includes? (:message (error #(.clear ^java.util.Map draft))) "clear on a DebitDraft"))
+  (is (str/includes? (:message (error #(.clear ^java.util.Map draft))) "(assoc d :field v)")))
 
 (deftest invalid-names-the-first-five-checks-test
   (is (str/includes? (:message (error #(pt/parse (->SevenDraft :a :b :c :d :e :f :g))))

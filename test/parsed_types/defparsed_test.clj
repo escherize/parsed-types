@@ -372,7 +372,11 @@
     (is (= 2 (.size m)))
     (is (= #{:amount :count} (set (.keySet m))))
     (is (= #{[:amount 1M] [:count 2]} (set (map (fn [^java.util.Map$Entry e] [(.getKey e) (.getValue e)]) (.entrySet m)))))
-    (is (thrown? UnsupportedOperationException (.put m :amount 2M)))
+    (doseq [[op thunk] [["put" #(.put m :amount 2M)] ["putAll" #(.putAll m {:amount 2M})]
+                        ["remove" #(.remove m :amount)] ["clear" #(.clear m)]]]
+      (is (= {:type ::pt/cannot-change, :op op}
+             (select-keys (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-data e))) [:type :op]))
+          "a java.util.Map mutator throws ex-info, a RuntimeException like UnsupportedOperationException"))
     (is (= ::pt/cannot-change (try (empty m) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))
     (is (= [[:amount 1M] [:count 2]] (reduce-kv (fn [acc k v] (conj acc [k v])) [] m)) "kvreduce in field order")))
 
@@ -384,7 +388,8 @@
     (is (= 5M (:amount (conj d {:amount 5M}))))
     (is (= 5M (:amount (conj d (java.util.HashMap. {:amount 5M})))))
     (is (identical? d (conj d nil)))
-    (is (thrown? IllegalArgumentException (conj d [:amount 5M :extra])))))
+    (is (= :parsed-types.rule/conj-not-a-pair
+           (try (conj d [:amount 5M :extra]) (catch clojure.lang.ExceptionInfo e (:rule (ex-data e))))))))
 
 (deftest a-field-cannot-replace-the-checks-test
   (testing "a field named like a declaration, holding one, is only a field: the checks stay those defparsed wrote"
