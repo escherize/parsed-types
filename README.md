@@ -1,19 +1,19 @@
 # parsed-types
 
-Code that validates checks a map, then passes the same map along. Nothing ties the check to the code that relies on
-it. Three bugs are easy to write: check one id and use another, forget the check, or change the map after the check.
-So how does a value prove it was checked? This library answers with a parsed type, such as `Debit`, that only `parse`
-can make. The value carries its own proof. A sink such as `transact!` accepts a `Debit`, and refuses a `DebitDraft`,
-a plain map, or a value built by hand. `parse` runs pure checks before it touches the world, and batches every fetch.
-Every mistake the library catches throws an error that names the fix.
+Clojure code often checks a map, then passes the same map along. Nothing ties the check to the code that relies on
+it. Code can check one id and use another, skip the check, or change the map after it. How does a value prove it
+was checked? In parsed-types, each thing has two types: a draft that any code can build, and a parsed type that only
+`parse` can make. The parsed value carries its own proof, and a sink such as `transact!` refuses anything else. Three
+values decide each choice the library makes. Explicitness: what you read in the source is what runs. Clarity: one
+name per thing, and the type says what is passed around. Good for agents: mistakes fail at compile or load time where
+they can, and every error the library throws states the fix as code.
 
-This is [parse, don't validate](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/) for Clojure,
-enforced at run time.
+The idea is the smart constructor, or
+[parse, don't validate](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/), for Clojure.
 
-## Each thing has two types, and only `parse` turns the draft into the parsed value
+## Only `parse` turns a draft into a parsed value
 
-`defparsed` defines `Debit`, the parsed type, and `DebitDraft`, its draft: unchecked input that anyone can build. A
-function takes one or the other, never "a map, maybe checked".
+`defparsed` defines `Debit`, the parsed type, and `DebitDraft`, its draft.
 
 ```mermaid
 flowchart LR
@@ -27,21 +27,14 @@ flowchart LR
   H(["(Debit. ...) by hand"]) -.->|no proof| N(["sinks throw ::not-parsed"])
 ```
 
-| | `DebitDraft` | `Debit` |
-|---|---|---|
-| Build one | `(->DebitDraft ...)`, `(pt/draft Debit {...})` | only `pt/parse` |
-| Read a field | `(:amount x)`, destructuring; a key that isn't a field throws | the same |
-| Change it | `assoc` returns a new draft | throws; use `pt/draft-of`, `assoc`, then `pt/parse` |
-| A sink accepts it | no | yes |
-
-## You declare the checks once, and sinks accept only parsed values
+## A bank declares its checks once, and its sink accepts only parsed values
 
 ```clojure
 (ns bank
   (:require [db]
             [parsed-types.core :as pt]))
 
-;; your lookup, described below
+;; your lookup: a map from each tuple to its result, nil when nothing exists
 (defn accounts-by-id [tuples]
   (into {} (map (fn [[id :as t]] [t (db/account id)])) tuples))
 
@@ -80,86 +73,7 @@ flowchart LR
   (transact! (pt/parse (pt/draft Debit {:user-id    user-id
                                         :account-id (:account body)
                                         :amount     (:amount body)}))))
-```
 
-A check's argument vector names the fields it reads. An `external` check also binds fetches, as in
-`[account ::account]`. A check passes only when it returns exactly `true`. Pure checks run in the order written. A
-failed one holds every later pure check that shares a field with it: the held check doesn't run, and the failure's
-`:blocked` names it. So write a check on fewer fields first: `defparsed` refuses a check written before one that
-reads a proper subset of its fields.
-
-`defsum` names a closed set of parsed types. `match` runs a branch only for a value `parse` made. A `match` that
-leaves out a member doesn't compile, so adding a member to the sum breaks every `match` that misses it.
-
-`accounts-by-id` is your lookup. It takes every distinct tuple of the fields the fetch names, and returns a map from
-each tuple to its result, nil when nothing exists.
-
-## The value carries its proof, so each bug becomes an error
-
-A parsed value has a hidden field that `parse` sets to a private token. Nothing hands the token out. The field isn't
-a key, so it stays out of `seq`, printing and hashing. Equality reads it, so a value `parse` made never equals one
-built by hand:
-
-```clojure
-(def debit (pt/parse (->DebitDraft :ada 1 5M)))
-
-(= debit (pt/parse (->DebitDraft :ada 1 5M))) ;; => true
-(= debit (Debit. :ada 1 5M nil))              ;; => false
-```
-
-The parsed type has no `->Debit` factory, and a value built with `(Debit. ...)` has no proof.
-
-| Bug | What happens |
-|---|---|
-| The caller skips the checks: `(transact! {:account-id 1, :amount 1000M})` | throws `::not-parsed` |
-| The caller passes the draft: `(transact! (->DebitDraft :ada 1 1000M))` | throws `::not-parsed` |
-| The caller builds the value by hand: `(transact! (Debit. :ada 1 1000M nil))` | throws `::not-parsed` |
-| The caller checks one account and debits another | can't happen: `transact!` reads `:account-id` from the `Debit` the checks saw |
-| The caller changes the value after the check: `(assoc debit :account-id 9)` | throws `::cannot-change` |
-| The sink misspells a field: `(:acount-id debit)` | throws `::no-field`, and suggests `:account-id` |
-| The handler misspells a field in a literal `pt/draft` | doesn't compile |
-
-Three more rules hold:
-
-- **Fields hold immutable values, all the way down.** `parse` refuses an atom, an array, a `java.util.Date`, a
-  clock, a mutable Java collection, or a lazy seq. The message names the fix, such as `(vec s)`. There is no opt-out yet.
-- **A walk fails loudly.** `empty` throws, so `clojure.walk` over a parsed value throws instead of dropping the
-  proof. Use `(into {} x)` for a plain map.
-- **Types reload like records, and a stale one says what to reload.** Parsed types compare by class, so
-  `instance?` works, inside a check too. Re-evaluating a `defparsed` makes new classes, and code evaluated before
-  keeps the old ones. Where a class doesn't match but its name does, the library throws `::stale-type`. The message
-  names what to re-evaluate: the parent `defparsed`, the `defsum`, the namespace a `match` was compiled in, or the
-  code that built an old value.
-
-## Parse runs the pure checks first, and touches the world last
-
-1. Pure checks. Malformed input stops here: no fetch or external check runs unless every pure check in the tree
-   passed. A pure check should read only its fields. The library refuses field values that can change, such as an
-   atom or a clock, but can't stop a pure check from calling the world.
-2. Fetches. Each fetch runs once per declaration, with each distinct tuple once. Two declarations that both declare
-   a fetch named `::account` make two fetch calls, one each. `parse-all` batches many drafts the same way.
-3. External checks.
-
-After `parse`, the proof travels with the value. A sink checks the proof with `pt/parsed` or `match`, and runs no
-check again.
-
-A failure reports every check by name. `:blocked` names the checks that didn't run because of it:
-
-```clojure
-(pt/parse (->DebitDraft :ada 1 -5M))
-;; throws ex-info "Invalid Debit: 1 check failed: :bank/amount-positive ...", with ex-data:
-{:type         :parsed-types.core/invalid
- :rule         :parsed-types.rule/checks-failed
- :failed-kinds #{:pure}
- :draft        "bank.DebitDraft"
- :failures     {:bank/amount-positive {:doc      "The amount is a positive decimal."
-                                       :returned false
-                                       :blocked  [:bank/owns-account :bank/covers-amount]}}}
-```
-
-## One parse checks a whole tree, and holds a parent check over a failed child
-
-```clojure
 ;; a journal entry: transactions by one user whose debits and credits balance
 (pt/defparsed JournalEntry [user-id lines]
   (children lines Transaction)
@@ -175,42 +89,161 @@ A failure reports every check by name. `:blocked` names the checks that didn't r
   (run! transact! (:lines (pt/parsed JournalEntry entry))))
 ```
 
-`lines` holds `DebitDraft`s and `CreditDraft`s. `(child field Type)` declares a field that holds one draft, or nil.
+A check's argument vector names the fields it reads. An `external` check also binds fetches, as in
+`[account ::account]`. `lines` holds `DebitDraft`s and `CreditDraft`s.
 
-- **Children first.** A parent check sees each child after the child's pure checks pass. Inside the check, the child
-  has no proof yet, so `pt/parsed` and `match` refuse it.
-- **A failed child holds its parent.** The child's failure appears at its path, `{:lines {0 {...}}}`. A parent check
-  that reads the child is held: it doesn't run, and it is reported with `:blocked-by [[:lines 0]]`.
-- **One query per fetch, not per child.** The `::account` lookups of 50 debits are one call, with each distinct
-  account id once. A fetch may not read a child field: read the children in the check itself.
-- **Parsed all the way down.** A parsed `JournalEntry` holds parsed `Debit`s and `Credit`s, ready for `transact!`.
+A value built any other way fails at the sink:
 
-## Every mistake throws an error that names the rule and the fix
+```clojure
+(def debit (pt/parse (->DebitDraft :ada 1 5M)))
+
+(= debit (pt/parse (->DebitDraft :ada 1 5M))) ;; => true
+(= debit (Debit. :ada 1 5M nil))              ;; => false
+(transact! {:account-id 1, :amount 5M})       ;; throws ::not-parsed
+(transact! (->DebitDraft :ada 1 5M))          ;; throws ::not-parsed
+(transact! (Debit. :ada 1 5M nil))            ;; throws ::not-parsed
+(assoc debit :account-id 9)                   ;; throws ::cannot-change
+(:acount-id debit)                            ;; throws ::no-field
+```
+
+## Explicitness: what you read in the declaration is what runs
+
+### Checks run in the order written, on the fields they name
+
+`defparsed` compiles each check as a fn of its argument vector. A body that uses a field the vector doesn't name
+doesn't compile.
+
+Pure checks run in the order written. A pure check that runs and fails holds every later pure check that shares a
+field with it. A held check doesn't run, and holds nothing itself. An unbalanced entry fails `::balanced`, which
+holds `::one-user`, since both read `lines`:
+
+```clojure
+(pt/parse (pt/draft JournalEntry {:user-id :ada
+                                  :lines   [(->DebitDraft :ada 1 5M) (->CreditDraft :ada 2 3M)]}))
+;; throws ::invalid, with these :failures:
+{:bank/balanced {:doc      "The debits and the credits add up to the same amount."
+                 :returned false
+                 :blocked  [:bank/one-user]}}
+```
+
+`:blocked` sits on the check that failed, and lists what it held. So a check on fewer fields goes first: a pure
+check written before one that reads a proper subset of its fields doesn't compile. An inferred dependency graph was
+rejected, because it would run checks in an order the source doesn't show.
+
+### A draft names every field in the source
+
+`pt/draft` takes only a literal map that names every field, and only fields. It checks the keys at compile time.
+There is no `draft-from-map`, because a map built at run time turns a missing field into a silent nil. For values
+read at run time, write `{:amount (:amount body)}`.
+
+### Pure checks run before anything touches the world
+
+No fetch or external check runs until every pure check in the tree passes. A failed pure check also holds the external
+checks:
+
+```clojure
+(pt/parse (->DebitDraft :ada 1 -5M))
+;; throws ::invalid, with :failed-kinds #{:pure} and these :failures:
+{:bank/amount-positive {:doc      "The amount is a positive decimal."
+                        :returned false
+                        :blocked  [:bank/owns-account :bank/covers-amount]}}
+```
+
+Each fetch runs once per declaration, with each distinct tuple once. A fetch may not read a child field, because
+the children's external checks haven't run yet.
+
+### Nothing is remembered between parses, and no type is bound late
+
+`parse` runs every check every time. There is no cache of passed checks, because a cache is hidden state beside the
+value, and a second, weaker kind of proof.
+
+Types compare by class identity, like records, so `instance?` and type hints work inside checks. Matching types by
+name was rejected: it let a value of an old class pass where code expected the new one. So there is no `pt/is?`.
+
+The library sets no HTTP status codes. Each caller maps errors to its own responses, as
+[the errors section](#every-error-the-library-throws-has-a-type-a-rule-and-a-fix) shows.
+
+## Clarity: one name per thing, and the type says what is passed around
+
+### The type says whether a value was checked
+
+`DebitDraft` is unchecked input, and `Debit` is checked. A sink's argument is the proof that its checks passed. A
+validated plain map was rejected: nothing in it says whether it was checked.
+
+Only `parse` makes a parsed value. There is no `->Debit`. `(Debit. ...)` compiles, but its value carries no proof,
+so a sink refuses it.
+
+The proof is in the value: a hidden field holds a private token that `parse` sets, and nothing hands the token out.
+A side table of issued values was rejected, because it keeps the proof apart from the value. Equality reads the
+proof, so a value built by hand never equals a parsed one.
+
+Only `defparsed` makes types. It defines the draft type and the parsed type in one form, so a draft type can never
+claim another parsed type. There are no hand-written declarations.
+
+### Fields are fixed, and values never change
+
+Reading or setting a key that isn't a field throws. A record was rejected, because `assoc` on a record returns another
+record of the same class, which would look like proof. There is no `pt/let`: plain `let` destructures a parsed value,
+and a misspelled key already throws.
+
+`parse` refuses a field that holds, anywhere inside it, an atom, an array, a `java.util.Date`, a clock, a mutable Java
+collection, or a lazy seq. So what a check proved stays true. Realize a seq on the way in, with `vec` or `mapv`. There
+is no opt-out yet.
+
+### A walk over a parsed value fails loudly
+
+`empty` throws, so `clojure.walk` over a parsed value throws. It never returns a plain map without the proof. Use
+`(into {} x)` for a plain map.
+
+### One parse checks a whole tree
+
+A parent check sees each child after the child's pure checks pass. A parent check that reads a failed child is held.
+Its entry has `:blocked-by [[:lines 0]]`, the paths of the children that failed. The fetches of all the children
+batch: the `::account` lookups of 50 debits are one call. Parsing children apart was rejected, because a child parsed
+elsewhere, perhaps for another user, could then be reused.
+
+### A sum lists its members, and `match` handles each one
+
+`defsum` names a closed set of parsed types. A `match` that leaves out a member doesn't compile, so adding a member
+to the sum breaks every `match` that misses it.
+
+## Good for agents: a mistake fails early, and its error states the fix
+
+### Declaration mistakes fail when the file compiles or loads
+
+These don't compile:
+
+- an unknown or missing key in `pt/draft`;
+- a `match` that misses a member;
+- a pure check in the wrong order;
+- a check that uses a field it doesn't name;
+- a fetch over a child field;
+- a `defparsed` that isn't at the top level of a namespace.
+
+A child type that isn't a parsed type, or a fetch that isn't a fn, throws when the file loads.
+
+### Every error the library throws has a `:type`, a `:rule` and a fix
 
 Each error is an `ex-info`. Its ex-data has a `:type` in `parsed-types.core` and a `:rule` in `parsed-types.rule`.
-The message states what happened, the rule, and the fix as code:
+The message states what happened, the rule, and the fix as code. A misspelled key suggests the nearest field:
 
 ```
 Debit has no field :acount-id. Did you mean :account-id? A key that is not a field throws, never reads nil. Read one
 of its fields [:user-id :account-id :amount], as in (:account-id x).
 ```
 
-A person, or an agent, can apply the fix from the message alone.
-
 | `:type` | Thrown when |
 |---|---|
 | `::invalid` | a check failed; `:failures` has each one |
 | `::not-parsed` | a sink, `match` or `draft-of` got a value `parse` didn't make |
-| `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after; the message says what to reload |
-| `::cannot-change` | code called `assoc`, `dissoc` or `empty` on a parsed value |
+| `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after |
+| `::cannot-change` | code called `assoc`, `dissoc` or `empty` on a parsed value, or `dissoc` or `empty` on a draft |
 | `::no-field` | code read or changed a key that isn't a field |
-| `::bad-input` | `pt/draft` got no literal map or unknown keys, a field holds a mutable value, or a tree is too big |
-| `::bad-declaration` | a `defparsed` or `match` has an error, found when it expands or loads |
+| `::bad-input` | `pt/draft` got the wrong keys, a field holds a mutable value, or a tree is too big |
+| `::bad-declaration` | a `defparsed`, `defsum` or `match` has an error, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no entry for a tuple |
 
-`defparsed` builds and checks its plan when it loads, so a declaration error never waits for the first `parse`.
-
-The library has no HTTP status codes. A handler maps `:type` to its own responses:
+A handler maps `:type` to its own responses:
 
 ```clojure
 (defn debit-route [request]
@@ -225,18 +258,27 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
           :else                    {:status 403, :body failures})))))
 ```
 
-## Accepted limits: the library stops mistakes, not attackers or races
+### Nothing fails silently
 
-- **Reflection can forge.** `setAccessible` can read or write the proof field.
-- **The token's var.** Code can var-quote the private token, `@#'parsed-types.core/parse-token`, and build a value
-  with it. The shipped clj-kondo config flags this.
-- **`with-redefs`.** Rebinding a library fn changes what the library checks.
+A key that isn't a field throws instead of reading nil. A check passes only on exactly `true`, so nil, a string or a
+map of errors fails. There is no `check` or `check-all`, because each returned a truthy value
+whether the checks passed or failed.
+
+### Types reload like records, and `::stale-type` names what to re-evaluate
+
+Re-evaluating a `defparsed` at the REPL makes new classes, as for a `defrecord`. Code evaluated before keeps the old
+ones. Where a class doesn't match but its name does, the library throws `::stale-type`. The message
+names what to re-evaluate: the `defparsed`, the `defsum`, the namespace a `match` was compiled in, or the code that
+built the old value. Where a reload fixes it, the message gives the command, such as `(require 'bank :reload)`.
+
+## The library stops mistakes, not attackers or races
+
+- **Code that sets out to forge can.** Reflection, any private var of `parsed-types.core`, `with-redefs` or `in-ns`
+  can forge a parsed value or change the checks.
 - **Reader syntax fails closed.** `#bank.Debit[...]` builds a value without the proof, and `pt/parsed` refuses it.
-- **`vec` of a Java array can share it.** `(vec a)` of a Java array of 32 or fewer elements is a vector over the
-  array itself, so changing the array changes the parsed value. `parse` can't tell it from any other vector. Use
-  `(into [] a)`.
-- **`in-ns` can redefine a type.** Code that switches into a namespace can re-evaluate its `defparsed` with other
-  checks. That is how a REPL reload works. Another namespace can't take the name: that throws when it expands.
+- **A pure check can call the world.** The library can't stop a check body from calling a database.
+- **`vec` of a Java array can share it.** `(vec a)` of a Java array of 32 or fewer elements wraps the array itself.
+  `parse` can't tell it from another vector. Use `(into [] a)`.
 - **External checks can go stale.** A balance that passed at `parse` can change later. Parse right before you act.
 
 ## The API is ten names
@@ -251,8 +293,10 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
 | `defsum`, `match` | a closed set of parsed types, and a branch over every member |
 | `declaration` | returns the declaration `defparsed` wrote, as data |
 
-[docs/guarantees.md](docs/guarantees.md) lists each guarantee with its test, every error rule, REPL reload behavior
-and the design decisions.
+## docs/guarantees.md pins each guarantee to a test
+
+[docs/guarantees.md](docs/guarantees.md) lists each guarantee with its test, every error rule, and REPL reloads.
+Run the tests with:
 
 ```
 clojure -X:test
