@@ -70,11 +70,11 @@
   "`[rule thunk substring ...]`: the thunk throws the rule, and its message holds every substring."
   [;; changing values
    [:parsed-value-is-final #(assoc real :amount 5) "assoc :amount on a Debit" "(pt/parse (assoc (pt/draft-of x) :amount v))"]
-   [:parsed-no-metadata #(with-meta real {}) "with-meta on a Debit" "{:value x, :meta m}"]
-   [:parsed-no-empty #(empty real) "Debit has fixed fields" "(into {} x)"]
+   [:no-metadata #(with-meta real {}) "with-meta on a Debit" "{:value x, :meta m}"]
+   [:no-empty #(empty real) "Debit has fixed fields" "(into {} x)"]
    [:draft-fields-are-fixed #(dissoc draft :amount) "dissoc :amount on a DebitDraft" "(assoc d :amount nil)"]
-   [:draft-no-metadata #(with-meta draft {}) "with-meta on a DebitDraft" "{:value x, :meta m}"]
-   [:draft-no-empty #(empty draft) "DebitDraft has fixed fields" "(into {} x)"]
+   [:no-metadata #(with-meta draft {}) "with-meta on a DebitDraft" "{:value x, :meta m}"]
+   [:no-empty #(empty draft) "DebitDraft has fixed fields" "(into {} x)"]
    [:conj-not-a-pair #(conj draft [:amount 1 2]) "conj of [:amount 1 2] on a DebitDraft" "has 3 elements"
     "(conj x [k v]), or (assoc x k v)"]
    [:not-a-library-value #(#'pt/no-field! 5 :k "read") "parsed-types.core/no-field! got 5" "(get m k default)"]
@@ -85,17 +85,17 @@
    ;; field names
    [:fields-not-symbols (compiling '(pt/defparsed E1 [:a])) "the fields [:a]" "[user-id amount]"]
    [:field-named-twice (compiling '(pt/defparsed E1 [a a])) "named twice: [a]" "Name each field once" "In: (pt/defparsed"]
-   [:field-slash (compiling '(pt/defparsed E1 [/])) "cannot be named /" "as in slash"]
-   [:field-special-form (compiling '(pt/defparsed E1 [if])) "[if]" "if-value"]
-   [:field-with-dot (compiling '(pt/defparsed E1 [a.b])) "[a.b]" "a-b"]
-   [:fields-same-java-name (compiling '(pt/defparsed E1 [a-b a_b])) "[a-b a_b]" "Rename one of them"]
-   [:field-reserved-by-deftype (compiling '(pt/defparsed E1 [__meta])) "[__meta]" "as in meta"]
-   [:field-reserved-for-proof (compiling '(pt/defparsed E1 [parse-proof])) "[parse-proof]" "as in proof"]
+   [:field-name-unusable (compiling '(pt/defparsed E1 [/])) "cannot be named /" "as in slash"]
+   [:field-name-unusable (compiling '(pt/defparsed E1 [if])) "[if]" "if-value"]
+   [:field-name-unusable (compiling '(pt/defparsed E1 [a.b])) "[a.b]" "a-b"]
+   [:field-name-unusable (compiling '(pt/defparsed E1 [a-b a_b])) "[a-b a_b]" "Rename one of them"]
+   [:field-name-unusable (compiling '(pt/defparsed E1 [__meta])) "[__meta]" "as in meta"]
+   [:field-name-unusable (compiling '(pt/defparsed E1 [parse-proof])) "[parse-proof]" "as in proof"]
    ;; sums and match
    [:bad-sum-members (compiling '(pt/defsum Bad [Debit Debit])) "[Debit Debit]" "(defsum Bad [Debit Credit])"]
-   [:sum-name-not-symbol (compiling '(pt/defsum "Bad" [Debit Credit])) "the name \"Bad\" is not a symbol"
+   [:name-not-symbol (compiling '(pt/defsum "Bad" [Debit Credit])) "the name \"Bad\" is not a symbol"
     "(defsum Transaction [Debit Credit])"]
-   [:match-sum-not-a-symbol (compiling '(fn [x] (pt/match "Txn" x Debit d 1 Credit c 2))) "the sum \"Txn\" is not a symbol"
+   [:name-not-symbol (compiling '(fn [x] (pt/match "Txn" x Debit d 1 Credit c 2))) "the sum \"Txn\" is not a symbol"
     "(pt/match Txn x Debit d 1 Credit c 2)"]
    [:match-not-a-sum (compiling '(fn [x] (pt/match Debit x Debit d 1))) "Debit is not a sum" "(pt/defsum Transaction [Debit Credit])"]
    [:match-clause-shape (compiling '(fn [x] (pt/match Txn x Debit d))) "2 clause forms" "Debit d (f d)"]
@@ -114,32 +114,32 @@
     "(pure ...)"]
    [:check-options (compiling '(pt/defparsed E1 [a] (pure ::c "d" {:x 1} [a] true)))
     "the check :parsed-types.errors-test/c has options {:x 1}" "Remove {:x 1}"]
-   [:check-no-body-after-fetches (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [r ::f]) (fetch ::f [a] rows)))
+   [:check-no-body (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [r ::f]) (fetch ::f [a] rows)))
     "ends after its fetch bindings [r :parsed-types.errors-test/f]" "(some? r)"]
-   [:check-name-not-qualified (compiling '(pt/defparsed E1 [a] (pure :c "d" [a] true))) "the check :c" "::c"]
+   [:name-not-qualified (compiling '(pt/defparsed E1 [a] (pure :c "d" [a] true))) "the check :c" "::c"]
    [:check-no-doc (compiling '(pt/defparsed E1 [a] (pure ::c [a] true))) "the check :parsed-types.errors-test/c"
     "needs a doc string" "\"The amount is positive.\""]
    [:pure-check-fetches (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a] [r ::f] true) (fetch ::f [a] rows)))
     "binds fetches [r :parsed-types.errors-test/f]" "Make it (external ...)"]
    [:check-no-field-vector (compiling '(pt/defparsed E1 [a] (pure ::c "d" a true))) "has a, not a vector of the fields it reads" "like [a]"]
-   [:check-reads-unknown-field (compiling '(pt/defparsed E1 [amount] (pure ::c "d" [amont] true))) "[amont]"
+   [:reads-unknown-field (compiling '(pt/defparsed E1 [amount] (pure ::c "d" [amont] true))) "[amont]"
     "Did you mean amount?" "[amount]"]
-   [:check-reads-field-twice (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a a] true))) "reads a field twice: [a]"
+   [:field-named-twice (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a a] true))) "reads a field twice: [a]"
     "Name each field once"]
    [:check-bad-fetch-binding (compiling '(pt/defparsed E1 [a] (external ::c "d" [a] [x ::nope] true)))
     "binds [x :parsed-types.errors-test/nope]" "[account ::account]"
     "(fetch ::account [account-id] accounts-by-id)"]
-   [:check-two-fetches-one-local (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [r ::f r ::g] true)
+   [:fetch-local-taken (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [r ::f r ::g] true)
                                                (fetch ::f [a] rows) (fetch ::g [a] rows)))
     "two fetches to one local: [r]" "Give each fetch its own local"]
-   [:fetch-bound-to-field (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [a ::f] true) (fetch ::f [a] rows)))
+   [:fetch-local-taken (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [a ::f] true) (fetch ::f [a] rows)))
     "bound to a field's name: [a]" "as in a-row"]
    [:check-no-body (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a]))) "needs a body" "(some? a)"]
    [:check-uses-unnamed-field (compiling '(pt/defparsed E1 [a b] (pure ::c "d" [a] (< a b))))
     "the check :parsed-types.errors-test/c uses the field `b` without naming it"
     "Add it to the argument vector: [a b]" "If it is a local, rename the local, as in b-value."]
-   [:fetch-name-not-qualified (compiling '(pt/defparsed E1 [a] (fetch :f [a] rows))) "the fetch :f" "::f"]
-   [:fetch-bad-fields (compiling '(pt/defparsed E1 [account-id] (fetch ::f [acount-id] rows))) "reads [acount-id]"
+   [:name-not-qualified (compiling '(pt/defparsed E1 [a] (fetch :f [a] rows))) "the fetch :f" "::f"]
+   [:reads-unknown-field (compiling '(pt/defparsed E1 [account-id] (fetch ::f [acount-id] rows))) "reads [acount-id]"
     "Did you mean account-id?" "[account-id]"]
    [:fetch-no-fn (compiling '(pt/defparsed E1 [a] (fetch ::f [a]))) "has no function" "rows-by-id"]
    [:name-used-twice (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a] true) (pure ::c "d" [a] true)))
@@ -181,18 +181,18 @@
     "(vec (flatten v))" "(pr-str v)"]
    [:fetch-missing-tuples #(pt/parse (pt/draft Lossy {:id 1})) "returned no entry for [[1]]"
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
-   [:fetch-not-a-map #(pt/parse (pt/draft Odd {:id 1})) "returned a PersistentVector, not a map"
+   [:fetch-missing-tuples #(pt/parse (pt/draft Odd {:id 1})) "returned a PersistentVector, not a map"
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
    [:checks-failed #(pt/parse (pt/draft Debit {:user-id 1, :account-id :x, :amount -5})) "Invalid Debit: 2 checks failed"
     ":parsed-types.errors-test/amount-positive (The amount is positive.)" "Change the draft so they pass"]
    ;; sinks
    [:not-a-parsed-type #(pt/parsed :x real) "pt/parsed got :x as its type" "(pt/parsed Debit x)"]
-   [:got-nil #(pt/parsed Debit nil) "got nil" "Write (pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...})) and pass the result"]
+   [:got-unparsed #(pt/parsed Debit nil) "got nil" "Write (pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...})) and pass the result"]
    [:got-draft #(pt/parsed Debit draft) "got a DebitDraft" "(pt/parse draft)"]
-   [:got-unissued #(pt/parsed Debit (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue"
+   [:got-unparsed #(pt/parsed Debit (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue"
     "Write (pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...})) and pass the result"]
-   [:got-plain-map #(pt/parsed Debit {:amount 1}) "got a plain map" "(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))"]
-   [:got-other-type #(pt/parsed Debit (pt/parse (pt/draft Credit {:amount 1}))) "got a Credit" "(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))"]
+   [:got-unparsed #(pt/parsed Debit {:amount 1}) "got a plain map" "(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))"]
+   [:got-unparsed #(pt/parsed Debit (pt/parse (pt/draft Credit {:amount 1}))) "got a Credit" "(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))"]
    [:draft-of-a-draft #(pt/draft-of draft) "got a DebitDraft, which is already a draft" "Use the draft as it is"]
    [:draft-of-unissued #(pt/draft-of (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue" "(pt/draft Debit {:user-id ..., :account-id ..., :amount ...})"]
    [:match-compiled-before-member
@@ -221,7 +221,7 @@
                                                       (f (pt/parse (pt/draft M1 {:x 1})))))
     "match on MS, compiled in the namespace errs.stale-match, got a parsed errs.stale_match.M1"
     "(require 'errs.stale-match :reload)"]
-   [:stale-sum (in-ns-named 'errs.stale-sum '(do (pt/defparsed N1 [x])
+   [:stale-match (in-ns-named 'errs.stale-sum '(do (pt/defparsed N1 [x])
                                                   (pt/defparsed N2 [x])
                                                   (pt/defsum NS [N1 N2])
                                                   (pt/defparsed N1 [x])
@@ -234,7 +234,7 @@
    ;; pt/draft
    [:draft-not-a-literal-map (compiling '(fn [m] (pt/draft Debit m))) "pt/draft: m is not a literal map"
     "(pt/draft Debit {:user-id ..., :account-id ..., :amount ...})."]
-   [:draft-type-not-a-symbol (compiling '(pt/draft "Credit" {:amount 1})) "the type \"Credit\" is not a symbol"
+   [:name-not-symbol (compiling '(pt/draft "Credit" {:amount 1})) "the type \"Credit\" is not a symbol"
     "(pt/draft Credit {:amount 1})"]
    [:draft-not-a-parsed-type (compiling '(pt/draft String {})) "String is not a type defined with defparsed"
     "(pt/draft Debit {...})"]
@@ -430,7 +430,7 @@
                            ['(fn [x] (pt/match :Txn x Debit d 1 Credit c 2)) fn?]]]
       (let [{:keys [rule message]} (error (compiling form))
             fix                    (re-find #"\(pt/(?:draft|match) .*\)(?=\.$)" (str message))]
-        (is (#{:parsed-types.rule/draft-type-not-a-symbol :parsed-types.rule/match-sum-not-a-symbol} rule) (pr-str form))
+        (is (= :parsed-types.rule/name-not-symbol rule) (pr-str form))
         ;; the match is written inside (fn [x] ...), so its fix goes there too
         (is (fixed? ((compiling (cond->> (read-string fix) (= 'fn (first form)) (list 'fn '[x]))))) fix)))
     (testing "and a clause named by a keyword or a string says which symbol to write"

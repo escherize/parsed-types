@@ -292,7 +292,7 @@
         (is (re-find #"\(require 'parsed-types.defparsed-test :reload\)" (:message e)))))
     (testing "a match compiled after the reload, against the old defsum, does not compile"
       (let [e (thrown #(eval-here '(fn [x] (pt/match Members x Member m (:n m) NonMember o (:n o)))))]
-        (is (= {:type ::pt/stale-type, :rule :parsed-types.rule/stale-sum} (select-keys e [:type :rule])))
+        (is (= {:type ::pt/stale-type, :rule :parsed-types.rule/stale-match} (select-keys e [:type :rule])))
         (is (re-find #"Re-evaluate the defsum Members after the defparsed Member, then this match" (:message e)))))
     (eval-here '(pt/defsum Members [Member NonMember]))
     (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
@@ -326,7 +326,7 @@
     (testing "a match compiled against a sum from before the reload: the same"
       (require (first (nss "types")) :reload)
       (let [e (thrown #(require (first (nss "app")) :reload))]
-        (is (= :parsed-types.rule/stale-sum (:rule e)))
+        (is (= :parsed-types.rule/stale-match (:rule e)))
         (is (= "(require 'parsed-types.stale-fixture.sum 'parsed-types.stale-fixture.app :reload)" (apply-fix! e)))
         (is (= [:debit 5] ((fx "app" 'transact) (pt/parse (debit)))))))))
 

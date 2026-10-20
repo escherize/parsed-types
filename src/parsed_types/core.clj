@@ -179,11 +179,11 @@
   (let [n                      (.getSimpleName (class parsed))
         {:keys [rule message]} (case op
                                  "with-meta"
-                                 {:rule    ::rule/parsed-no-metadata
+                                 {:rule    ::rule/no-metadata
                                   :message (str "with-meta on a " n ": a parsed value carries no metadata, so it never"
                                                 " changes. Keep the metadata beside it, as in {:value x, :meta m}.")}
                                  "empty"
-                                 {:rule    ::rule/parsed-no-empty
+                                 {:rule    ::rule/no-empty
                                   :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
                                                 " a plain map.")}
                                  {:rule    ::rule/parsed-value-is-final
@@ -203,12 +203,12 @@
   (let [n                      (.getSimpleName (class draft))
         {:keys [rule message]} (case op
                                  "with-meta"
-                                 {:rule    ::rule/draft-no-metadata
+                                 {:rule    ::rule/no-metadata
                                   :message (str "with-meta on a " n ": a draft carries no metadata, so it holds only"
                                                 " what parse checks. Keep the metadata beside it, as in {:value x,"
                                                 " :meta m}.")}
                                  "empty"
-                                 {:rule    ::rule/draft-no-empty
+                                 {:rule    ::rule/no-empty
                                   :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
                                                 " a plain map.")}
                                  {:rule    ::rule/draft-fields-are-fixed
@@ -462,28 +462,28 @@
     (syntax-error! form ::rule/field-named-twice
                    (str "a field is named twice: " (vec twice) ". Each field is one key. Name each field once.")))
   (when (some #(= "/" (name %)) fields)
-    (syntax-error! form ::rule/field-slash
+    (syntax-error! form ::rule/field-name-unusable
                    (str "a field cannot be named /: the keyword :/ and the Java field it compiles to do not work as a"
                         " field. Rename it, as in slash.")))
   (when-let [special (seq (filter #(or (special-symbol? %) (= '& %)) fields))]
-    (syntax-error! form ::rule/field-special-form
+    (syntax-error! form ::rule/field-name-unusable
                    (str "a field cannot be named like a special form: " (vec special) ". A field is a local in the"
                         " type's methods, and a special form cannot be shadowed. Rename it, as in "
                         (first special) "-value.")))
   (when-let [dotted (seq (filter #(clojure.string/includes? (name %) ".") fields))]
-    (syntax-error! form ::rule/field-with-dot
+    (syntax-error! form ::rule/field-name-unusable
                    (str "a field name cannot contain a dot: " (vec dotted) ". A dot is not allowed in a Java field."
                         " Use a dash instead, as in " (clojure.string/replace (name (first dotted)) "." "-") ".")))
   (when-let [clash (seq (for [[_ fs] (group-by #(munge (name %)) fields) :when (< 1 (count fs))] fs))]
-    (syntax-error! form ::rule/fields-same-java-name
+    (syntax-error! form ::rule/field-name-unusable
                    (str "these fields compile to the same Java name: " (vec (first clash)) ". Each field needs its"
                         " own Java field. Rename one of them.")))
   (when-let [reserved (seq (filter '#{__meta __extmap __hash __hasheq} fields))]
-    (syntax-error! form ::rule/field-reserved-by-deftype
+    (syntax-error! form ::rule/field-name-unusable
                    (str "deftype reserves these field names: " (vec reserved) ". Rename them, as in "
                         (subs (name (first reserved)) 2) ".")))
   (when-let [reserved (seq (filter #(= "parse_proof" (munge (name %))) fields))]
-    (syntax-error! form ::rule/field-reserved-for-proof
+    (syntax-error! form ::rule/field-name-unusable
                    (str "parsed-types reserves the field name parse-proof for the proof a parsed value carries: "
                         (vec reserved) ". Rename it, as in proof."))))
 
@@ -698,7 +698,7 @@
    (when-not (simple-symbol? name)
      (throw (ex-info (str "defsum: the name " (pr-str name) " is not a symbol. A sum is a var, named by a symbol. Write"
                           " (defsum Transaction [Debit Credit]), with a symbol for the name.")
-                     {:type ::bad-declaration, :rule ::rule/sum-name-not-symbol, :name (pr-str name)})))
+                     {:type ::bad-declaration, :rule ::rule/name-not-symbol, :name (pr-str name)})))
    ;; through `var`, because it is private
    `(def ~name ((var sum) '~name ~members))))
 
@@ -723,7 +723,7 @@
    (let [refuse! (fn [rule message data]
                    (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (pr-str sum-name)))))
          _       (when-not (symbol? sum-name)
-                   (refuse! ::rule/match-sum-not-a-symbol
+                   (refuse! ::rule/name-not-symbol
                             (str "match: the sum " (pr-str sum-name) " is not a symbol. match names a sum by its"
                                  " symbol. Write "
                                  (if (or (string? sum-name) (keyword? sum-name))
@@ -777,7 +777,7 @@
                                      " match, or reload the namespace, as in " (reload-command nss) ".")
                                 (str "Reload the namespace of the defsum " sum-name ", then this match's, in that order,"
                                      " as in " (reload-command nss) ".")))
-                         {:type ::stale-type, :rule ::rule/stale-sum, :sum (str sum-name), :class (name-of t)
+                         {:type ::stale-type, :rule ::rule/stale-match, :sum (str sum-name), :class (name-of t)
                           :sum-ns sum-ns}))))
      ;; before the missing members: a clause that names a draft type is usually the member it misses
      (when (seq extra)
@@ -862,7 +862,7 @@
         [args & more]  more
         _              (when (and external? (vector? (first more)) (nil? (next more))
                                   (seq (first more)) (every? keyword? (take-nth 2 (rest (first more)))))
-                         (syntax-error! form ::rule/check-no-body-after-fetches
+                         (syntax-error! form ::rule/check-no-body
                                         (str what " ends after its fetch bindings " (pr-str (first more)) ". A check"
                                              " needs a body after its fetch bindings, which returns true to pass."
                                              " Write the body next, as in " (pr-str (first more)) " (some? "
@@ -872,7 +872,7 @@
                          [[] more])
         pairs          (partition-all 2 binds)]
     (when-not (qualified-keyword? n)
-      (syntax-error! form ::rule/check-name-not-qualified
+      (syntax-error! form ::rule/name-not-qualified
                      (str what ": a check's name must be a qualified keyword, so failures from two namespaces never"
                           " collide. Write it like ::" (if (or (keyword? n) (symbol? n)) (name n) "amount-positive")
                           ".")))
@@ -889,11 +889,11 @@
                      (str what " has " (pr-str args) ", not a vector of the fields it reads, which a check needs."
                           " Write it after the doc string, like [" (first fields) "].")))
     (when-let [unknown (seq (remove (set fields) args))]
-      (syntax-error! form ::rule/check-reads-unknown-field
+      (syntax-error! form ::rule/reads-unknown-field
                      (str what " reads fields the draft does not have: " (vec unknown) "."
                           (did-you-mean (first unknown) fields) " Use only its fields " fields ".")))
     (when-let [twice (seq (for [[f c] (frequencies args) :when (< 1 c)] f))]
-      (syntax-error! form ::rule/check-reads-field-twice
+      (syntax-error! form ::rule/field-named-twice
                      (str what " reads a field twice: " (vec twice) ". Name each field once.")))
     (when-not (every? #(and (= 2 (count %)) (symbol? (first %)) (contains? fetch-names (second %))) pairs)
       (syntax-error! form ::rule/check-bad-fetch-binding
@@ -903,10 +903,10 @@
                             (str "naming one of " (vec (sort fetch-names)) ".")
                             "and declare the fetch, as in (fetch ::account [account-id] accounts-by-id)."))))
     (when-let [twice (seq (for [[l c] (frequencies (map first pairs)) :when (< 1 c)] l))]
-      (syntax-error! form ::rule/check-two-fetches-one-local
+      (syntax-error! form ::rule/fetch-local-taken
                      (str what " binds two fetches to one local: " (vec twice) ". Give each fetch its own local.")))
     (when-let [clash (seq (filter (set fields) (map first pairs)))]
-      (syntax-error! form ::rule/fetch-bound-to-field
+      (syntax-error! form ::rule/fetch-local-taken
                      (str what ": a fetch is bound to a field's name: " (vec clash) ". The local would hide the"
                           " field. Pick another local, as in " (first clash) "-row.")))
     (when (empty? body)
@@ -936,11 +936,11 @@
 
 (defn- parse-fetch-clause [fields [_ n reads f :as form]]
   (when-not (qualified-keyword? n)
-    (syntax-error! form ::rule/fetch-name-not-qualified
+    (syntax-error! form ::rule/name-not-qualified
                    (str "the fetch " (pr-str n) ": a fetch's name must be a qualified keyword. Write it like ::"
                         (if (or (keyword? n) (symbol? n)) (name n) "account") ".")))
   (when-not (and (vector? reads) (every? (set fields) reads))
-    (syntax-error! form ::rule/fetch-bad-fields
+    (syntax-error! form ::rule/reads-unknown-field
                    (str "the fetch " (pr-str n) " reads " (pr-str reads) ". A fetch needs a vector of fields of the"
                         " draft." (if (vector? reads) (did-you-mean (first (remove (set fields) reads)) fields) "")
                         " Name some of " fields ".")))
@@ -1449,7 +1449,7 @@
                                   " map from each tuple to what it fetched. Return a map with a key for every tuple,"
                                   " with nil for not found, as in (into {} (map (fn [t] [t (lookup t)])) tuples)."))
                            {:type    ::bad-fetch
-                            :rule    (if (map? result) ::rule/fetch-missing-tuples ::rule/fetch-not-a-map)
+                            :rule    ::rule/fetch-missing-tuples
                             :fetch   (:name fd)
                             :missing (vec missing)})))
          (reduce (fn [sts w]
@@ -1640,7 +1640,7 @@
     (let [t                      (type-name parsed-type)
           {:keys [rule message]} (cond
                                    (nil? x)
-                                   {:rule    ::rule/got-nil
+                                   {:rule    ::rule/got-unparsed
                                     :message (str "Expected a parsed " t ", got nil. A sink takes only a value"
                                                   " pt/parse issued. Write " (parse-hint parsed-type)
                                                   " and pass the result.")}
@@ -1653,20 +1653,20 @@
                                                   " result.")}
 
                                    (member? parsed-type (class x))
-                                   {:rule    ::rule/got-unissued
+                                   {:rule    ::rule/got-unparsed
                                     :message (str "Expected a parsed " t ", got " (describe x) " that pt/parse did"
                                                   " not issue. A value built with its constructor or by hand"
                                                   " carries no proof. Write " (parse-hint parsed-type)
                                                   " and pass the result.")}
 
                                    (and (map? x) (not (instance? ParsedValue x)) (not (instance? DraftValue x)))
-                                   {:rule    ::rule/got-plain-map
+                                   {:rule    ::rule/got-unparsed
                                     :message (str "Expected a parsed " t ", got a plain map. A sink takes only a"
                                                   " value pt/parse issued. Build a draft from its fields and parse"
                                                   " it, as in " (parse-hint parsed-type) ", and pass the result.")}
 
                                    :else
-                                   {:rule    ::rule/got-other-type
+                                   {:rule    ::rule/got-unparsed
                                     :message (str "Expected a parsed " t ", got " (describe x) ". A sink takes only"
                                                   " a value of its type. Pass a " t " instead: "
                                                   (parse-hint parsed-type) ".")})]
@@ -1756,7 +1756,7 @@
   ([parsed-type m]
    (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
          _       (when-not (symbol? parsed-type)
-                   (refuse! ::rule/draft-type-not-a-symbol
+                   (refuse! ::rule/name-not-symbol
                             (str "pt/draft: the type " (pr-str parsed-type) " is not a symbol. pt/draft names a parsed"
                                  " type by its symbol. Write "
                                  (if (or (string? parsed-type) (keyword? parsed-type))
