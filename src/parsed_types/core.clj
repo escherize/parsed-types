@@ -45,13 +45,12 @@
   a `:rule` in `parsed-types.rule` that names the rule it broke. Its message says what happened, with the values, the
   rule, and the fix."
   (:require
+   [clojure.pprint :as pprint]
    [clojure.set :as set]
    [parsed-types.rule :as-alias rule]
    [clojure.string])
   (:import
-   (com.google.common.collect MapMaker)
-   (java.lang.reflect Modifier)
-   (java.util Map)))
+   (java.lang.reflect Modifier)))
 
 (set! *warn-on-reflection* true)
 
@@ -86,13 +85,31 @@
 (defclass-once
   (definterface DraftValue))
 
+(defn- print-typed
+  "Print `x`, a draft or parsed value, as `#ns.Type{...}`, like a record, so it is told apart from a plain map. The
+  proof is not a key, so it is never printed. The reader cannot build one back: a map type is not a record."
+  [x ^java.io.Writer w]
+  (.write w (str "#" (.getName (class x))))
+  (print-method (into {} x) w))
+
+;; one method per interface, preferred over the map's, so a defparsed adds none
+(defmethod print-method ParsedValue [x w] (print-typed x w))
+(defmethod print-method DraftValue [x w] (print-typed x w))
+(doseq [i [ParsedValue DraftValue]]
+  (prefer-method print-method i clojure.lang.IPersistentMap)
+  (prefer-method print-method i java.util.Map)
+  (defmethod pprint/simple-dispatch i [x]
+    (.write ^java.io.Writer *out* (str "#" (.getName (class x))))
+    (pprint/simple-dispatch (into {} x)))
+  (prefer-method pprint/simple-dispatch i clojure.lang.IPersistentMap))
+
 ;;; ------------------------------------------------ State ------------------------------------------------
 
 ;; Draft type -> its plan, and parsed type -> the same plan, by identity. Written once per class, when its `defparsed`
-;; loads. Its keys are weak, but each plan holds both classes, and so does the `print-method` entry `defparsed` adds,
-;; so a class a REPL replaces is never released: a REPL-only leak, of a few classes per re-evaluation.
-(defonce ^:private ^Map registry
-  (.makeMap (.weakKeys (MapMaker.))))
+;; loads. It holds every class it was given, so a class a REPL replaces is never released: a REPL-only leak, of two
+;; classes and a plan per re-evaluation.
+(defonce ^:private ^java.util.concurrent.ConcurrentHashMap registry
+  (java.util.concurrent.ConcurrentHashMap.))
 
 ;; Class name -> `{:ns :role :type}`: the namespace, as written, whose `defparsed` first claimed it, the role the class
 ;; has there, `:parsed` or `:draft`, and the parsed type's name. `my-app.bank` and `my_app.bank` compile to the same
@@ -424,7 +441,8 @@
       (~'equals [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
                                              ~@(when same-proof [(same-proof o)])
                                              (clojure.lang.APersistentMap/mapEquals ~this ~o)))
-      (~'toString [~this] (clojure.core/str (clojure.core/into {} ~this)))]))
+      ;; the printed form, which names the type, never the proof
+      (~'toString [~this] (clojure.core/pr-str ~this))]))
 
 (defn- syntax-error!
   "Throws `::bad-declaration` for `form`, a `defparsed` form or one of its clauses, that broke `rule`. The message ends
@@ -469,13 +487,6 @@
                    (str "parsed-types reserves the field name parse-proof for the proof a parsed value carries: "
                         (vec reserved) ". Rename it, as in proof."))))
 
-(defn- print-method-form [name]
-  ;; `#ns.Type{...}`, like a record, so a value is told apart from a plain map at the REPL. The reader cannot build one
-  ;; back: a map type is not a record.
-  `(defmethod print-method ~name [x# ^java.io.Writer w#]
-     (.write w# (str "#" (.getName (class x#))))
-     (print-method (into {} x#) w#)))
-
 (defn- builders
   "The form of the plain fns the plan of `parsed-name` and `draft-name`, with `fields`, uses to build and read values,
   so that parsing calls no reflection:
@@ -511,8 +522,7 @@
          ~@(map-type-methods fields this k v `((var final!) ~this "assoc" ~k) `(var final!)
                              (fn [o]
                                `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
-       (ns-unmap *ns* '~(symbol (str "->" name)))
-       ~(print-method-form name))))
+       (ns-unmap *ns* '~(symbol (str "->" name))))))
 
 (defn- defdraft-type
   "The form that defines `name`, a bare draft type with `fields`. `assoc` sets a field; `dissoc` and `with-meta` throw,
@@ -525,8 +535,7 @@
          parsed_types.core.DraftValue
          ~@(map-type-methods fields this k v `((var assoc-draft) ~this ~k ~v) `(var fixed!) nil))
        ;; positional, so reordering the fields would silently swap values: pt/draft names every field instead
-       (ns-unmap *ns* '~(symbol (str "->" name)))
-       ~(print-method-form name))))
+       (ns-unmap *ns* '~(symbol (str "->" name))))))
 
 (defn- not-loaded!
   "Throws `::bad-declaration` when `c` is a class a `defparsed` claimed and defined but never registered: an error

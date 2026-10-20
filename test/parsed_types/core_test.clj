@@ -1,6 +1,7 @@
 (ns parsed-types.core-test
   (:require
    [clojure.edn :as edn]
+   [clojure.pprint :as pprint]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [clojure.walk :as walk]
@@ -68,8 +69,18 @@
         (is (= ::pt/no-field (:type (thrown-data #(:nope parsed)))) "a key that is not a field throws")
         (is (= ::none (get parsed :nope ::none)) "unless a default is given")
         (is (not (contains? parsed :nope))))
-      (testing "it prints with its type"
-        (is (= "#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}" (pr-str parsed))))))
+      (testing "it prints with its type, and so do str, toString and pprint, which never show the proof"
+        (doseq [shown [(pr-str parsed) (str parsed) (.toString ^Object parsed) (str/trim (with-out-str (binding [pprint/*print-right-margin* 200] (pprint/pprint parsed))))]]
+          (is (= "#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}" shown)))
+        (is (= "#parsed_types.core_test.RenameCardDraft{:user-id 1, :card-id 1, :title \"New\"}"
+               (str draft) (str/trim (with-out-str (binding [pprint/*print-right-margin* 200] (pprint/pprint draft))))))
+        (is (= "{:k [#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}]}"
+               (str/trim (with-out-str (binding [pprint/*print-right-margin* 200] (pprint/pprint {:k [parsed]})))))))
+      (testing "by one method on the library's interfaces: a defparsed adds no print method"
+        (let [before (count (methods print-method))]
+          (binding [*ns* (the-ns 'parsed-types.core-test)] (eval '(pt/defparsed Printed [a])))
+          (is (= before (count (methods print-method))))
+          (is (not (contains? (methods print-method) RenameCard)))))))
   (testing "a failed pure check is reported by name, with its doc and what it returned"
     (is (= {:type         ::pt/invalid
             :rule         :parsed-types.rule/checks-failed

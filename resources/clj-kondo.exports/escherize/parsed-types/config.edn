@@ -62,7 +62,7 @@
                                  parsed-types.core/parsed-type?        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/pending             {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/plan-for            {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
-                                 parsed-types.core/print-method-form   {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/print-typed         {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/read-only-entry     {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/read-only-view      {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/reads-set           {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
