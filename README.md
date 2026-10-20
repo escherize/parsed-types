@@ -122,9 +122,11 @@ Three more rules hold:
   mutable Java collection, or a lazy seq. The message names the fix, such as `(vec s)`. There is no opt-out yet.
 - **A walk fails loudly.** `empty` throws, so `clojure.walk` over a parsed value throws instead of dropping the
   proof. Use `(into {} x)` for a plain map.
-- **A REPL reload just works.** Parsed types compare by class name. After you re-evaluate a `defparsed`, parent
-  types, sums and compiled sinks accept values of the new class. Inside a check, ask a child's type with `pt/is?`,
-  which compares by name too; `instance?` would hold the old class.
+- **Types reload like records, and a stale one says what to reload.** Parsed types compare by class, so
+  `instance?` works, inside a check too. Re-evaluating a `defparsed` makes new classes, and code evaluated before
+  keeps the old ones. Where a class doesn't match but its name does, the library throws `::stale-type`. The message
+  names what to re-evaluate: the parent `defparsed`, the `defsum`, the namespace a `match` was compiled in, or the
+  code that built an old value.
 
 ## Parse spends each check once, and touches the world last
 
@@ -161,8 +163,8 @@ A failure reports every check by name. `:blocked` names the checks that didn't r
         (every? #(= user-id (:user-id %)) lines))
   (pure ::balanced "The debits and the credits add up to the same amount."
         [lines]
-        (= (reduce + 0M (map :amount (filter #(pt/is? Debit %) lines)))
-           (reduce + 0M (map :amount (filter #(pt/is? Credit %) lines))))))
+        (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
+           (reduce + 0M (map :amount (filter #(instance? Credit %) lines))))))
 
 (defn post-entry! [entry]
   (run! transact! (:lines (pt/parsed JournalEntry entry))))
@@ -194,6 +196,7 @@ A person, or an agent, can apply the fix from the message alone.
 |---|---|
 | `::invalid` | a check failed; `:failures` has each one |
 | `::not-parsed` | a sink, `match` or `draft-of` got a value `parse` didn't make |
+| `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after; the message says what to reload |
 | `::cannot-change` | code called `assoc`, `dissoc` or `empty` on a parsed value |
 | `::no-field` | code read a key that isn't a field |
 | `::bad-input` | `pt/draft` got a non-map or unknown keys, a field holds a mutable value, or a tree is too big |
@@ -228,7 +231,7 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
   checks. That is how a REPL reload works. Another namespace can't take the name: that throws when it loads.
 - **External checks can go stale.** A balance that passed at `parse` can change later. Parse right before you act.
 
-## The API is eleven names
+## The API is ten names
 
 | Name | Does |
 |---|---|
@@ -236,7 +239,6 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
 | `draft` | builds a draft from a map; a literal map must name every field, and only fields |
 | `parse`, `parse-all` | checks drafts and returns parsed values, or throws with every failure |
 | `parsed`, `parsed?` | returns or tests a value `parse` made |
-| `is?` | tests a value's type, ignoring the proof; for checks, not sinks |
 | `draft-of` | turns a parsed value back into a draft |
 | `defsum`, `match` | a closed set of parsed types, and a branch over every member |
 | `declaration` | returns the declaration `defparsed` wrote, as data |

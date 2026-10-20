@@ -32,11 +32,13 @@
   A parsed value carries its proof: a hidden field that only [[parse]] sets. So [[parsed]] needs no registry of
   issued values, and a value built by hand, equal or not, is refused.
 
-  Parsed types compare by class name, so when a REPL re-evaluates a `defparsed`, code compiled against the old class
-  accepts values of the new one, the way a `#'var` follows its latest definition.
+  Parsed types compare by class, like records: when a REPL re-evaluates a `defparsed`, it makes new classes, and code
+  evaluated against the old ones keeps them. Where a class does not match but its name does, the library throws
+  `::stale-type`, naming what to re-evaluate.
 
   Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (checks
-  failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or `::bad-fetch`, and
+  failed), `::not-parsed`, `::stale-type`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or
+  `::bad-fetch`, and
   a `:rule` in `parsed-types.rule` that names the rule it broke. Its message says what happened, with the values, the
   rule, and the fix."
   (:require
@@ -88,10 +90,16 @@
 (defonce ^:private ^Map registry
   (.makeMap (.weakKeys (MapMaker.))))
 
-;; Parsed class name -> the namespace, as written, whose `defparsed` first defined it. Types compare by class name, and
-;; `my-app.bank` and `my_app.bank` compile to the same Java names, so without this a `defparsed` in one could stand in
-;; for the types of the other.
+;; Class name -> `{:ns :role :type}`: the namespace, as written, whose `defparsed` first claimed it, the role the class
+;; has there, `:parsed` or `:draft`, and the parsed type's name. `my-app.bank` and `my_app.bank` compile to the same
+;; Java names, and a type named `FooDraft` has the name of `Foo`'s draft, so without this one `defparsed` could
+;; redefine the classes of another.
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
+  (java.util.concurrent.ConcurrentHashMap.))
+
+;; Parsed class name -> the class its `defparsed` defined last. A class that has the name but is not this one is from
+;; before a REPL re-evaluated the `defparsed`: stale.
+(defonce ^:private ^java.util.concurrent.ConcurrentHashMap latest
   (java.util.concurrent.ConcurrentHashMap.))
 
 (defn- edit-distance
@@ -444,17 +452,37 @@
   [x]
   (and (sum? x) (valid-members? (sum-members x))))
 
-(defn- same-type?
-  "Whether the classes `a` and `b` are the same parsed type: they have the same name. Two classes have one name only
-  when a REPL re-evaluated the `defparsed` that defined them, so the type defined last stands for both, like a var
-  named in place of its value."
-  [^Class a ^Class b]
-  (and (some? a) (some? b) (= (.getName a) (.getName b))))
-
 (defn- member?
-  "Whether `cls` is `type`, or one of the members of the sum `type`, by name."
+  "Whether the class `cls` is `type`, or one of the members of the sum `type`: the class itself, as for a record."
   [type cls]
-  (if (sum? type) (boolean (some #(same-type? % cls) (sum-members type))) (same-type? type cls)))
+  (if (sum? type) (boolean (some #(identical? % cls) (sum-members type))) (identical? type cls)))
+
+(defn- named-member
+  "The class among `type`, or the members of the sum `type`, with the name of the class `cls`, or nil. It is `cls`
+  itself unless one of the two is from before a REPL re-evaluated their `defparsed`."
+  [type ^Class cls]
+  (when (some? cls)
+    (some #(when (= (.getName ^Class %) (.getName cls)) %) (if (sum? type) (sum-members type) [type]))))
+
+(defn- stale?
+  "Whether the parsed class `c` is not the one its `defparsed` defined last."
+  [^Class c]
+  (not (identical? c (.get latest (.getName c)))))
+
+(defn- defined-in
+  "`the defparsed Debit in bank`, for the parsed class `c`."
+  [^Class c]
+  (str "the defparsed " (.getSimpleName c) " in " (:ns (.get owners (.getName c)))))
+
+(defn- stale-value!
+  "Throws `::stale-type`: `what`, a value or draft of the parsed class `c`, is from before `c`'s `defparsed` was
+  re-evaluated, and the code that got it expects the class defined since."
+  [where what ^Class c]
+  (throw (ex-info (str where " got " what " of " (.getName c) " from before " (defined-in c) " was re-evaluated. Types"
+                       " compare by class, like records, and re-evaluating a defparsed makes new classes. Build it"
+                       " again from a new draft, as in (pt/parse (->" (.getSimpleName c) "Draft ...)), or re-run the"
+                       " code that built it.")
+                  {:type ::stale-type, :rule ::rule/stale-value, :class (.getName c)})))
 
 (defn- type-name [type]
   (if (sum? type) (str (sum-name type)) (.getSimpleName ^Class type)))
@@ -495,10 +523,10 @@
       Debit  debit  (debit! debit)
       Credit credit (credit! credit))
 
-  Leaving out a member, naming a type that is not one, or naming one twice is a compile error. A branch runs only when
-  [[parsed?]] accepts `x` for its type, compared by name, so a value of a type a REPL re-evaluated still matches. Any
-  other `x` throws `::not-parsed`. A binding is not type-hinted: after such a reload the hint would name the old
-  class. Read fields by keyword."
+  Leaving out a member, naming a type that is not one, or naming one twice is a compile error. A branch runs only for
+  a value [[parse]] issued, of its type's class. A value of a class with the type's name, from before or after a REPL
+  re-evaluated its `defparsed`, throws `::stale-type`, naming the namespace to re-evaluate. Any other `x` throws
+  `::not-parsed`."
   [sum-name x & clauses]
   (let [refuse! (fn [rule message data]
                   (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (str sum-name)))))
@@ -524,11 +552,18 @@
                                  c))
                      triples)
         name-of (fn [^Class c] (.getName c))
-        members (set (map name-of (sum-members s)))
-        missing (remove (set (map name-of types)) (map name-of (sum-members s)))
-        extra   (remove (comp members name-of) types)]
+        simple  (fn [^Class c] (symbol (.getSimpleName c)))
+        missing (remove (fn [m] (some #(identical? m %) types)) (sum-members s))
+        extra   (remove (fn [t] (some #(identical? t %) (sum-members s))) types)]
+    (when-let [[t] (seq (filter (fn [t] (some #(= (name-of t) (name-of %)) missing)) extra))]
+      (throw (ex-info (str "match on " sum-name ": the clause " (simple t) " names " (name-of t) ", but the sum holds"
+                           " another class of that name: one of the two is from before " (defined-in t) " was"
+                           " re-evaluated. Types compare by class, like records. Re-evaluate the defsum " sum-name
+                           " after the defparsed " (simple t) ", then this match, or reload their namespaces, as in"
+                           " (require '" (ns-name *ns*) " :reload).")
+                      {:type ::stale-type, :rule ::rule/stale-sum, :sum (str sum-name), :class (name-of t)})))
     (when (seq missing)
-      (let [simple (mapv #(symbol (peek (clojure.string/split % #"\."))) missing)]
+      (let [simple (mapv simple missing)]
         (refuse! ::rule/match-missing-member
                  (str "match on " sum-name " does not handle " simple ". A match handles every member, so adding"
                       " one to the sum breaks every match that misses it. Add a clause for each, as in "
@@ -539,6 +574,7 @@
                (str "match on " sum-name ": not members: " (mapv #(symbol (.getSimpleName ^Class %)) extra) ". A"
                     " clause handles a member of the sum. Remove those clauses, or add the types to the defsum.")
                {:extra (mapv name-of extra)}))
+    ;; distinct by name: two classes of one name are the type before and after a REPL re-evaluated it
     (when-not (apply distinct? (map name-of types))
       (refuse! ::rule/match-member-twice
                (str "match on " sum-name " handles a type twice: "
@@ -548,13 +584,43 @@
     (let [v (gensym "v")]
       `(let [~v ~x]
          (cond
+           ;; the private fns through `var`
            ~@(mapcat (fn [[t b e]]
-                       [`(parsed? ~t ~v) `(let [~b ~v] ~e)])
+                       [`((var issued-as?) ~t ~v) `(let [~b ~v] ~e)])
                      triples)
-           ;; through `var`, because it is private: `v` is no member this match handles, so this throws
-           :else ((var match-fell-through!) ~sum-name '~(mapv #(symbol (.getSimpleName ^Class %)) types) ~v))))))
+           ;; `v` is no member this match handles, so this throws
+           :else ((var match-fell-through!) ~sum-name ~(vec (map first triples)) '~(ns-name *ns*) ~v))))))
 
 ;;; ------------------------------------------------ defparsed ------------------------------------------------
+
+(defn- claim-class-names!
+  "Throws `::bad-declaration` unless the `defparsed` of `parsed-name` in the namespace `ns-sym` may define the classes
+  in `claims`, a map from class name to its role, `:parsed` or `:draft`: each name is unclaimed, or claimed by this
+  namespace in the same role, as when a REPL re-evaluates the form. When `record?`, records the claims."
+  [ns-sym parsed-name claims record?]
+  (locking owners
+    (doseq [[class-name role] claims
+            :let  [{owner :ns, owner-role :role, owner-type :type} (.get owners class-name)]
+            :when owner]
+      (cond
+        (not= owner ns-sym)
+        (throw (ex-info (str "defparsed " parsed-name ": " class-name " is already defined by a defparsed in the"
+                             " namespace " owner ", and the namespace " ns-sym " compiles to the same Java class"
+                             " name. One namespace's defparsed would redefine the other's classes. Rename one of the"
+                             " namespaces, as in " ns-sym "-2.")
+                        {:type ::bad-declaration, :rule ::rule/class-name-taken, :class class-name, :owner owner
+                         :ns ns-sym}))
+
+        (not= owner-role role)
+        (throw (ex-info (str "defparsed " parsed-name ": " class-name " is already the " (name owner-role) " type of"
+                             " (defparsed " owner-type " ...) in " owner ", and this defparsed would make it its "
+                             (name role) " type. A class name has one role, and the draft of Name is NameDraft."
+                             " Rename one of the types, as in (defparsed " parsed-name "2 ...).")
+                        {:type ::bad-declaration, :rule ::rule/class-name-other-role, :class class-name
+                         :role role, :owner-role owner-role, :owner-type owner-type}))))
+    (when record?
+      (doseq [[class-name role] claims]
+        (.put owners class-name {:ns ns-sym, :role role, :type parsed-name})))))
 
 (defn- parse-check-clause
   "`(pure name doc [field ...] body ...)` or `(external name doc [field ...] [local fetch ...]? body ...)`"
@@ -661,8 +727,8 @@
             (every? #(= user-id (:user-id %)) lines))
       (pure ::balanced \"The debits and the credits add up to the same amount.\"
             [lines]
-            (= (reduce + 0M (map :amount (filter #(pt/is? Debit %) lines)))
-               (reduce + 0M (map :amount (filter #(pt/is? Credit %) lines))))))
+            (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
+               (reduce + 0M (map :amount (filter #(instance? Credit %) lines))))))
 
   Clauses:
 
@@ -713,7 +779,9 @@
                                           (vec (for [[f c] (frequencies child-heads) :when (< 1 c)] f))
                                           ". Declare it once, with child or children.")))
         names       (concat (map :name checks) (map :name fetches))
-        draft-name  (symbol (str parsed-name "Draft"))]
+        draft-name  (symbol (str parsed-name "Draft"))
+        claims      {(str (namespace-munge *ns*) "." parsed-name) :parsed
+                     (str (namespace-munge *ns*) "." draft-name)  :draft}]
     (when-not (apply distinct? ::sentinel names)
       (syntax-error! &form ::rule/name-used-twice
                      (str "a check or fetch name is used twice: "
@@ -723,11 +791,15 @@
       (syntax-error! &form ::rule/reserved-name
                      (str "names in parsed-types.child are reserved for child-field checks: " (vec reserved)
                           ". Name them in your own namespace, as in ::" (name (first reserved)) ".")))
+    ;; when it expands, so that a refused defparsed never reaches its deftypes, which would redefine the classes
+    (claim-class-names! (ns-name *ns*) parsed-name claims false)
     `(do
+       ;; when it loads, before the deftypes, which is what records the claim; through `var`, because it is private
+       ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
        ~(defparsed-type parsed-name fields)
        ~(defdraft-type draft-name fields)
        ;; through `var`, because `register!` is private: only this expansion may record a plan
-       ((var register!) '~(ns-name *ns*) ~parsed-name ~draft-name
+       ((var register!) ~parsed-name ~draft-name
         {:checks ~checks, :fetches ~fetches, :children ~children}
         ~(builders parsed-name draft-name fields))
        ~parsed-name)))
@@ -783,11 +855,34 @@
                              " from a field, or make the check external.")
                         {:name n, :locals locals}))))
 
+(defn- stale-child!
+  "Throws `::stale-type`: the child field `field` of the parent `parent`, a plan or `{:parses-to :draft-class}`,
+  declared to hold `type`, holds the draft `d`, which parses to `c`, a class with the name of `type` or of one of its
+  members but not that class."
+  [{:keys [parses-to draft-class]} field type d ^Class c]
+  (let [where (str (.getSimpleName ^Class draft-class) ": the child field " field)]
+    (if (stale? c)
+      (stale-value! where (str "a " (.getSimpleName (class d))) c)
+      (throw (ex-info (str where " holds a " (.getSimpleName (class d)) " of " (.getName c) ", but "
+                           (defined-in parses-to) " was evaluated against an older " (.getName c)
+                           (when (sum? type) (str ", through the sum " (sum-name type))) ". Types compare by class,"
+                           " like records, so a parent keeps the child types it was evaluated with. Re-evaluate "
+                           (when (sum? type) (str "the defsum " (sum-name type) ", then "))
+                           "the defparsed " (.getSimpleName ^Class parses-to) ", or reload its namespace, as in"
+                           " (require '" (:ns (.get owners (.getName ^Class parses-to))) " :reload).")
+                      {:type ::stale-type, :rule ::rule/stale-child-type, :class (.getName c), :field field
+                       :parent (.getName ^Class parses-to)})))))
+
 (defn- children-of-type?
-  "Whether `v` is what a child field, of `kind` and `parsed-type`, may hold. A draft's parsed type is compared by name,
-  so after a REPL re-evaluates a child type, a parent defined before it accepts drafts of the new class."
-  [kind parsed-type v]
-  (let [drafts-it? (fn [d] (and (draft-value? d) (member? parsed-type (:parses-to (plan-for d)))))]
+  "Whether `v` is what the child field `field` of `parent`, declared as `{:kind :type}`, may hold: drafts that parse to
+  the type's class itself, or one of its members. A draft of a class with that name but not the class throws
+  `::stale-type`."
+  [parent field {:keys [kind], parsed-type :type} v]
+  (let [drafts-it? (fn [d] (and (draft-value? d)
+                                (let [c (:parses-to (plan-for d))]
+                                  (when (and (named-member parsed-type c) (not (member? parsed-type c)))
+                                    (stale-child! parent field parsed-type d c))
+                                  (member? parsed-type c))))]
     (case kind
       :one  (or (nil? v) (drafts-it? v))
       :many (and (vector? v) (every? drafts-it? v)))))
@@ -795,14 +890,14 @@
 (defn- child-shape-check
   "The pure check every child field gets: it holds drafts of the declared type. Every check that reads the field waits
   on it."
-  [field {:keys [kind type]}]
+  [parent field {:keys [kind type], :as child}]
   {:name  (keyword "parsed-types.child" (name field))
    :doc   (str (name field) " holds " (if (= :one kind) "nil or a draft that parses to " "a vector of drafts that parse to ")
                (type-name type) ".")
    :kind  :pure
    :shape? true
    :reads [field]
-   :f     (fn [v] (children-of-type? kind type v))})
+   :f     (fn [v] (children-of-type? parent field child v))})
 
 (defn- reads-set [x] (set (:reads x)))
 
@@ -818,7 +913,7 @@
   Pure checks run first, fewest fields first, then fetches, then external checks, each in declaration order."
   [parses-to draft-class fields {:keys [checks fetches children], :as decl}]
   (validate-declaration! parses-to draft-class decl)
-  (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check field child)])) children)
+  (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check {:parses-to parses-to, :draft-class draft-class} field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
         external  (filterv #(= :external (:kind %)) checks)
         waits-on  (fn [pred] (into #{} (comp (filter pred) (map :name)) pure))
@@ -859,19 +954,11 @@
   "Build and check the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the
   `builders` [[defparsed]] generated. Called by the expansion of [[defparsed]], when it loads; throws
   `::bad-declaration` then."
-  [ns-sym parsed-type draft-type decl builders]
-  (let [class-name (.getName ^Class parsed-type)
-        owner      (or (.putIfAbsent owners class-name ns-sym) ns-sym)]
-    (when-not (= owner ns-sym)
-      (bad-declaration! draft-type ::rule/class-name-taken
-                        (str class-name " is already defined by a defparsed in the namespace " owner ", and the"
-                             " namespace " ns-sym " compiles to the same Java class name. Parsed types compare by"
-                             " class name, so one namespace's types could stand in for the other's. Rename one of the"
-                             " namespaces, as in " ns-sym "-2.")
-                        {:class class-name, :owner owner, :ns ns-sym})))
+  [parsed-type draft-type decl builders]
   (let [plan (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
     (.put registry draft-type plan)
-    (.put registry parsed-type plan)))
+    (.put registry parsed-type plan)
+    (.put latest (.getName ^Class parsed-type) parsed-type)))
 
 (defn- plan-for [draft]
   (when-not (draft-value? draft)
@@ -1040,9 +1127,9 @@
                                   " it in smaller parts, as with (pt/parse-all parts).")
                              {}))
             st   (assoc (start draft walked) :tree tree :path path)
-            kids (for [[field {:keys [kind type]}] (get-in st [:plan :children])
+            kids (for [[field {:keys [kind], :as child}] (get-in st [:plan :children])
                        :let  [v (get-in st [:values field])]
-                       :when (children-of-type? kind type v)
+                       :when (children-of-type? (:plan st) field child v)
                        [i d] (if (= :one kind) (when v [[nil v]]) (map-indexed vector v))]
                    [field (child-path path field i) d])
             st   (assoc st :child-paths (reduce (fn [m [field p]] (update m field (fnil conj []) p)) {} kids))]
@@ -1299,6 +1386,28 @@
        (identical? (class x) (:parses-to (.get registry (class x))))
        (true? (.issuedWith ^ParsedValue x parse-token))))
 
+(defn- issued-as?
+  "Whether `x` is a value [[parse]] issued, of the class `c` itself. Called by the expansion of [[match]]."
+  [c x]
+  (and (identical? c (class x)) (issued? x)))
+
+(defn- stale-sink!
+  "Throws `::stale-type` when `x`, a value [[parse]] issued, is of a class with the name of `type`, or of a member of
+  the sum `type`, but not that class: `fn-name`, a sink's call, and the value disagree on which class is the type."
+  [fn-name type x]
+  (when (issued? x)
+    (let [c (class x), expected (named-member type c)]
+      (when (and expected (not (identical? expected c)))
+        (if (stale? c)
+          (stale-value! fn-name (str "a parsed " (.getSimpleName ^Class c)) c)
+          (throw (ex-info (str fn-name " got a parsed " (.getName ^Class c) ", but its type argument " (type-name type)
+                               " holds an older class of that name: the code calling (" fn-name " " (type-name type)
+                               " ...) was compiled before " (defined-in c) " was re-evaluated. Types compare by class,"
+                               " like records, so code keeps the classes it was compiled against. Re-evaluate "
+                               (when (sum? type) (str "the defsum " (type-name type) ", then "))
+                               "the namespace that calls " fn-name ", or run (clojure.tools.namespace.repl/refresh).")
+                          {:type ::stale-type, :rule ::rule/stale-sink, :class (.getName ^Class c)})))))))
+
 (defn- check-type!
   "Throws `::bad-input` unless `t`, the first argument `fn-name` got, is a type [[defparsed]] defined or a sum
   [[defsum]] defined."
@@ -1315,26 +1424,15 @@
                       {:type ::bad-input, :rule ::rule/not-a-parsed-type, :fn fn-name
                        :got  (if (class? t) (.getName ^Class t) (pr-str t))})))))
 
-(defn is?
-  "Whether `x` is a value of `parsed-type`, or of a member of the sum `parsed-type`, or a draft of one, ignoring the
-  proof. This is not proof that the checks passed: a sink takes [[parsed]]. A check takes `is?`, because inside a
-  check a child is a value without the proof, which [[parsed?]] refuses. Compares by class name like the rest of the
-  library, so after a REPL re-evaluates a type, `is?` compiled against the old class still answers true for the new
-  one, where `instance?` would not. Only classes [[defparsed]] registered count. Throws `::bad-input` when
-  `parsed-type` is not a parsed type or a sum."
-  [parsed-type x]
-  (check-type! "pt/is?" parsed-type)
-  (boolean (when (some? x)
-             (when-let [plan (.get registry (class x))]
-               (member? parsed-type (:parses-to plan))))))
-
 (defn parsed?
   "Whether `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`: a value of
-  a class [[defparsed]] defined, whose hidden proof field holds the proof only `parse` sets. Which type `x` counts as
-  is decided by class name, so a value of a class a REPL re-evaluated counts as the type. Throws `::bad-input` when
-  `parsed-type` is neither."
+  the class itself, as for a record, whose hidden proof field holds the proof only `parse` sets. Throws `::bad-input`
+  when `parsed-type` is neither. Throws `::stale-type` when `x` is a value `parse` issued of a class with the name of
+  the type but not the class: one of the two is from before a REPL re-evaluated its `defparsed`, and the message
+  says which to re-evaluate."
   [parsed-type x]
   (check-type! "pt/parsed?" parsed-type)
+  (stale-sink! "pt/parsed?" parsed-type x)
   (and (some? x)
        (member? parsed-type (class x))
        (issued? x)))
@@ -1352,10 +1450,11 @@
 
 (defn parsed
   "`x`, which must be a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`. Throws
-  `::not-parsed` otherwise. Read its fields by keyword, as in `(:amount x)`: a key that is not a field throws
-  `::no-field`. Throws `::bad-input` when `parsed-type` is not a parsed type or a sum."
+  `::not-parsed` otherwise, and `::stale-type` as [[parsed?]] says. Read its fields by keyword, as in `(:amount x)`: a
+  key that is not a field throws `::no-field`. Throws `::bad-input` when `parsed-type` is not a parsed type or a sum."
   [parsed-type x]
   (check-type! "pt/parsed" parsed-type)
+  (stale-sink! "pt/parsed" parsed-type x)
   (when-not (parsed? parsed-type x)
     (let [t                      (type-name parsed-type)
           {:keys [rule message]} (cond
@@ -1365,7 +1464,7 @@
                                                   " pt/parse issued. Write " (parse-hint parsed-type)
                                                   " and pass the result.")}
 
-                                   (and (draft-value? x) (member? parsed-type (:parses-to (plan-for x))))
+                                   (and (draft-value? x) (named-member parsed-type (:parses-to (plan-for x))))
                                    {:rule    ::rule/got-draft
                                     :message (str "Expected a parsed " t ", got " (describe x) ", which is not"
                                                   " checked yet. A sink takes only a value pt/parse issued. Call"
@@ -1400,11 +1499,25 @@
   x)
 
 (defn- match-fell-through!
-  "Throws `::not-parsed` for `v`, which no clause of a [[match]] on `sum` took. `handled` names the member types the
-  match handles. Called by the expansion of [[match]]."
-  [sum handled v]
-  (when (parsed? sum v)
-    (let [got (symbol (.getSimpleName (class v)))]
+  "Throws for `v`, which no clause of a [[match]] on `sum` took. `handled` holds the classes the match handles, and
+  `ns-sym` names the namespace it was compiled in. `::stale-type` when `v` was issued with a class of the name of
+  one it handles, `::not-parsed` otherwise. Called by the expansion of [[match]]."
+  [sum handled ns-sym v]
+  (when (issued? v)
+    (let [c (class v)]
+      (when (some #(= (.getName ^Class %) (.getName c)) handled)
+        (if (stale? c)
+          (stale-value! (str "match on " (sum-name sum)) (str "a parsed " (.getSimpleName c)) c)
+          (throw (ex-info (str "match on " (sum-name sum) ", compiled in the namespace " ns-sym ", got a parsed "
+                               (.getName c) ", but its clause " (.getSimpleName c) " names an older class of that"
+                               " name: the match was compiled before " (defined-in c) " was re-evaluated. Types"
+                               " compare by class, like records, so a match keeps the classes it was compiled"
+                               " against. Re-evaluate the namespace " ns-sym ", as in (require '" ns-sym " :reload),"
+                               " after the defsum " (sum-name sum) " if it is in another namespace.")
+                          {:type ::stale-type, :rule ::rule/stale-match, :class (.getName c), :ns ns-sym}))))))
+  (when (and (some? v) (member? sum (class v)) (issued? v))
+    (let [got     (symbol (.getSimpleName (class v)))
+          handled (mapv #(symbol (.getSimpleName ^Class %)) handled)]
       (throw (ex-info (str "match on " (sum-name sum) " got a parsed " got ", but this match was compiled before " got
                            " joined the sum, and handles only " handled ". A match handles every member of its sum."
                            " Re-evaluate the match, or reload its namespace, so that it must handle " got ".")

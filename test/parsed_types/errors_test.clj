@@ -192,9 +192,47 @@
    [:draft-of-unissued #(pt/draft-of (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue" "(->DebitDraft ...)"]
    [:match-compiled-before-member
     ;; what a match on Growing compiled when it held only Debit does once Credit joins
-    #((var parsed-types.core/match-fell-through!) (pt/sum 'Growing [Debit Credit]) '[Debit]
+    #((var parsed-types.core/match-fell-through!) (pt/sum 'Growing [Debit Credit]) [Debit] 'parsed-types.errors-test
       (pt/parse (->CreditDraft 1)))
     "got a parsed Credit, but this match was compiled before Credit joined the sum" "Re-evaluate the match"]
+   ;; a REPL re-evaluated a defparsed, and code evaluated before it keeps the old class
+   [:stale-value (in-ns-named 'errs.stale-value '(do (pt/defparsed V [x])
+                                                      (def old (pt/parse (->VDraft 1)))
+                                                      (pt/defparsed V [x])
+                                                      (pt/parsed V old)))
+    "pt/parsed got a parsed V of errs.stale_value.V from before the defparsed V in errs.stale-value was re-evaluated"
+    "(pt/parse (->VDraft ...))"]
+   [:stale-sink (in-ns-named 'errs.stale-sink '(do (pt/defparsed S [x])
+                                                    (defn sink [v] (pt/parsed S v))
+                                                    (pt/defparsed S [x])
+                                                    (sink (pt/parse (->SDraft 1)))))
+    "the code calling (pt/parsed S ...) was compiled before the defparsed S in errs.stale-sink was re-evaluated"
+    "Re-evaluate the namespace that calls pt/parsed" "(clojure.tools.namespace.repl/refresh)"]
+   [:stale-child-type (in-ns-named 'errs.stale-child '(do (pt/defparsed K [x])
+                                                           (pt/defparsed P [ks] (children ks K))
+                                                           (pt/defparsed K [x])
+                                                           (pt/parse (->PDraft [(->KDraft 1)]))))
+    "PDraft: the child field :ks holds a KDraft of errs.stale_child.K"
+    "the defparsed P in errs.stale-child was evaluated against an older errs.stale_child.K"
+    "Re-evaluate the defparsed P, or reload its namespace, as in (require 'errs.stale-child :reload)"]
+   [:stale-match (in-ns-named 'errs.stale-match '(do (pt/defparsed M1 [x])
+                                                      (pt/defparsed M2 [x])
+                                                      (pt/defsum MS [M1 M2])
+                                                      (defn f [v] (pt/match MS v M1 a 1 M2 b 2))
+                                                      (pt/defparsed M1 [x])
+                                                      (f (pt/parse (->M1Draft 1)))))
+    "match on MS, compiled in the namespace errs.stale-match, got a parsed errs.stale_match.M1"
+    "(require 'errs.stale-match :reload)"]
+   [:stale-sum (in-ns-named 'errs.stale-sum '(do (pt/defparsed N1 [x])
+                                                  (pt/defparsed N2 [x])
+                                                  (pt/defsum NS [N1 N2])
+                                                  (pt/defparsed N1 [x])
+                                                  (fn [v] (pt/match NS v N1 a 1 N2 b 2))))
+    "the clause N1 names errs.stale_sum.N1, but the sum holds another class of that name"
+    "Re-evaluate the defsum NS after the defparsed N1, then this match"]
+   [:class-name-other-role (in-ns-named 'errs.roles '(do (pt/defparsed FooDraft [x]) (pt/defparsed Foo [y])))
+    "errs.roles.FooDraft is already the parsed type of (defparsed FooDraft ...) in errs.roles"
+    "Rename one of the types, as in (defparsed Foo2 ...)"]
    ;; pt/draft
    [:not-a-draft-type #(pt/draft-from-map String {}) "pt/draft-from-map got java.lang.String"
     "(pt/draft-from-map DebitDraft m)" "(pt/draft Debit m)"]
@@ -271,8 +309,7 @@
 (deftest the-type-argument-is-checked-test
   (doseq [[label thunk] [["nil" #(pt/parsed nil real)] ["a keyword" #(pt/parsed? :x real)]
                          ["a draft type" #(pt/parsed DebitDraft real)] ["a bare Sum" #(pt/parsed? (pt/sum 'S [Debit]) nil)]
-                         ["a class that only implements ParsedValue" #(pt/parsed Fake (Fake. 1))]
-                         ["a class that only implements ParsedValue, to is?" #(pt/is? Fake (Fake. 1))]]]
+                         ["a class that only implements ParsedValue" #(pt/parsed Fake (Fake. 1))]]]
     (testing label
       (is (= (if (= "a bare Sum" label) nil :parsed-types.rule/not-a-parsed-type) (:rule (error thunk))))))
   (is (str/includes? (:message (error #(pt/parsed DebitDraft real))) "pass its parsed type, as in (pt/parsed Debit x)")))

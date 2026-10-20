@@ -9,8 +9,8 @@ The README covers how to use the library; this page covers what it promises and 
 |---|---|---|
 | `pt/parsed` accepts only values `parse` made | A parsed value has a hidden `parse-proof` field. `parse` sets it to a private token. `pt/parsed` first checks that the value's class is one `defparsed` registered, by identity, then asks the value `(issuedWith token)`, which compares inside the type | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The token never leaves the value | The field is `volatile-mutable`, which Clojure compiles to a non-public field that interop can't read, and nothing sets it after the constructor. No public method returns it. A hand-written class is refused before it is asked, so it never sees the token | `the-proof-never-leaves-the-value-test` |
-| A hand-written type is refused, even with the same name | `pt/parsed` requires the class `defparsed` registered, by identity. The class name decides only which declared type a value counts as | `a-hand-written-class-with-the-same-name-is-refused-test` |
-| A type of one namespace can't stand in for another's | `register!` records the namespace, as written, that first defined each parsed class name. A `defparsed` in another namespace whose name compiles to the same Java class name, such as `my_app.bank` for `my-app.bank`, throws `::bad-declaration` when it loads, so it registers nothing | `a-class-name-belongs-to-one-namespace-test` |
+| A hand-written type is refused, even with the same name | `pt/parsed` requires the class `defparsed` registered, by identity | `a-hand-written-class-with-the-same-name-is-refused-test` |
+| A `defparsed` can't redefine another's classes | Each class name is claimed with its role, parsed or draft, by the namespace, as written, whose `defparsed` first defined it. A `defparsed` whose classes would take a name claimed by another namespace (`my_app.bank` for `my-app.bank`), or a name in the other role (a type `FooDraft` beside `Foo`'s draft), throws `::bad-declaration` when it expands and again when it loads, before its `deftype`s, so it defines no class | `a-class-name-belongs-to-one-namespace-test`, `a-class-name-has-one-role-test` |
 | A parsed value can't be built by accident | `defparsed` removes the parsed type's `->Name` factory, so `(->Debit ...)` doesn't compile. `(Debit. a b c nil)` compiles, and `pt/parsed` refuses it | `the-positional-factory-is-removed-test`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The proof is not part of the map | `parse-proof` isn't a key, and isn't in `seq`, `count`, equality, hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
 | A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type, and a class name belongs to the namespace that first defined it. `defparsed-type` and `defdraft-type` are private, so calling them doesn't compile, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
@@ -35,11 +35,10 @@ The README covers how to use the library; this page covers what it promises and 
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others. A pure check that closes over a local is refused when it loads | `compile-errors-test`, `declaration-errors-at-load-test` |
 | Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
-| Only types `defparsed` defined count as types | `pt/parsed`, `pt/parsed?`, `pt/is?`, `defsum` and child fields accept a class only when `defparsed` registered it, by identity. A class that only implements `ParsedValue` is refused with `::bad-input` | `the-type-argument-is-checked-test`, `only-sum-builds-a-sum-test` |
+| Only types `defparsed` defined count as types | `pt/parsed`, `pt/parsed?`, `defsum` and child fields accept a class only when `defparsed` registered it, by identity. A class that only implements `ParsedValue` is refused with `::bad-input` | `the-type-argument-is-checked-test`, `only-sum-builds-a-sum-test` |
 | A sum is built only from distinct parsed types | A sum isn't a map, so `assoc` can't change one. Every use checks its members, so one built with its constructor is checked too. Sums are equal when their names and members are | `only-sum-builds-a-sum-test` |
-| A check can ask a child's type, and the answer survives a reload | `pt/is?` says whether a value or draft is of a parsed type or a member of a sum, by class name, ignoring the proof, for registered classes only. It is not proof: sinks use `pt/parsed`, checks use `pt/is?`. `instance?` in a check would name the class it was compiled against | `is?-answers-the-type-without-the-proof-test` |
 | Reloading the library keeps every type and value defined before | The token is a `defonce`, and `ParsedValue`, `DraftValue` and `Sum` are defined only when they are not loaded yet | `reloading-the-library-keeps-every-type-test` |
-| After a REPL re-evaluates a type, code defined before it accepts the new class | Parsed types compare by class name, in `pt/parsed`, `parsed?`, `pt/is?`, sums, a child field's shape check and `match` | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
+| Types compare by class, like records, and a stale class says what to re-evaluate | `pt/parsed`, `parsed?`, sums, a child field's shape check and `match` compare classes by identity. Where the class differs but the name matches, they throw `::stale-type`, naming the parent `defparsed` and its namespace, the `defsum`, the namespace a `match` was compiled in, or the code that built the old value | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test`, `every-error-names-what-happened-the-rule-and-the-fix-test` |
 
 ## Accepted limits
 
@@ -57,7 +56,7 @@ and these gaps, are accepted:
   `IPersistentVector` mutably passes. There is no opt-out for mutable values yet.
 - **A sum can be built with its constructor.** A sum is a `deftype`, not a record, so `assoc` and `merge` can't
   make one from another, and `->Sum` is removed. `(parsed_types.core.Sum. 'S members)` still builds one, so every
-  use checks the members again: `pt/parsed`, `pt/parsed?` and `pt/is?` refuse a sum whose members are not distinct
+  use checks the members again: `pt/parsed` and `pt/parsed?` refuse a sum whose members are not distinct
   parsed types. A sum built that way with real members is the same as one `defsum` builds.
 - **`in-ns` can redefine a namespace's types.** Code that switches into a namespace with `in-ns` and runs a
   `defparsed` there redefines its types, with whatever checks it writes, the same way a REPL reload does.
@@ -87,9 +86,10 @@ without a `:rule`, or a `throw` of anything but an `ex-info`.
 |---|---|---|
 | `::invalid` | `parse` or `parse-all` ran the checks and some failed. The message names the first five failed checks with their docs | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue. The rule says which: nil, a plain map, a draft of the type, an unchecked value of the type, or a value of another type | `:expected`, `:got` |
+| `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed`. The rule says which, and the message what to re-evaluate (see "REPL reloads") | `:class`, and `:ns`, `:field` or `:parent` where they apply |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
 | `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
-| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed`, `pt/parsed?` or `pt/is?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
+| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
@@ -144,8 +144,8 @@ The expansion builds and checks the plan when it loads, before any `parse`. It t
 - **No empty version.** `empty` throws, and so does anything built on `(into (empty x) ...)`, such as
   `clojure.walk`. Use `(into {} x)` for a plain map.
 - **What a parent check sees.** Each child is a value of its parsed type that passed its pure checks, built without
-  the token. Inside the check, `pt/parsed` refuses it; ask its type with `pt/is?`, as in
-  `(filter #(pt/is? Debit %) lines)`, not with `instance?`, which breaks after the child type is re-evaluated. When the whole tree passes, `parse` builds each node again with
+  the token. Inside the check, `pt/parsed` refuses it; ask its type with `instance?`, as in
+  `(filter #(instance? Debit %) lines)`. When the whole tree passes, `parse` builds each node again with
   the token. The issued value has the same fields as the value the checks saw, but that value lacks the proof, so the
 two are not equal. A parent's pure checks run
   before any external check. A parent's external checks run after the children's, and one that reads a child that
@@ -174,17 +174,20 @@ two are not equal. A parent's pure checks run
 
 ## REPL reloads
 
-Re-evaluating a `defparsed` makes new classes with the old names. Parsed types compare by class name, so the new
-definition stands in for the old one, the way Ring's `#'handler` follows the latest `defn`:
+Re-evaluating a `defparsed` makes new classes with the old names. Parsed types compare by class, like records, so
+code evaluated before keeps the old classes, and drafts and values built before keep theirs. A draft of the old
+class still parses, with the plan it was defined with.
 
-- A parent defined before a child type was re-evaluated accepts drafts of the new child class. Its issued value
-  holds values of the new class.
-- A `defsum` defined before a member was re-evaluated accepts values of the new class, and so does a child field of
-  that sum.
-- Compiled sinks, such as `(pt/parsed Debit x)` and `match`, accept values of the new class.
-- A check that asks a child's type with `pt/is?` keeps passing; one that uses `(instance? Debit %)` names the old
-  class and starts failing.
-- A draft of the old class still parses, with the plan it was defined with.
+Where a class doesn't match but its name does, the library throws `::stale-type`. The rule says which side is old,
+and the message says what to re-evaluate:
+
+| Rule | Where | Fix the message names |
+|---|---|---|
+| `stale-value` | a sink, `match` or a child field got a value or draft built before its type was re-evaluated | build it again from a new draft, or re-run the code that built it |
+| `stale-sink` | `(pt/parsed Debit x)` compiled before `Debit` was re-evaluated got a new value | re-evaluate the namespace that calls it, or `(clojure.tools.namespace.repl/refresh)` |
+| `stale-child-type` | a parent evaluated before its child type, or its sum, was re-evaluated got a new draft | re-evaluate the `defsum`, then the parent `defparsed`, or `(require 'ns :reload)` |
+| `stale-match` | a `match` compiled before a member was re-evaluated got a new value | re-evaluate the namespace the match was compiled in, as `(require 'ns :reload)` |
+| `stale-sum` | a `match` names a member re-evaluated after its `defsum` | re-evaluate the `defsum`, then the match |
 
 Two registered classes share a name only when the namespace that defined them defines them again: a REPL reload, or
 code that switches into that namespace with `in-ns`. A `defparsed` in another namespace whose name compiles to the
@@ -221,8 +224,10 @@ only one that parses to its parsed type, with no table of claims. Declarations a
 **Plans are built when `defparsed` loads.** A declaration error shows up when the file loads, not at the first parse,
 and no lazy cache is needed. A registry maps each draft class and each parsed class to its plan.
 
-**Types compare by name.** A REPL reload then works like a var. With identity, every reload would strand the code
-compiled against the old class.
+**Types compare by class, like records.** `instance?` and type hints then work, inside checks too. A reload strands
+code compiled against the old class, as it does for a record, so the library detects a class whose name matches and
+throws `::stale-type` with what to re-evaluate. Comparing by name kept old code working, but let a value of one
+generation pass where code expected another, and needed a second way to ask a type, `pt/is?`, inside checks.
 
 **No remembered passes.** `parse` runs every check every time. A pass remembered on a draft was a second, weaker kind
 of proof, kept beside the value, and it cost bitmasks, a 64-check limit and a weak map.
@@ -261,11 +266,12 @@ would throw a `ClassCastException`. Read fields by keyword.
 Each of these deliberately broken copies of this version fails at least one test: the proof field public; a method
 handing the token out; the registry not consulted before asking a value for its proof; equality ignoring the proof;
 the immutability walk shallow, skipping map keys, or accepting seqs; no did-you-mean, or one that suggests any field;
-an `ex-info` without a `:rule`; a rule with no example; a message that drops its fix; `pt/is?` comparing by identity,
-requiring the proof, or counting a class `defparsed` didn't register; `pt/parsed` ignoring the proof; the
+an `ex-info` without a `:rule`; a rule with no example; a message that drops its fix; types compared by name; a type
+argument that only implements `ParsedValue` accepted; a sink, a child field or a `match` with no stale-type check;
+the class-name claim made only when a `defparsed` loads; a claim without its role; `pt/parsed` ignoring the proof; the
 `->Name` factory kept; the proof in a value's `seq`; a field named `parse-proof` allowed; `defparsed-type` or
 `defdraft-type` public; no checks when a `defparsed` loads; parent checks seeing children built with the token; the
-issued root holding children built without it; types compared by identity; `match` testing with `instance?`; `empty`
+issued root holding children built without it; `empty`
 returning `{}`.
 
 Each of these broken copies of earlier versions failed a test that is still in the suite: fetches grouped by draft

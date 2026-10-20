@@ -206,27 +206,57 @@
 
 (defn- resolve-here [sym] @(ns-resolve 'parsed-types.defparsed-test sym))
 
+(defn- thrown
+  "The ex-data of what `thunk` threw, with its message as `:message`, through compiler wrapping, or nil."
+  [thunk]
+  (try (thunk) nil
+       (catch Throwable t
+         (when-let [e (loop [e t] (cond (nil? e) nil, (:type (ex-data e)) e, :else (recur (ex-cause e))))]
+           (assoc (ex-data e) :message (ex-message e))))))
+
 (deftest re-evaluating-a-child-type-test
   (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
   (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
   (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
-  (let [old-kid ((resolve-here '->KidDraft) 1)
-        parent  ((resolve-here '->ParentDraft) [old-kid])
-        sink    (resolve-here 'kid-sink)]
+  (let [old-kid   ((resolve-here '->KidDraft) 1)
+        old-value (pt/parse old-kid)
+        parent    ((resolve-here '->ParentDraft) [old-kid])
+        sink      (resolve-here 'kid-sink)]
     (is (some? (pt/parse parent)))
     (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
     (let [new-kid ((resolve-here '->KidDraft) 2)]
       (is (not= (class old-kid) (class new-kid)) "the reload made a new class")
-      (testing "a parent defined before the reload accepts drafts of the new child class, like a var"
-        (let [p (pt/parse ((resolve-here '->ParentDraft) [new-kid]))]
-          (is (= [{:n 2}] (map #(into {} %) (:kids p))))
-          (is (every? #(pt/parsed? (class (pt/parse new-kid)) %) (:kids p)))))
-      (testing "a draft of the old class still parses, with the plan it was defined with"
+      (testing "a parent evaluated before the reload says to re-evaluate it, when it gets a draft of the new class"
+        (let [e (thrown #(pt/parse ((resolve-here '->ParentDraft) [new-kid])))]
+          (is (= {:type ::pt/stale-type, :rule :parsed-types.rule/stale-child-type, :field :kids}
+                 (select-keys e [:type :rule :field])))
+          (is (re-find #"ParentDraft: the child field :kids holds a KidDraft of parsed_types.defparsed_test.Kid, but the defparsed Parent in parsed-types.defparsed-test was evaluated against an older"
+                       (:message e)))
+          (is (re-find #"Re-evaluate the defparsed Parent, or reload its namespace, as in \(require 'parsed-types.defparsed-test :reload\)"
+                       (:message e)))))
+      (testing "old drafts still parse together, with the plans they were defined with, as records would"
         (is (some? (pt/parse parent)))
-        (is (some? (pt/parse old-kid))))
-      (testing "a sink compiled before the reload accepts values of the new class"
-        (is (= {:n 2} (into {} (sink (pt/parse new-kid)))))
-        (is (= ::pt/not-parsed (:type (try (sink new-kid) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))))))))
+        (is (= (class old-value) (class (pt/parse old-kid)))))
+      (testing "a sink compiled before the reload says to re-evaluate the code that calls it"
+        (let [e (thrown #(sink (pt/parse new-kid)))]
+          (is (= :parsed-types.rule/stale-sink (:rule e)))
+          (is (re-find #"the code calling \(pt/parsed Kid \.\.\.\) was compiled before the defparsed Kid in parsed-types.defparsed-test was re-evaluated"
+                       (:message e)))
+          (is (re-find #"\(clojure.tools.namespace.repl/refresh\)" (:message e))))
+        (is (identical? old-value (sink old-value)) "and still takes the values of its own class"))
+      (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
+      (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
+      (testing "once re-evaluated, the parent and the sink take the new class"
+        (is (= [{:n 2}] (map #(into {} %) (:kids (pt/parse ((resolve-here '->ParentDraft) [new-kid]))))))
+        (is (= {:n 2} (into {} ((resolve-here 'kid-sink) (pt/parse new-kid))))))
+      (testing "and say to build again what was built before the reload"
+        (let [e (thrown #(pt/parse ((resolve-here '->ParentDraft) [old-kid])))]
+          (is (= :parsed-types.rule/stale-value (:rule e)))
+          (is (re-find #"ParentDraft: the child field :kids got a KidDraft of parsed_types.defparsed_test.Kid from before the defparsed Kid in parsed-types.defparsed-test was re-evaluated"
+                       (:message e)))
+          (is (re-find #"\(pt/parse \(->KidDraft \.\.\.\)\)" (:message e))))
+        (is (= :parsed-types.rule/stale-value (:rule (thrown #((resolve-here 'kid-sink) old-value)))))
+        (is (= :parsed-types.rule/stale-value (:rule (thrown #(pt/parsed? (ns-resolve 'parsed-types.defparsed-test 'Kid) old-value)))))))))
 
 (deftest re-evaluating-a-member-of-a-sum-test
   (eval-here '(pt/defparsed Member [n]))
@@ -236,13 +266,30 @@
   (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
   (eval-here '(pt/defparsed Member [n]))
   (let [member (pt/parse ((resolve-here '->MemberDraft) 1))]
-    (testing "a holder defined against the sum before the reload accepts a draft of the new member class"
-      (is (= {:n 1} (into {} (:m (pt/parse ((resolve-here '->HolderDraft) ((resolve-here '->MemberDraft) 1))))))))
-    (testing "the sum, and a match compiled before the reload, accept the new class"
+    (testing "a holder evaluated against the sum before the reload names the sum and the holder to re-evaluate"
+      (let [e (thrown #(pt/parse ((resolve-here '->HolderDraft) ((resolve-here '->MemberDraft) 1))))]
+        (is (= :parsed-types.rule/stale-child-type (:rule e)))
+        (is (re-find #"through the sum Members\. .*Re-evaluate the defsum Members, then the defparsed Holder"
+                     (:message e)))))
+    (testing "the sum names itself, and a match compiled before the reload names its namespace"
+      (is (re-find #"Re-evaluate the defsum Members, then the namespace that calls pt/parsed\?"
+                   (:message (thrown #(pt/parsed? (resolve-here 'Members) member)))))
+      (let [e (thrown #((resolve-here 'which-member) member))]
+        (is (= {:rule :parsed-types.rule/stale-match, :ns 'parsed-types.defparsed-test} (select-keys e [:rule :ns])))
+        (is (re-find #"match on Members, compiled in the namespace parsed-types.defparsed-test, got a parsed parsed_types.defparsed_test.Member"
+                     (:message e)))
+        (is (re-find #"\(require 'parsed-types.defparsed-test :reload\)" (:message e)))))
+    (testing "a match compiled after the reload, against the old defsum, does not compile"
+      (let [e (thrown #(eval-here '(fn [x] (pt/match Members x Member m (:n m) NonMember o (:n o)))))]
+        (is (= {:type ::pt/stale-type, :rule :parsed-types.rule/stale-sum} (select-keys e [:type :rule])))
+        (is (re-find #"Re-evaluate the defsum Members after the defparsed Member, then this match" (:message e)))))
+    (eval-here '(pt/defsum Members [Member NonMember]))
+    (eval-here '(pt/defparsed Holder [m] (child m Members)))
+    (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
+    (testing "once the sum, the holder and the match are re-evaluated, they take the new class"
+      (is (= {:n 1} (into {} (:m (pt/parse ((resolve-here '->HolderDraft) ((resolve-here '->MemberDraft) 1)))))))
       (is (pt/parsed? (resolve-here 'Members) member))
-      (is (= [:member 1] ((resolve-here 'which-member) member))))
-    (testing "a match compiled after the reload, against the old defsum, compiles"
-      (is (nil? (compile-error '(fn [x] (pt/match Members x Member m (:n m) NonMember o (:n o)))))))))
+      (is (= [:member 1] ((resolve-here 'which-member) member))))))
 
 (deftest reloading-the-library-keeps-every-type-test
   (eval-here '(pt/defparsed RlLine [n] (pure ::rl-n-int "n is an integer." [n] (int? n))))
@@ -261,8 +308,7 @@
       (is (= before (interfaces))))
     (testing "a value parsed before the reload is still parsed"
       (is (pt/parsed? line-type parsed))
-      (is (identical? parsed (pt/parsed line-type parsed)))
-      (is (pt/is? line-type parsed)))
+      (is (identical? parsed (pt/parsed line-type parsed))))
     (testing "a draft built before the reload still parses, and still fails its checks"
       (is (pt/parsed? line-type (pt/parse good)))
       (is (= #{::rl-n-int} (set (keys (:failures (try (pt/parse bad) nil
@@ -297,25 +343,52 @@
     (require '[parsed-types.core :as pt])
     (eval form)))
 
+(defn- loaded-class [class-name] (Class/forName class-name false (clojure.lang.DynamicClassLoader.)))
+
 (deftest a-class-name-belongs-to-one-namespace-test
   (eval-in 'pt-owner.my-app.bank '(pt/defparsed Debit [amount] (pure ::pos "The amount is positive." [amount] (pos? amount))))
-  (let [real-type (eval-in 'pt-owner.my-app.bank 'Debit)
-        sink      (eval-in 'pt-owner.my-app.bank '(fn [d] (:amount (pt/parsed Debit d))))]
+  (let [real-type  (eval-in 'pt-owner.my-app.bank 'Debit)
+        real-draft (eval-in 'pt-owner.my-app.bank 'DebitDraft)
+        sink       (eval-in 'pt-owner.my-app.bank '(fn [d] (:amount (pt/parsed Debit d))))]
     (testing "a namespace whose name compiles to the same Java package cannot define a type of that name"
-      (let [e (try (eval-in 'pt-owner.my_app.bank '(pt/defparsed Debit [amount])) nil
-                   (catch Throwable t (if (ex-data t) t (ex-cause t))))]
+      (let [e (thrown #(eval-in 'pt-owner.my_app.bank '(pt/defparsed Debit [amount])))]
         (is (= {:type  ::pt/bad-declaration, :rule :parsed-types.rule/class-name-taken
                 :class "pt_owner.my_app.bank.Debit", :owner 'pt-owner.my-app.bank, :ns 'pt-owner.my_app.bank}
-               (select-keys (ex-data e) [:type :rule :class :owner :ns])))
-        (is (re-find #"already defined by a defparsed in the namespace pt-owner.my-app.bank" (ex-message e)))
-        (is (re-find #"Rename one of the namespaces" (ex-message e)))))
-    (testing "so its drafts parse to nothing, and the sink accepts nothing from it"
-      (is (= ::pt/bad-input (:type (try (eval-in 'pt-owner.my_app.bank '(pt/parse (->DebitDraft -1000))) nil
-                                        (catch Throwable t (ex-data (if (ex-data t) t (ex-cause t)))))))))
+               (select-keys e [:type :rule :class :owner :ns])))
+        (is (re-find #"already defined by a defparsed in the namespace pt-owner.my-app.bank" (:message e)))
+        (is (re-find #"Rename one of the namespaces" (:message e)))))
+    (testing "inside a let too, where the whole form compiles before any of it runs"
+      (is (= :parsed-types.rule/class-name-taken
+             (:rule (thrown #(eval-in 'pt-owner.my_app.bank '(let [] (pt/defparsed Debit [amount]))))))))
+    (testing "and the refused defparsed defined no class: the owner's classes are still the loaded ones"
+      (is (identical? real-type (loaded-class "pt_owner.my_app.bank.Debit")))
+      (is (identical? real-draft (loaded-class "pt_owner.my_app.bank.DebitDraft")))
+      (is (nil? (ns-resolve (the-ns 'pt-owner.my_app.bank) '->DebitDraft)))
+      (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse (->DebitDraft 5)))))))
     (testing "the owning namespace may redefine it, as a REPL reload does"
       (eval-in 'pt-owner.my-app.bank '(pt/defparsed Debit [amount] (pure ::pos "The amount is positive." [amount] (pos? amount))))
-      (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse (->DebitDraft 5))))))
-      (is (= (.getName ^Class real-type) (.getName ^Class (eval-in 'pt-owner.my-app.bank 'Debit)))))))
+      (let [sink (eval-in 'pt-owner.my-app.bank '(fn [d] (:amount (pt/parsed Debit d))))]
+        (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse (->DebitDraft 5))))))))))
+
+(deftest a-class-name-has-one-role-test
+  (testing "a type named like another type's draft is refused, in either order, before it defines a class"
+    (eval-in 'pt-roles.a '(pt/defparsed FooDraft [x]))
+    (let [parsed (loaded-class "pt_roles.a.FooDraft")
+          e      (thrown #(eval-in 'pt-roles.a '(pt/defparsed Foo [y])))]
+      (is (= {:type ::pt/bad-declaration, :rule :parsed-types.rule/class-name-other-role, :class "pt_roles.a.FooDraft"
+              :role :draft, :owner-role :parsed}
+             (select-keys e [:type :rule :class :role :owner-role])))
+      (is (re-find #"pt_roles.a.FooDraft is already the parsed type of \(defparsed FooDraft \.\.\.\) in pt-roles.a"
+                   (:message e)))
+      (is (re-find #"Rename one of the types, as in \(defparsed Foo2 \.\.\.\)" (:message e)))
+      (is (identical? parsed (loaded-class "pt_roles.a.FooDraft")) "FooDraft is still the parsed class"))
+    (eval-in 'pt-roles.b '(pt/defparsed Bar [y]))
+    (let [draft (loaded-class "pt_roles.b.BarDraft")
+          e     (thrown #(eval-in 'pt-roles.b '(pt/defparsed BarDraft [])))]
+      (is (= {:rule :parsed-types.rule/class-name-other-role, :role :parsed, :owner-role :draft}
+             (select-keys e [:rule :role :owner-role])))
+      (is (identical? draft (loaded-class "pt_roles.b.BarDraft")) "BarDraft is still Bar's draft class")
+      (is (some? (pt/parse (eval-in 'pt-roles.b '(->BarDraft 1))))))))
 
 (deftest a-match-compiled-before-a-member-joined-throws-test
   (eval-here '(pt/defparsed MA [x]))
@@ -333,49 +406,6 @@
     (is (= :parsed-types.rule/got-draft
            (:rule (try ((resolve-here 'grows-match) ((resolve-here '->MCDraft) 1)) nil
                        (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
-
-(deftest is?-answers-the-type-without-the-proof-test
-  (eval-here '(pt/defparsed IsLine [amount]))
-  (eval-here '(pt/defparsed IsOther [amount]))
-  (eval-here '(pt/defsum IsSum [IsLine IsOther]))
-  ;; like a JournalEntry whose ::balanced check filters its lines by type
-  (eval-here '(pt/defparsed IsEntry [lines]
-                (children lines IsSum)
-                (pure ::unproven "Inside the check, no line is parsed yet." [lines]
-                      (not-any? #(pt/parsed? IsSum %) lines))
-                (pure ::balanced "The IsLine amounts add up to the IsOther amounts." [lines]
-                      (and (seq (filter #(pt/is? IsLine %) lines))
-                           (= (reduce + (map :amount (filter #(pt/is? IsLine %) lines)))
-                              (reduce + (map :amount (filter #(pt/is? IsOther %) lines))))))))
-  (let [line-draft #((resolve-here '->IsLineDraft) 1)
-        entry      #(pt/parse ((resolve-here '->IsEntryDraft) [(line-draft) ((resolve-here '->IsOtherDraft) 1)]))
-        is-line?   (eval-here '(fn [x] (pt/is? IsLine x)))]
-    (testing "inside a check, on a child view that pt/parsed? refuses"
-      (is (some? (entry))))
-    (testing "on parsed values and drafts, of the type and of a sum"
-      (let [p (pt/parse (line-draft))]
-        (is (true? (is-line? p)))
-        (is (true? (is-line? (line-draft))))
-        (is (true? (pt/is? (resolve-here 'IsSum) p)))))
-    (testing "false for another type, a plain map, nil, and a value built by hand without the proof is still a value of
-              the type: is? is not proof"
-      (is (false? (is-line? (pt/parse ((resolve-here '->IsOtherDraft) 1)))))
-      (is (false? (is-line? {:amount 1})))
-      (is (false? (is-line? nil)))
-      (is (true? (is-line? (eval-here '(IsLine. 1 nil))))))
-    (testing "after IsLine is re-evaluated, the check and code compiled before it still answer true"
-      (eval-here '(pt/defparsed IsLine [amount]))
-      (is (some? (entry)) "the entry's ::balanced, compiled against the old IsLine, passes on the new one")
-      (is (true? (is-line? (line-draft))))
-      (is (false? (eval-here '(instance? (first (.-members ^parsed_types.core.Sum IsSum)) (pt/parse (->IsLineDraft 1)))))
-          "instance? against the old class, which is what is? replaces, says false"))
-    (testing "a class written by hand with the type's name does not count"
-      (let [fake (eval-here '(do (deftype IsLine [amount] parsed_types.core.ParsedValue (issuedWith [_ _] true))
-                                 (IsLine. 1)))]
-        (is (false? (is-line? fake)))))
-    (testing "a type argument that is not a parsed type or sum throws"
-      (is (= :parsed-types.rule/not-a-parsed-type
-             (try (pt/is? :x 1) (catch clojure.lang.ExceptionInfo e (:rule (ex-data e)))))))))
 
 ;;; Field names
 
