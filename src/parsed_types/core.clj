@@ -15,7 +15,7 @@
       (fetch ::source [from-id] accounts-by-id))
 
     (defn transfer! [transfer]
-      (pt/let [{:keys [from-id to-id amount]} (pt/parsed Transfer transfer)]
+      (let [{:keys [from-id to-id amount]} (pt/parsed Transfer transfer)]
         (move-money! from-id to-id amount)))
 
   A check receives exactly the fields in its argument vector, then the fetches it binds. It passes when it returns
@@ -30,7 +30,6 @@
   Drafts and parsed values are maps with fixed fields: reading a key that is not a field throws. A parsed value cannot
   change: to change one, take [[draft-of]] it, `assoc`, and [[parse]] again. `assoc` on a draft keeps the remembered
   passes of the checks that do not read the field it sets."
-  (:refer-clojure :exclude [let])
   (:require
    [clojure.set :as set]
    [clojure.string])
@@ -42,28 +41,6 @@
    (java.util.concurrent ConcurrentMap)))
 
 (set! *warn-on-reflection* true)
-
-(declare check-let-binding!)
-
-(defmacro let
-  "`clojure.core/let`, with one more check: a binding whose expression is `(pt/parsed Type x)` and whose form
-  destructures a map has its keys checked against `Type`'s fields when the code compiles. `Type` may be a sum, whose
-  members must all have the key.
-
-    (pt/let [{:keys [from-id to-id amount]} (pt/parsed Transfer transfer)]
-      (move-money! from-id to-id amount))
-
-  For those bindings `:keys` and `:as` are allowed, and `{local :field}` pairs; `:or`, `:strs`, `:syms`, qualified
-  keys and vector destructuring are refused. Every other binding is an ordinary `let` binding. Write it qualified,
-  `pt/let`: referring it would shadow `clojure.core/let`."
-  [bindings & body]
-  (doseq [[form init] (partition 2 bindings)]
-    ;; only `(pt/parsed ...)` is checked; resolving first keeps this namespace's own `let`s cheap while it loads
-    (clojure.core/let [head (when (seq? init) (first init))
-                       v    (when (and (symbol? head) (not (contains? &env head))) (resolve head))]
-      (when (and (var? v) (= 'parsed-types.core/parsed (symbol v)))
-        (check-let-binding! form init))))
-  `(clojure.core/let ~bindings ~@body))
 
 (defprotocol Draft
   "A draft that [[parse]] turns into a parsed type. [[defparsed]] and [[defdraft-type]] implement it."
@@ -1023,38 +1000,3 @@
             `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
                (new ~dsym ~@(map syms flds)))))
       `(draft-from-map ~dsym ~m))))
-
-(defn- let-fields
-  "The fields every value of `type-sym` has, when it names a parsed type or a sum, at compile time."
-  [type-sym]
-  (let [x (resolve type-sym)
-        v (if (var? x) @x x)]
-    (cond
-      (parsed-type? v) (set (basis v))
-      (sum? v)         (apply set/intersection (map (comp set basis) (:members v)))
-      :else            (throw (ex-info (str "pt/let: " type-sym " is not a parsed type or a sum") {})))))
-
-(defn- check-let-binding!
-  "Refuse, at compile time, a destructuring of `(pt/parsed Type x)` that reads a key `Type` does not have."
-  [form init]
-  (let [type-sym (second init)
-        fields   (let-fields type-sym)
-        refuse!  (fn [msg] (throw (ex-info (str "pt/let: " msg ": " (pr-str form)) {:form form})))
-        field!   (fn [k] (when-not (contains? fields k)
-                           (refuse! (str type-sym " has no field " k "; its fields are " (vec (sort fields))))))]
-    (cond
-      (symbol? form) nil
-      (vector? form) (refuse! "a parsed value is a map; destructure it with {:keys [...]}")
-      (map? form)    (doseq [[k b] form]
-                       (cond
-                         (= :keys k) (doseq [s b]
-                                       (when-not (simple-symbol? s)
-                                         (refuse! ":keys takes unqualified symbols"))
-                                       (field! (keyword s)))
-                         (= :as k)   nil
-                         (= :or k)   (refuse! ":or never applies: a parsed value has every field")
-                         (keyword? k) (refuse! (str k " is not allowed; use :keys or {local :field}"))
-                         :else       (do (when-not (simple-keyword? b)
-                                           (refuse! "a {local :field} pair needs an unqualified keyword"))
-                                         (field! b))))
-      :else          (refuse! "unexpected binding form"))))

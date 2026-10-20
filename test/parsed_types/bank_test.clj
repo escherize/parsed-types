@@ -60,7 +60,7 @@
 (defn- transfer!
   "Move the money. Takes a parsed Transfer and nothing else."
   [transfer]
-  (pt/let [{:keys [from-id to-id amount]} (pt/parsed Transfer transfer)]
+  (let [{:keys [from-id to-id amount]} (pt/parsed Transfer transfer)]
     (swap! accounts #(-> %
                          (update-in [from-id :balance] - amount)
                          (update-in [to-id :balance] + amount)))))
@@ -122,7 +122,7 @@
 (defn- run-payroll!
   "Pay everyone. Each child is already a parsed Transfer, so it goes straight to transfer!."
   [payroll]
-  (pt/let [{:keys [transfers]} (pt/parsed Payroll payroll)]
+  (let [{:keys [transfers]} (pt/parsed Payroll payroll)]
     (run! transfer! transfers)))
 
 (defn- payroll [& [user-id from-id & pays]]

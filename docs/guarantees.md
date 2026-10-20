@@ -11,7 +11,7 @@ The README covers how to use the library; this page covers what it promises and 
 | A parsed value means its draft type's checks passed | One draft type may parse to each parsed type | `one-draft-type-per-parsed-type-test` |
 | A parsed value never equals a plain map or its draft | The type's equality checks the class; it isn't marked map-equivalent, so Clojure's maps refuse it too | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw | `a-parsed-value-cannot-be-changed` |
-| A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; `pt/let` and literal `pt/draft` check keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `let-compile-errors-test`, `let-checks-every-binding-test`, `draft-test` |
+| A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `draft-test` |
 | A field may be named like any `clojure.core` function, or like the generated declaration | The map type's methods call every function qualified, and `defparsed` names its declaration qualified, so no field shadows either | `fields-named-like-core-functions-test`, `a-field-cannot-shadow-the-declaration-test` |
 | Equality is a record's: same type, each field `=` | `equiv` checks the class, then compares fields with `=`, so `1.0M` equals `1.00M` | `equality-test` |
 | The checks see the values that are issued | Each field is read once, from the type's own field; each node's value is built once and is both what parent checks see and what `parse` returns | `fields-are-read-once-from-the-record-test`, `parse-matches-the-tree-model` |
@@ -42,9 +42,7 @@ The README covers how to use the library; this page covers what it promises and 
   as another field (`a-b` and `a_b`);
 - a field declared as a child twice, or a child field that isn't a field.
 
-`pt/draft` refuses a literal map that names a key that isn't a field, or leaves a field out. `pt/let` refuses a key
-that isn't a field of the type (of every member, for a sum), `:or`, `:strs`, `:syms`, qualified keys, and vector
-destructuring. `match` refuses a missing member, a type that isn't a member, and a member handled twice.
+`pt/draft` refuses a literal map that names a key that isn't a field, or leaves a field out. `match` refuses a missing member, a type that isn't a member, and a member handled twice.
 
 ## Errors caught when a declaration is first used
 
@@ -59,9 +57,8 @@ destructuring. `match` refuses a missing member, a type that isn't a member, and
 ## Behavior worth knowing
 
 - **Reading unknown keys.** A one-argument lookup throws: `(:k x)`, `(get x :k)`, `(x :k)` and destructuring. With a
-  default, `(get x :k ::none)` returns it, and so does `:or` in a plain `let`, which reads with a default; `pt/let`
-  refuses `:or`. `contains?` is false, `find` is nil, `select-keys` leaves the key out, and `java.util.Map.get`
-  returns null.
+  default, `(get x :k ::none)` returns it, and so does `:or` in `let`, which reads with a default. `contains?` is
+  false, `find` is nil, `select-keys` leaves the key out, and `java.util.Map.get` returns null.
 - **Equality.** Like a record, a value equals only a value of its own type with the same fields: a parsed value never
   equals a plain map or its draft. A `Transfer` built by hand still equals one `parse` made, because they hold the
   same value, so a set of parsed values can't tell a forgery apart. Proof is `pt/parsed`, never `=`. Java `.equals`
@@ -90,7 +87,7 @@ Re-evaluating a `defparsed` makes new classes.
 - A draft of the old class still parses, under the declaration it now reads.
 - A parent declared before a child type was re-evaluated refuses drafts of the child, old and new, with a 400 from its
   child-field check. Re-evaluate the parent.
-- A `defsum` and every compiled `(pt/parsed T ...)`, `pt/let` and `match` still name the old class, so they refuse
+- A `defsum` and every compiled `(pt/parsed T ...)` and `match` still name the old class, so they refuse
   values of the new one until their namespaces are reloaded.
 
 ## Design decisions
@@ -107,8 +104,8 @@ some checks passed.
 **A check's argument vector is its reads.** One list says what the check reads, and the compiler holds the body to
 it.
 
-**Checks happen in ordinary forms.** `pt/let` is `let` and `pt/draft` builds what `->TransferDraft` builds. Each adds
-a compile-time check and expands to the plain form.
+**Checks happen in ordinary forms.** `pt/draft` builds what `->TransferDraft` builds. It adds a compile-time check and
+expands to the plain form.
 
 **A declaration is still data.** `defparsed` writes a plain map, which `(pt/declaration draft)` returns. Declarations
 can be written by hand with `pt/defparsed-type` and `pt/defdraft-type`.
@@ -141,13 +138,12 @@ forgetting passes or leaving a child parsed; a parsed parent holding a raw child
 drafts or as open maps; `:blocked-by` naming one child; the status taken root-first; a grandchild failure not holding
 the grandparent; fields read through `get`; two draft types for one parsed type; `check` on a subset letting a tree
 fetch; a child-field check remembered; racing threads keeping different plans; an unknown key returning `nil`; a
-literal `pt/draft` leaving a field out; `pt/let` not checking keys, or checking only its first binding; `pt/let`
-treating a local as `pt/parsed`; reserved check names allowed; a map-type method calling a function a field can
+literal `pt/draft` leaving a field out; reserved check names allowed; a map-type method calling a function a field can
 shadow; the depth limit off or missing; `match` binding a value `parse` didn't make.
 
 ## Lint
 
-The library ships a clj-kondo config. `pt/let` lints as `let`. `defparsed` expands into the functions it compiles to,
+The library ships a clj-kondo config. `defparsed` expands into the functions it compiles to,
 so a check that uses a field it didn't name is an unresolved symbol in the editor, and one that names a field it
 doesn't use is an unused binding. A field named like a `clojure.core` function is caught when compiling instead.
 `match` lints as a `let` per branch. Copy the config with:

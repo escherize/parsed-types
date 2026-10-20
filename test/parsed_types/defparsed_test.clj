@@ -127,47 +127,6 @@
     (is (re-find #"members must be distinct" (str (compile-error '(pt/defsum Bad [Point Point])))))
     (is (re-find #"members must be distinct" (str (compile-error '(pt/defsum Bad [Point String])))))))
 
-;;; pt/let
-
-(deftest let-test
-  (testing "destructuring a parsed value reads its fields"
-    (let [p (pt/parse (->PointDraft 3 3))]
-      (is (= [3 3 p] (pt/let [{:keys [x y], :as all} (pt/parsed Point p)
-                              sum                    (+ x y)]
-                       (is (= 6 sum))
-                       [x y all])))))
-  (testing "pt/parsed still checks at run time"
-    (is (= 500 (:status-code (try (pt/let [{:keys [x]} (pt/parsed Point (->Point 1 1))] x)
-                                  (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
-  (testing "a sum's keys are the ones every member has"
-    (is (= 3 (pt/let [{:keys [x]} (pt/parsed Shape (pt/parse (->PointDraft 3 3)))] x)))))
-
-(deftest let-compile-errors-test
-  (doseq [[label form re]
-          [["a key that is not a field"
-            '(pt/let [{:keys [x z]} (pt/parsed Point p)] x)
-            #"Point has no field :z; its fields are \[:x :y\]"]
-           ["a {local :field} pair with a key that is not a field"
-            '(pt/let [{a :z} (pt/parsed Point p)] a)
-            #"Point has no field :z"]
-           [":or, which never applies"
-            '(pt/let [{:keys [x], :or {x 1}} (pt/parsed Point p)] x)
-            #":or never applies"]
-           [":strs"
-            '(pt/let [{:strs [x]} (pt/parsed Point p)] x)
-            #":strs is not allowed"]
-           ["vector destructuring"
-            '(pt/let [[x y] (pt/parsed Point p)] x)
-            #"a parsed value is a map"]
-           ["a key not every member of the sum has"
-            '(pt/let [{:keys [y]} (pt/parsed Shape p)] y)
-            #"Shape has no field :y"]
-           ["not a parsed type"
-            '(pt/let [{:keys [x]} (pt/parsed String p)] x)
-            #"String is not a parsed type or a sum"]]]
-    (testing label
-      (is (re-find re (str (compile-error (list 'fn '[p] form))))))))
-
 ;;; pt/draft
 
 (deftest draft-test
@@ -263,7 +222,7 @@
       (is (string? (str p)))
       (is (re-find #"#parsed_types.defparsed_test.Awkward\{" (pr-str p)))
       (is (= 2 (:map (assoc d :map 2))))
-      (is (= 9 (pt/let [{:keys [when]} (pt/parsed Awkward p)] when)))
+      (is (= 9 (let [{:keys [when]} p] when)))
       (is (= [:count :map :set :str :seq :into :contains? :or :when :keys] (keys p))))))
 
 (deftest special-form-field-names-test
@@ -278,20 +237,6 @@
                  (str (compile-error '(pt/defparsed R [kids]
                                         (children kids Point)
                                         (pure :parsed-types.child/kids "d" [kids] false))))))))
-
-(deftest let-checks-every-binding-test
-  (is (re-find #"Point has no field :z"
-               (str (compile-error '(fn [p q] (pt/let [{:keys [x]} (pt/parsed Point p)
-                                                       {:keys [z]} (pt/parsed Point q)]
-                                                [x z])))))))
-
-(deftest let-ignores-a-local-named-parsed-test
-  (testing "in a namespace that refers parsed, a local of that name is not pt/parsed"
-    (let [n (create-ns (gensym "refers-parsed"))]
-      (binding [*ns* n]
-        (eval '(clojure.core/refer-clojure))
-        (eval '(require '[parsed-types.core :as pt :refer [parsed]]))
-        (is (fn? (eval '(fn [parsed m] (pt/let [{:keys [whatever]} (parsed m)] whatever)))))))))
 
 (def ^:private order (atom []))
 

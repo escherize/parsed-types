@@ -1,5 +1,4 @@
-{:lint-as {parsed-types.core/let            clojure.core/let
-           parsed-types.core/defparsed-type clojure.core/deftype
+{:lint-as {parsed-types.core/defparsed-type clojure.core/deftype
            parsed-types.core/defsum         clojure.core/def}
  :hooks   {:macroexpand {parsed-types.core/defparsed     hooks.parsed-types/defparsed
                          parsed-types.core/defdraft-type hooks.parsed-types/defdraft-type

@@ -36,7 +36,7 @@ Clojure that type, and refuses the rest at run time.
 | | Draft | Parsed value |
 |---|---|---|
 | Make one | `->DebitDraft`, `pt/draft` | only `pt/parse` |
-| Read a field | `(:amount d)`; a key that isn't a field throws | the same; `pt/let` checks keys when compiling |
+| Read a field | `(:amount d)`; a key that isn't a field throws | the same |
 | Change it | `assoc`, keeping the passes of checks that don't read the field | throws: `pt/draft-of`, `assoc`, `pt/parse` again |
 | A sink accepts it | no | yes |
 | Equal to | a draft of its type with the same fields | a value of its type with the same fields; never a plain map |
@@ -185,7 +185,6 @@ change a parsed value, go back to a draft:
 | `draft` | builds a draft from a map; a literal map must name every field, and only fields |
 | `parse`, `parse-all` | checks drafts and returns parsed values, or throws with every failure |
 | `parsed`, `parsed?` | returns or tests a value `parse` made |
-| `let` | `let`, checking the keys of `(pt/parsed Type x)` when compiling |
 | `draft-of` | turns a parsed value back into a draft, known to pass its pure checks |
 | `check`, `check-all`, `passed-checks` | runs or inspects some checks on a draft |
 | `defsum`, `match` | a closed set of parsed types, and a branch on it |
