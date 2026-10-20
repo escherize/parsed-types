@@ -29,9 +29,15 @@
   Drafts and parsed values are maps with fixed fields: reading a key that is not a field throws. A parsed value cannot
   change: to change one, take [[draft-of]] it, `assoc`, and [[parse]] again.
 
+  A parsed value carries its proof: a hidden field that only [[parse]] sets. So [[parsed]] needs no registry of
+  issued values, and a value built by hand, equal or not, is refused.
+
+  Parsed types compare by class name, so when a REPL re-evaluates a `defparsed`, code compiled against the old class
+  accepts values of the new one, the way a `#'var` follows its latest definition.
+
   Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (checks
-  failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration`, `::bad-fetch` or
-  `::stale-type`. Its message says what went wrong and how to fix it."
+  failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or `::bad-fetch`. Its
+  message says what went wrong and how to fix it."
   (:require
    [clojure.set :as set]
    [clojure.string])
@@ -253,10 +259,17 @@
 
 (defn- sum? [x] (instance? Sum x))
 
+(defn- same-type?
+  "Whether the classes `a` and `b` are the same parsed type: they have the same name. Two classes have one name only
+  when a REPL re-evaluated the `defparsed` that defined them, so the type defined last stands for both, like a var
+  named in place of its value."
+  [^Class a ^Class b]
+  (and (some? a) (some? b) (= (.getName a) (.getName b))))
+
 (defn- member?
-  "Whether `cls` is `type`, or one of the members of the sum `type`."
+  "Whether `cls` is `type`, or one of the members of the sum `type`, by name."
   [type cls]
-  (if (sum? type) (boolean (some #(identical? % cls) (:members type))) (identical? type cls)))
+  (if (sum? type) (boolean (some #(same-type? % cls) (:members type))) (same-type? type cls)))
 
 (defn- type-name [type]
   (if (sum? type) (str (:name type)) (.getSimpleName ^Class type)))
@@ -264,7 +277,7 @@
 (defn sum
   "A sum of parsed types, named `name`. Use [[defsum]]."
   [name members]
-  (when-not (and (seq members) (every? parsed-type? members) (apply distinct? members))
+  (when-not (and (seq members) (every? parsed-type? members) (apply distinct? (map #(.getName ^Class %) members)))
     (throw (ex-info (str "defsum " name ": members must be distinct types defined with defparsed. List each parsed"
                          " type once, such as (defsum Transaction [Debit Credit]).")
                     {:type ::bad-declaration, :name name, :members (mapv pr-str members)})))
@@ -286,8 +299,10 @@
       Debit  debit  (debit! debit)
       Credit credit (credit! credit))
 
-  Leaving out a member, naming a type that is not one, or naming one twice is a compile error. Each binding is hinted
-  with its type, and holds `x` only after [[parsed]] accepts it. Any other `x` throws `::not-parsed`."
+  Leaving out a member, naming a type that is not one, or naming one twice is a compile error. A branch runs only when
+  [[parsed?]] accepts `x` for its type, compared by name, so a value of a type a REPL re-evaluated still matches. Any
+  other `x` throws `::not-parsed`. A binding is not type-hinted: after such a reload the hint would name the old
+  class. Read fields by keyword."
   [sum-name x & clauses]
   (let [refuse! (fn [message data] (throw (ex-info message (assoc data :type ::bad-declaration))))
         s       (let [v (resolve sum-name)] (when (var? v) @v))
@@ -306,24 +321,25 @@
                                                                {}))
                                  c))
                      triples)
-        members (set (:members s))
-        missing (remove (set types) (:members s))
-        extra   (remove members types)]
+        name-of (fn [^Class c] (.getName c))
+        members (set (map name-of (:members s)))
+        missing (remove (set (map name-of types)) (map name-of (:members s)))
+        extra   (remove (comp members name-of) types)]
     (when (seq missing)
-      (refuse! (str "match on " sum-name " does not handle " (mapv #(.getSimpleName ^Class %) missing)
+      (refuse! (str "match on " sum-name " does not handle " (mapv #(peek (clojure.string/split % #"\.")) missing)
                     ". Add a clause for each.")
                {}))
     (when (seq extra)
       (refuse! (str "match on " sum-name ": not members: " (mapv #(.getSimpleName ^Class %) extra)
                     ". Remove those clauses, or add the types to the defsum.")
                {}))
-    (when-not (apply distinct? types)
+    (when-not (apply distinct? (map name-of types))
       (refuse! (str "match on " sum-name " handles a type twice. Keep one clause per type.") {}))
     (let [v (gensym "v")]
       `(let [~v ~x]
          (cond
            ~@(mapcat (fn [[t b e]]
-                       [`(instance? ~t ~v) `(let [~(vary-meta b assoc :tag t) (parsed ~t ~v)] ~e)])
+                       [`(parsed? ~t ~v) `(let [~b ~v] ~e)])
                      triples)
            ;; `v` is no member, so this throws
            :else (parsed ~sum-name ~v))))))
@@ -506,47 +522,26 @@
                                          " check external.")
                         {:name n, :locals locals}))))
 
-(defn- stale-type!
-  "Throws `::stale-type`: `parent` declared `field` against `old`, a class a REPL has since replaced with another of
-  the same name."
-  [^Class parent field type ^Class old]
-  (let [p (.getSimpleName parent), c (.getSimpleName old)]
-    (throw (ex-info (if (sum? type)
-                      (str p " was defined against an older " c ", through the sum " (:name type) ". Re-evaluate the"
-                           " defsum for " (:name type) ", then the defparsed for " p ".")
-                      (str p " was defined against an older " c ". Re-evaluate the defparsed for " p "."))
-                    {:type ::stale-type, :parent (.getName parent), :field field, :child (.getName old)}))))
-
 (defn- children-of-type?
-  "Whether `v` is what the child field `field` of `parent`, of `kind` and `parsed-type`, may hold. Throws
-  `::stale-type` for a draft that parses to a class with the name of a declared member, but not that class: the member
-  was re-evaluated at a REPL after `parent` was defined. Members are never matched by name, so one tree never mixes
-  old and new classes."
-  [parent field kind parsed-type v]
-  (let [drafts-it? (fn [d]
-                     (and (draft-value? d)
-                          (let [^Class cls (:parses-to (plan-for d))
-                                old        (some #(when (= (.getName ^Class %) (.getName cls)) %)
-                                                 (if (sum? parsed-type) (:members parsed-type) [parsed-type]))]
-                            (cond
-                              (member? parsed-type cls) true
-                              old                       (stale-type! parent field parsed-type old)
-                              :else                     false))))]
+  "Whether `v` is what a child field, of `kind` and `parsed-type`, may hold. A draft's parsed type is compared by name,
+  so after a REPL re-evaluates a child type, a parent defined before it accepts drafts of the new class."
+  [kind parsed-type v]
+  (let [drafts-it? (fn [d] (and (draft-value? d) (member? parsed-type (:parses-to (plan-for d)))))]
     (case kind
       :one  (or (nil? v) (drafts-it? v))
       :many (and (vector? v) (every? drafts-it? v)))))
 
 (defn- child-shape-check
-  "The pure check every child field of `parent` gets: it holds drafts of the declared type. Every check that reads the
-  field waits on it."
-  [parent field {:keys [kind type]}]
+  "The pure check every child field gets: it holds drafts of the declared type. Every check that reads the field waits
+  on it."
+  [field {:keys [kind type]}]
   {:name  (keyword "parsed-types.child" (name field))
    :doc   (str (name field) " holds " (if (= :one kind) "nil or a draft that parses to " "a vector of drafts that parse to ")
                (type-name type) ".")
    :kind  :pure
    :shape? true
    :reads [field]
-   :f     (fn [v] (children-of-type? parent field kind type v))})
+   :f     (fn [v] (children-of-type? kind type v))})
 
 (defn- reads-set [x] (set (:reads x)))
 
@@ -562,7 +557,7 @@
   Pure checks run first, fewest fields first, then fetches, then external checks, each in declaration order."
   [parses-to draft-class fields {:keys [checks fetches children], :as decl}]
   (validate-declaration! draft-class decl)
-  (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check parses-to field child)])) children)
+  (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
         external  (filterv #(= :external (:kind %)) checks)
         waits-on  (fn [pred] (into #{} (comp (filter pred) (map :name)) pure))
@@ -685,7 +680,7 @@
             st   (assoc (start draft nm) :tree tree :path path)
             kids (for [[field {:keys [kind type]}] (get-in st [:plan :children])
                        :let  [v (get-in st [:values field])]
-                       :when (children-of-type? (get-in st [:plan :parses-to]) field kind type v)
+                       :when (children-of-type? kind type v)
                        [i d] (if (= :one kind) (when v [[nil v]]) (map-indexed vector v))]
                    [field (child-path path field i) d])
             st   (assoc st :child-paths (reduce (fn [m [field p]] (update m field (fnil conj []) p)) {} kids))]

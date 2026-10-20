@@ -204,46 +204,45 @@
 
 ;;; REPL reloads
 
-(defn- thrown [thunk]
-  (try (thunk) nil
-       (catch clojure.lang.ExceptionInfo e [(ex-message e) (ex-data e)])))
+(defn- resolve-here [sym] @(ns-resolve 'parsed-types.defparsed-test sym))
 
 (deftest re-evaluating-a-child-type-test
   (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
   (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
-  (let [old-kid ((resolve 'parsed-types.defparsed-test/->KidDraft) 1)
-        parent  ((resolve 'parsed-types.defparsed-test/->ParentDraft) [old-kid])]
+  (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
+  (let [old-kid ((resolve-here '->KidDraft) 1)
+        parent  ((resolve-here '->ParentDraft) [old-kid])
+        sink    (resolve-here 'kid-sink)]
     (is (some? (pt/parse parent)))
     (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
-    (let [new-kid ((resolve 'parsed-types.defparsed-test/->KidDraft) 2)]
-      (testing "after the child type is re-evaluated, the parent says it is stale, for the old child and the new"
-        (doseq [[label thunk] [["the new child" #(pt/parse ((resolve 'parsed-types.defparsed-test/->ParentDraft)
-                                                            [new-kid]))]]]
-          (testing label
-            (is (= ["Parent was defined against an older Kid. Re-evaluate the defparsed for Parent."
-                    {:type   ::pt/stale-type
-                     :parent "parsed_types.defparsed_test.Parent"
-                     :field  :kids
-                     :child  "parsed_types.defparsed_test.Kid"}]
-                   (thrown thunk))))))
-      (testing "a draft of the old class still parses with its own plan, and the new class parses too"
+    (let [new-kid ((resolve-here '->KidDraft) 2)]
+      (is (not= (class old-kid) (class new-kid)) "the reload made a new class")
+      (testing "a parent defined before the reload accepts drafts of the new child class, like a var"
+        (let [p (pt/parse ((resolve-here '->ParentDraft) [new-kid]))]
+          (is (= [{:n 2}] (map #(into {} %) (:kids p))))
+          (is (every? #(pt/parsed? (class (pt/parse new-kid)) %) (:kids p)))))
+      (testing "a draft of the old class still parses, with the plan it was defined with"
         (is (some? (pt/parse parent)))
-        (is (some? (pt/check old-kid nil)))
-        (is (some? (pt/parse new-kid))))
-      (testing "re-evaluating the parent makes it accept the new child"
-        (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
-        (is (some? (pt/parse ((resolve 'parsed-types.defparsed-test/->ParentDraft) [new-kid]))))))))
+        (is (true? (pt/check old-kid nil))))
+      (testing "a sink compiled before the reload accepts values of the new class"
+        (is (= {:n 2} (into {} (sink (pt/parse new-kid)))))
+        (is (= ::pt/not-parsed (:type (try (sink new-kid) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))))))))
 
 (deftest re-evaluating-a-member-of-a-sum-test
   (eval-here '(pt/defparsed Member [n]))
-  (eval-here '(pt/defsum Members [Member]))
+  (eval-here '(pt/defparsed NonMember [n]))
+  (eval-here '(pt/defsum Members [Member NonMember]))
   (eval-here '(pt/defparsed Holder [m] (child m Members)))
+  (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
   (eval-here '(pt/defparsed Member [n]))
-  (testing "the parent names the sum to re-evaluate first"
-    (is (= (str "Holder was defined against an older Member, through the sum Members. Re-evaluate the defsum for"
-                " Members, then the defparsed for Holder.")
-           (first (thrown #(pt/parse ((resolve 'parsed-types.defparsed-test/->HolderDraft)
-                                      ((resolve 'parsed-types.defparsed-test/->MemberDraft) 1)))))))))
+  (let [member (pt/parse ((resolve-here '->MemberDraft) 1))]
+    (testing "a holder defined against the sum before the reload accepts a draft of the new member class"
+      (is (= {:n 1} (into {} (:m (pt/parse ((resolve-here '->HolderDraft) ((resolve-here '->MemberDraft) 1))))))))
+    (testing "the sum, and a match compiled before the reload, accept the new class"
+      (is (pt/parsed? (resolve-here 'Members) member))
+      (is (= [:member 1] ((resolve-here 'which-member) member))))
+    (testing "a match compiled after the reload, against the old defsum, compiles"
+      (is (nil? (compile-error '(fn [x] (pt/match Members x Member m (:n m) NonMember o (:n o)))))))))
 
 ;;; Field names
 
