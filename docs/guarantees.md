@@ -36,7 +36,7 @@ The README covers how to use the library; this page covers what it promises and 
 | `match` handles every member of a sum, and only parsed values reach a branch | `match` compares its clauses with the sum when it expands, and runs a branch only when `pt/parsed?` accepts the value | `match-compile-errors-test`, `match-runs-only-on-parsed-members` |
 | A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase. A fetch may not read a child field, so no check reaches a child through a fetch | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
-| A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others | `compile-errors-test` |
+| A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and refuses any symbol in its body equal to a field the argument vector doesn't name, quoted or bound as a local too. When the symbol also resolves to a var, the message offers both fixes: add the field to the argument vector, or write the var's qualified name. Otherwise it offers the argument vector, or renaming the local. Each fix compiles and passes | `compile-errors-test`, `every-suggested-fix-applies-test` |
 | Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
 | Only types `defparsed` defined count as types | `pt/parsed`, `pt/parsed?`, `defsum` and child fields accept a class only when `defparsed` registered it, by identity. A class that only implements `ParsedValue` is refused with `::bad-input` | `the-type-argument-is-checked-test`, `only-sum-builds-a-sum-test` |
 | A sum is built only from distinct parsed types | A sum isn't a map, so `assoc` can't change one. Every use checks its members, so one built with its constructor is checked too. Sums are equal when their names and members are | `only-sum-builds-a-sum-test` |
@@ -112,7 +112,12 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
 
 `defparsed` refuses:
 
-- a check that reads a field the draft doesn't have, names one twice, or uses one it didn't name;
+- a check that reads a field the draft doesn't have, or names one twice;
+- a check whose body holds a symbol equal to a field its argument vector doesn't name. The rule is syntactic: a
+  quoted symbol or a local with a field's name counts too. When the symbol also resolves to a var, as `count` does to
+  `clojure.core/count`, the message says to add the field to the argument vector if you meant the field, or to write
+  `clojure.core/count` if you meant the function. Otherwise it says to add the field, or to rename the local, as in
+  `count-value`;
 - a check or fetch name that isn't a qualified keyword, is used twice, or is in `parsed-types.child`, which is
   reserved for the checks on child fields;
 - a check with no doc string or no body;

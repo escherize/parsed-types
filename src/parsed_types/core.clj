@@ -659,8 +659,9 @@
         (.put owners class-name {:ns ns-sym, :role role, :type parsed-name})))))
 
 (defn- parse-check-clause
-  "`(pure name doc [field ...] body ...)` or `(external name doc [field ...] [local fetch ...]? body ...)`"
-  [fields fetch-names [head n doc & more :as form]]
+  "`(pure name doc [field ...] body ...)` or `(external name doc [field ...] [local fetch ...]? body ...)`, a clause
+  of the `defparsed` of `parsed-name`."
+  [parsed-name fields fetch-names [head n doc & more :as form]]
   (let [external?      (= 'external head)
         what           (str "the check " (pr-str n))
         _              (when (map? (first more))
@@ -722,13 +723,20 @@
       (syntax-error! form ::rule/check-no-body
                      (str what " needs a body. Write an expression that returns true to pass, as in (some? "
                           (or (first args) "x") ").")))
-    ;; An unnamed field is usually an unresolved symbol, but a field named like a clojure.core fn (`name`, `count`)
-    ;; would resolve to that fn instead, so look for every field by name.
-    (when-let [unnamed (seq (filter (set (remove (set args) fields)) (filter symbol? (tree-seq coll? seq body))))]
-      (syntax-error! form ::rule/check-uses-unnamed-field
-                     (str what " uses fields its argument vector does not name: " (vec (distinct unnamed)) ". A check"
-                          " reads only what it names. Add them to the argument vector: "
-                          (vec (concat args (distinct unnamed))) ".")))
+    ;; Purely syntactic: any symbol in the body equal to a field the argument vector does not name, quoted or bound
+    ;; as a local too. An unnamed field is usually an unresolved symbol, but a field named like a var (`count`, or a
+    ;; fn of this namespace) would resolve to the var instead, so look for every field by name.
+    (when-let [unnamed (seq (distinct (filter (set (remove (set args) fields)) (filter symbol? (tree-seq coll? seq body)))))]
+      (let [field (first unnamed)
+            argv  (vec (concat args unnamed))
+            v     (resolve field)]
+        (syntax-error! form ::rule/check-uses-unnamed-field
+                       (if (var? v)
+                         (str "`" field "` is a field of " parsed-name " and also " (symbol v) ". If you meant the"
+                              " field, add it to the argument vector: " argv ". If you meant the function, write "
+                              (symbol v) ".")
+                         (str what " uses the field `" field "` without naming it. Add it to the argument vector: "
+                              argv ". If it is a local, rename the local, as in " field "-value.")))))
     (merge {:name    n
             :doc     doc
             :kind    (if external? :external :pure)
@@ -807,7 +815,7 @@
         by-head     (group-by first clauses)
         fetches     (mapv #(parse-fetch-clause fields %) (get by-head 'fetch))
         fetch-names (set (map :name fetches))
-        checks      (mapv #(parse-check-clause fields fetch-names %)
+        checks      (mapv #(parse-check-clause parsed-name fields fetch-names %)
                           (filter (comp '#{pure external} first) clauses))
         children    (into {}
                           (for [[head field type :as c] (concat (get by-head 'child) (get by-head 'children))]

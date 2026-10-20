@@ -137,8 +137,9 @@
    [:fetch-bound-to-field (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [a ::f] true) (fetch ::f [a] rows)))
     "bound to a field's name: [a]" "as in a-row"]
    [:check-no-body (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a]))) "needs a body" "(some? a)"]
-   [:check-uses-unnamed-field (compiling '(pt/defparsed E1 [a b] (pure ::c "d" [a] (< a b)))) "does not name: [b]"
-    "Add them to the argument vector: [a b]"]
+   [:check-uses-unnamed-field (compiling '(pt/defparsed E1 [a b] (pure ::c "d" [a] (< a b))))
+    "the check :parsed-types.errors-test/c uses the field `b` without naming it"
+    "Add it to the argument vector: [a b]" "If it is a local, rename the local, as in b-value."]
    [:fetch-name-not-qualified (compiling '(pt/defparsed E1 [a] (fetch :f [a] rows))) "the fetch :f" "::f"]
    [:fetch-bad-fields (compiling '(pt/defparsed E1 [account-id] (fetch ::f [acount-id] rows))) "reads [acount-id]"
     "Did you mean account-id?" "[account-id]"]
@@ -330,6 +331,9 @@
 
 (pt/defparsed Unit [])
 
+;; public: a check below calls it by its qualified name
+(defn amount "Doubles `x`." [x] (* 2 x))
+
 (deftest library-fns-refuse-what-is-not-a-library-value-test
   (doseq [[label thunk] [["final! of nil" #(#'pt/final! nil "assoc" nil)]
                          ["fixed! of nil" #(#'pt/fixed! nil "assoc" nil)]
@@ -355,6 +359,43 @@
     (is (= ::pt/no-field (:type (error #(dissoc draft :bogus)))))
     (testing "and the fix it names parses"
       (is (some? (pt/parse (assoc (pt/draft-of real) :account-id 3))))))
+  (testing "a check that uses a field it does not name: each fix the message offers compiles and passes"
+    (let [parses? (fn [form draft-form]
+                    ((compiling form))
+                    (some? (pt/parse ((compiling draft-form)))))]
+      (testing "a field named like a clojure.core fn, misread as the fn: caught"
+        (let [{:keys [rule message]} (error (compiling '(pt/defparsed Order [items count]
+                                                          (pure ::two "Two items." [items] (= 2 (count items))))))]
+          (is (= :parsed-types.rule/check-uses-unnamed-field rule))
+          (is (str/includes? message (str "`count` is a field of Order and also clojure.core/count. If you meant the"
+                                          " field, add it to the argument vector: [items count]. If you meant the"
+                                          " function, write clojure.core/count.")))))
+      (testing "meant the field: add it to the argument vector"
+        (is (parses? '(pt/defparsed Order [items count] (pure ::counted "count counts items." [items count]
+                                                               (= count (clojure.core/count items))))
+                     '(->OrderDraft [1 2] 2))))
+      (testing "meant the core fn: write its qualified name"
+        (is (parses? '(pt/defparsed Order [items count] (pure ::two "Two items." [items] (= 2 (clojure.core/count items))))
+                     '(->OrderDraft [1 2] 7))))
+      (testing "meant a fn of this namespace: the message offers its qualified name, which works"
+        (is (str/includes? (:message (error (compiling '(pt/defparsed Priced [amount qty]
+                                                          (pure ::small "Small." [qty] (< (amount qty) 10))))))
+                           (str "`amount` is a field of Priced and also parsed-types.errors-test/amount. If you meant"
+                                " the field, add it to the argument vector: [qty amount]. If you meant the function,"
+                                " write parsed-types.errors-test/amount.")))
+        (is (parses? '(pt/defparsed Priced [amount qty]
+                        (pure ::small "Small." [qty] (< (parsed-types.errors-test/amount qty) 10)))
+                     '(->PricedDraft 1 2))))
+      (testing "a let-local named like a field is refused, and the message says to rename it"
+        (is (str/includes? (:message (error (compiling '(pt/defparsed Pair [a b]
+                                                          (pure ::same "a is 1." [a] (let [b 1] (= a b)))))))
+                           (str "the check :parsed-types.errors-test/same uses the field `b` without naming it. Add it"
+                                " to the argument vector: [a b]. If it is a local, rename the local, as in b-value.")))
+        (is (parses? '(pt/defparsed Pair [a b] (pure ::same "a is 1." [a] (let [b-value 1] (= a b-value))))
+                     '(->PairDraft 1 2))))
+      (testing "a quoted symbol named like a field is refused too: the rule is syntactic"
+        (is (= :parsed-types.rule/check-uses-unnamed-field
+               (:rule (error (compiling '(pt/defparsed Quoted [x y] (pure ::q "x is y." [x] (= x 'y)))))))))))
   (testing "parse of a value built by hand says it has no proof, and to build a draft"
     (let [{:keys [rule message]} (error #(pt/parse (Debit. 1 2 30M nil)))]
       (is (= :parsed-types.rule/not-a-draft rule))

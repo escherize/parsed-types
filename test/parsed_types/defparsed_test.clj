@@ -23,10 +23,10 @@
             #"reads fields the draft does not have: \[b\]"]
            ["a check that uses a field it does not name"
             '(pt/defparsed A [a b] (pure ::c "d" [a] (< a b)))
-            #"uses fields its argument vector does not name: \[b\]"]
+            #"uses the field `b` without naming it\. Add it to the argument vector: \[a b\]"]
            ["a check that uses a field named like a clojure.core fn, without naming it"
             '(pt/defparsed A [a name] (pure ::c "d" [a] (string? (name a))))
-            #"uses fields its argument vector does not name: \[name\]"]
+            #"`name` is a field of A and also clojure.core/name\. If you meant the field, add it to the argument vector: \[a name\]\. If you meant the function, write clojure.core/name\."]
            ["a check that names a field twice"
             '(pt/defparsed A [a] (pure ::c "d" [a a] true))
             #"reads a field twice"]
