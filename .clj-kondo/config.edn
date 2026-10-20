@@ -1,3 +1,6 @@
 {:config-paths ["../resources/clj-kondo.exports/escherize/parsed-types"]
  :lint-as      {clojure.test.check.clojure-test/defspec clojure.test/deftest}
- :hooks        {:macroexpand {parsed-types.core/defclass-once hooks.parsed-types-internal/defclass-once}}}
+ :hooks        {:macroexpand {parsed-types.core/defclass-once hooks.parsed-types-internal/defclass-once}}
+ ;; the tests call private vars of parsed-types.core on purpose, which the shipped config flags everywhere else
+ :ns-groups    [{:pattern "parsed-types\\..*-test$" :name parsed-types-tests}]
+ :config-in-ns {parsed-types-tests {:linters {:discouraged-var {:level :off}}}}}

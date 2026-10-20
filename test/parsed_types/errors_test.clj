@@ -2,6 +2,7 @@
   "Every error the library throws, one example per rule. Each message names the concrete values and the fix, and the
   ex-data names the rule. The rules listed here must be exactly the rules core.clj can throw."
   (:require
+   [clojure.edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
@@ -452,6 +453,14 @@
   (testing "the fns only generated code calls are private, so the public names are the README's API"
     (is (= '#{declaration defparsed defsum draft draft-of match parse parse-all parsed parsed?}
            (set (keys (ns-publics 'parsed-types.core)))))))
+
+(deftest the-lint-config-flags-every-private-var-test
+  (testing "the clj-kondo config this library ships flags every private var of parsed-types.core named elsewhere"
+    (let [config  (clojure.edn/read-string (slurp (io/file "resources/clj-kondo.exports/escherize/parsed-types/config.edn")))
+          flagged (set (keys (get-in config [:linters :discouraged-var])))
+          private (set (map #(symbol "parsed-types.core" (name %))
+                            (remove (set (keys (ns-publics 'parsed-types.core))) (keys (ns-interns 'parsed-types.core)))))]
+      (is (= private flagged)))))
 
 (deftest suggestions-are-data-too-test
   (is (= :amount (:suggestion (ex-data (try (:amont real) (catch clojure.lang.ExceptionInfo e e))))))

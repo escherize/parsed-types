@@ -53,9 +53,11 @@ The proof makes a parsed value impossible to build by accident, and hard to forg
 and these gaps, are accepted:
 
 - **Reflection can forge.** `setAccessible` reads or writes any field, the proof field included.
-- **The token's var.** Code can name the private token as `@#'parsed-types.core/parse-token` and pass it to the
-  constructor. The same goes for the private `register!`, which records a plan. The clj-kondo config this library
-  ships flags both outside `parsed-types.core`.
+- **Any private var of `parsed-types.core`.** Code can name the private token as `@#'parsed-types.core/parse-token`
+  and pass it to the constructor. Any other private var forges as well: `#'pt/issue-tree` issues a hand-made tree,
+  `#'pt/registry` takes a hand-made plan, and `#'pt/register!` records one. `ns-resolve`, `ns-interns` and
+  `find-var` reach them without naming them. The clj-kondo config this library ships flags every private var named
+  outside `parsed-types.core`, by `#'` or `var`; it can't see `ns-resolve`, `ns-interns` or `find-var`.
 - **`with-redefs` on library fns.** Rebinding `pt/parsed?` or a private fn changes what the library checks.
 - **Reader syntax.** `#ns.Debit[...]` calls the constructor, so it builds a value without the proof. That fails
   closed: `pt/parsed` refuses it.
@@ -348,7 +350,9 @@ field can shadow; the depth limit off or missing; `match` binding a value `parse
 The library ships a clj-kondo config. `defparsed` expands into the functions it compiles to, so a check that uses a
 field it didn't name is an unresolved symbol in the editor, and one that names a field it doesn't use is an unused
 binding. A field named like a `clojure.core` function is caught when compiling instead. `match` lints as a `let` per
-branch. `parse-token` or `register!` named outside `parsed-types.core` is flagged as a discouraged var. Copy the
+branch. Any private var of `parsed-types.core` named outside it, as in `#'pt/issue-tree`, is flagged as a discouraged
+var, and `the-lint-config-flags-every-private-var-test` keeps the list whole. A lookup by name, with `ns-resolve`,
+`ns-interns` or `find-var`, isn't flagged. Copy the
 config with:
 
 ```
