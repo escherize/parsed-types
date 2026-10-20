@@ -311,7 +311,8 @@ would throw a `ClassCastException`. Read fields by keyword.
 
 - `bank-test`: transfers, payrolls, budgets and payments, against an in-memory bank;
 - `core-test`: each behavior, the proof, mutable values, and the ways to forge or change a value we know of;
-- `defparsed-test`: compile errors, load errors, unknown keys, field names, REPL reloads;
+- `defparsed-test`: compile errors, load errors, unknown keys, field names, REPL reloads, with the namespaces under
+  `test/parsed_types/stale_fixture` reloaded to apply each reload command a message prints;
 - `properties-test`: `test.check` properties over random drafts and trees, against a model written by hand;
 - `errors-test`: one example of every error rule, with the values and the fix its message must hold;
 - `tree-properties-test`: `test.check` properties over random trees with `:one` and `:many` children, malformed
@@ -336,6 +337,17 @@ metadata allowed on a child field's vector; the walk skipping a shared collectio
 walk, on a small stack; clocks accepted; `pt/parse` of a value built by hand calling it already parsed; a key that
 isn't a field reported as a change to a parsed value; a type with no fields suggesting `(nil x)`; library fns that
 take any value; a dotted type name allowed; a fn only generated code calls left public.
+
+Each of these broken copies, made while fixing the ninth review, fails a test: the fetch fns and child types checked
+after the `deftype`s; no `type-not-loaded` check; no top-level check, or one that reads only `&env`; a reload command
+that names only the parent's or the match's namespace; the walk without its heights, or skipping a collection
+whenever it was walked before; a value too deep reported as `mutable-value`; a `java.sql.Date` told to call
+`.toInstant`; a held check that holds later checks, directly or through the check that held it; external checks run
+in a tree that failed; a check that reads no field refused as out of order; a child field's metadata checked before
+its shape; the `java.util.Map` default methods, a persistent `keySet`, an entry's `setValue` or a view iterator's
+`remove` throwing `UnsupportedOperationException`; `pt/draft` or a `match` clause without a symbol check; every
+non-draft error naming `pt/parse`; `draft-of` suggesting `->DebitDraft` for any type; `pt/draft` binding in field
+order; the lint config missing a private var.
 
 Each of these broken copies of earlier versions failed a test that is still in the suite: fetches grouped by draft
 type; an external check waiting only on its fetches; a truthy return counted as a pass; a tree fetching after a pure
