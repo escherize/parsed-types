@@ -33,12 +33,6 @@
   (external ::row-ok "The row is ok." [] [row ::row] (some? row))
   (fetch ::row [id] vector-rows))
 
-(pt/defparsed Chain [next]
-  (child next Chain))
-
-(pt/defparsed Wide [parts]
-  (children parts Wide))
-
 (pt/defparsed Seven [a b c d e f g]
   (pure ::a "a is an integer." [a] (int? a))
   (pure ::b "b is an integer." [b] (int? b))
@@ -146,24 +140,13 @@
    [:fetch-name-not-qualified (compiling '(pt/defparsed E1 [a] (fetch :f [a] rows))) "the fetch :f" "::f"]
    [:fetch-bad-fields (compiling '(pt/defparsed E1 [account-id] (fetch ::f [acount-id] rows))) "reads [acount-id]"
     "Did you mean account-id?" "[account-id]"]
-   [:fetch-reads-child-field (compiling '(pt/defparsed E1 [kids] (children kids Debit) (fetch ::f [kids] rows)))
-    "the fetch :parsed-types.errors-test/f reads the child field kids"
-    "Read the children in the check itself, as in (external ::check \"doc\" [kids] ...)"]
    [:fetch-no-fn (compiling '(pt/defparsed E1 [a] (fetch ::f [a]))) "has no function" "rows-by-id"]
-   [:child-not-a-field (compiling '(pt/defparsed E1 [kids] (children kid Debit))) "the child field kid is not a field of the draft"
-    "Did you mean kids?"]
-   [:child-declared-twice (compiling '(pt/defparsed E1 [a] (child a Debit) (children a Debit)))
-    "declared as a child twice: [a]" "Declare it once"]
    [:name-used-twice (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a] true) (pure ::c "d" [a] true)))
     "used twice: [:parsed-types.errors-test/c]" "Give each its own name"]
    [:pure-check-order (compiling '(pt/defparsed E1 [a b] (pure ::ab "d" [a b] true) (pure ::a "d" [a] true)))
     "the pure check :parsed-types.errors-test/ab reads [a b], and is written before :parsed-types.errors-test/a"
     "Move :parsed-types.errors-test/a before :parsed-types.errors-test/ab."]
-   [:reserved-name (compiling '(pt/defparsed E1 [kids] (children kids Debit) (pure :parsed-types.child/kids "d" [kids] true)))
-    "[:parsed-types.child/kids]" "as in ::kids"]
    ;; when a defparsed loads
-   [:child-type-not-parsed (compiling '(pt/defparsed E2 [a] (child a String))) "the child field :a holds java.lang.String"
-    "(child a java.lang.String)" "Name one of those"]
    [:fetch-not-fn (compiling '(pt/defparsed E2 [a] (external ::c "d" [] [r ::f] (some? r)) (fetch ::f [a] 42)))
     "is 42, not a fn" "(fetch :parsed-types.errors-test/f [a] rows-by-id)"]
    [:defparsed-not-top-level (compiling '(let [x 1] (pt/defparsed E3 [a] (pure ::c "d" [a] (= a x)))))
@@ -181,17 +164,17 @@
    [:parse-all-not-a-vector #(pt/parse-all draft) "pt/parse-all got a DebitDraft" "(pt/parse-all [draft])"
     "(pt/parse draft)"]
    [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit {:user-id u, ...}))"]
-   [:child-field-metadata #(pt/parse (->WideDraft (with-meta [] {:sneaky (atom 1)})))
-    "WideDraft: the child field :parts holds a vector with the metadata" "(with-meta v nil)"]
+   [:draft-in-field #(pt/parse (->CreditDraft [(->CreditDraft 1)]))
+    "CreditDraft: the field :amount at [0] holds a draft, a CreditDraft (parsed_types.errors_test.CreditDraft)"
+    "never drafts" "(pt/parse d)" "(pt/parse-all ds)"]
+   [:unissued-in-field #(pt/parse (->CreditDraft (Credit. 1 nil)))
+    "CreditDraft: the field :amount holds a Credit that pt/parse did not issue" "carries no proof"
+    "(pt/parse (->CreditDraft ...))"]
    [:mutable-value #(pt/parse (->DebitDraft 1 2 (atom 1))) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
    [:value-too-deep #(pt/parse (->DebitDraft 1 2 (reduce (fn [x _] [x]) 1 (range 1001))))
     "the field :amount at [0 0 0 0 0 0 0 0] and 993 levels more holds a value nested deeper than 1000 levels"
     "(vec (flatten v))" "(pr-str v)"]
-   [:tree-too-deep #(pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 1000)))
-    "deeper than 1000 levels" "Parse a shallower tree"]
-   [:tree-too-big #(pt/parse (reduce (fn [w _] (->WideDraft [w w])) (->WideDraft []) (range 20)))
-    "more than 100000 drafts" "(pt/parse-all parts)"]
    [:fetch-missing-tuples #(pt/parse (->LossyDraft 1)) "returned no entry for [[1]]"
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
    [:fetch-not-a-map #(pt/parse (->OddDraft 1)) "returned a PersistentVector, not a map"
@@ -226,13 +209,6 @@
                                                     (sink (pt/parse (->SDraft 1)))))
     "the code calling (pt/parsed S ...) was compiled before the defparsed S in errs.stale-sink was re-evaluated"
     "Re-evaluate the namespace that calls pt/parsed" "(clojure.tools.namespace.repl/refresh)"]
-   [:stale-child-type (in-ns-named 'errs.stale-child '(do (pt/defparsed K [x])
-                                                           (pt/defparsed P [ks] (children ks K))
-                                                           (pt/defparsed K [x])
-                                                           (pt/parse (->PDraft [(->KDraft 1)]))))
-    "PDraft: the child field :ks holds a KDraft of errs.stale_child.K"
-    "the defparsed P in errs.stale-child was evaluated against an older errs.stale_child.K"
-    "Re-evaluate the defparsed P, or reload its namespace, as in (require 'errs.stale-child :reload)"]
    [:stale-match (in-ns-named 'errs.stale-match '(do (pt/defparsed M1 [x])
                                                       (pt/defparsed M2 [x])
                                                       (pt/defsum MS [M1 M2])

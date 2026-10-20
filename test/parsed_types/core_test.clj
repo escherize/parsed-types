@@ -119,7 +119,7 @@
     (is (some? (pt/parse ((resolve 'parsed-types.core-test/->AnywhereDraft) 1))))))
 
 (deftest order-test
-  (testing "shape checks first, then checks over several fields, then fetches, then external checks"
+  (testing "pure checks in the order written, then fetches, then external checks"
     (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
            (runs #(pt/parse (->RenameCardDraft 1 1 "New"))))))
   (testing "a failed pure check holds up every fetch and external check, even one that does not read its field"
@@ -461,32 +461,24 @@
         (is (str/includes? (str message) fix) (str (class v)))
         (is (some? (pt/parse (->OtherDraft 1 1 (convert v)))) (str (class v)))))))
 
-(pt/defparsed Line [n] (pure ::n-int "n is an integer." [n] (int? n)))
-
-(pt/defparsed Entry [lines x y]
-  (children lines Line)
-  (pure ::x-int "x is an integer." [x] (int? x))
-  (pure ::y-int "y is an integer." [y] (int? y))
-  (pure ::sum-under-x "The lines add up to less than x." [lines x] (< (reduce + (map :n lines)) x))
-  (pure ::x-under-y "x is below y." [x y] (< x y)))
+(pt/defparsed Held [a b c]
+  (pure ::a-int "a is an integer." [a] (int? a))
+  (pure ::a-below-b "a is below b." [a b] (< a b))
+  (pure ::b-below-c "b is below c." [b c] (< b c)))
 
 (deftest a-held-check-holds-nothing-test
-  (testing "a check held by a failed child did not run, so a later check that shares a field with it still runs"
-    (is (= {:lines        {0 {::n-int {:doc "n is an integer.", :returned false}}}
-            ::sum-under-x {:doc "The lines add up to less than x.", :blocked-by [[:lines 0]]}
-            ::x-under-y   {:doc "x is below y.", :returned false}}
-           (:failures (thrown-data #(pt/parse (->EntryDraft [(->LineDraft :bad)] 5 1)))))))
+  (testing "a check held by a failure did not run, so a later check that shares a field with it still runs"
+    (is (= {::a-int     {:doc "a is an integer.", :returned false, :blocked [::a-below-b]}
+            ::b-below-c {:doc "b is below c.", :returned false}}
+           (:failures (thrown-data #(pt/parse (->HeldDraft :x 5 1)))))))
   (testing "while a check that ran and failed holds it"
-    (is (= {::sum-under-x {:doc "The lines add up to less than x.", :returned false, :blocked [::x-under-y]}}
-           (:failures (thrown-data #(pt/parse (->EntryDraft [(->LineDraft 100)] 5 1))))))))
+    (is (= {::a-below-b {:doc "a is below b.", :returned false, :blocked [::b-below-c]}}
+           (:failures (thrown-data #(pt/parse (->HeldDraft 9 5 1))))))))
 
-(deftest a-child-field-of-the-wrong-shape-fails-its-shape-check-test
-  (testing "a quoted list carries the reader's line metadata, and fails the shape check, not the metadata rule"
-    (let [v '(1)]
-      (is (some? (meta v)))
-      (is (= {:doc "lines holds a vector of drafts that parse to Line.", :returned false
-              :blocked [::sum-under-x]}
-             (get-in (thrown-data #(pt/parse (->EntryDraft v 5 6))) [:failures :parsed-types.child/lines])))))
-  (testing "while a vector with metadata is refused, since parse would drop it"
-    (is (= :parsed-types.rule/child-field-metadata
-           (:rule (thrown-data #(pt/parse (->EntryDraft (with-meta [] {:k 1}) 5 6))))))))
+(deftest an-issued-value-in-a-field-is-not-walked-again-test
+  (let [inner  (pt/parse (->OtherDraft 1 1 [[1] [2] [3]]))
+        walked (atom 0)
+        f      @#'pt/children-or-refusal]
+    (with-redefs [pt/children-or-refusal (fn [v path acc] (swap! walked inc) (f v path acc))]
+      (is (some? (pt/parse (->OtherDraft 1 1 inner)))))
+    (is (= 1 @walked) "the issued value itself, not the vectors inside it")))

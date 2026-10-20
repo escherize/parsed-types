@@ -23,10 +23,11 @@
 
   A `pure` check is one that should read only its arguments; an `external` one reads the world. The library holds a
   check to the fields it names and refuses field values that can change, but it cannot stop a pure check from
-  calling the world. What it guarantees: nothing fetches and no external check runs until every pure check in the
-  tree passes.
+  calling the world. What it guarantees: nothing fetches and no external check runs until every pure check of the
+  draft passes.
 
-  A field declared with `children` or `child` holds drafts, and one [[parse]] parses the whole tree.
+  A field may hold values [[parse]] issued, but never a draft: parse the parts first, then the whole, as in
+  `(pt/parse (pt/draft Order {:customer-id c, :lines (pt/parse-all line-drafts)}))`.
 
   Drafts and parsed values are maps with fixed fields: reading a key that is not a field throws. A parsed value cannot
   change: to change one, take [[draft-of]] it, `assoc`, and [[parse]] again.
@@ -100,8 +101,8 @@
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
   (java.util.concurrent.ConcurrentHashMap.))
 
-;; Parsed class name -> the fetch fns and child types its `defparsed` evaluated and checked before defining any class,
-;; for `register!` to take once the classes exist. A failed `defparsed` leaves its entry, which the next one replaces.
+;; Parsed class name -> the fetch fns its `defparsed` evaluated and checked before defining any class, for `register!`
+;; to take once the classes exist. A failed `defparsed` leaves its entry, which the next one replaces.
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap pending
   (java.util.concurrent.ConcurrentHashMap.))
 
@@ -655,8 +656,7 @@
   (Sum. name (vec members)))
 
 (defmacro defsum
-  "Define `name`, a closed set of parsed types. [[match]] on it must handle every member, and a child field of a sum
-  type holds drafts that parse to any member.
+  "Define `name`, a closed set of parsed types. [[match]] on it must handle every member.
 
     (defsum Transaction [Debit Credit])"
   [name members]
@@ -906,15 +906,14 @@
   "Define `parsed-name`, a parsed type with `fields`, its draft type `<parsed-name>Draft` with the same fields, and the
   checks [[parse]] runs to turn a draft into a parsed value. Build a draft with `->NameDraft` or [[draft]].
 
-    (defparsed JournalEntry [user-id lines]
-      (children lines Transaction)
-      (pure ::balanced \"The debits and the credits add up to the same amount.\"
+    (defparsed Order [customer-id lines subtotal]
+      (pure ::lines-parsed \"Every line is a parsed OrderLine.\"
             [lines]
-            (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
-               (reduce + 0M (map :amount (filter #(instance? Credit %) lines)))))
-      (pure ::one-user \"Every line is made by the entry's user.\"
-            [user-id lines]
-            (every? #(= user-id (:user-id %)) lines)))
+            (and (vector? lines) (every? #(pt/parsed? OrderLine %) lines)))
+      (external ::customer-can-order \"The customer exists and may order.\"
+                [] [customer ::customer]
+                (true? (:can-order? customer)))
+      (fetch ::customer [customer-id] customers-by-id))
 
   Clauses:
 
@@ -923,22 +922,21 @@
     results of the named fetches.
   - `(fetch name [field ...] f)`: `f` takes every distinct tuple of the fields, and returns a map from each tuple to
     what it fetched.
-  - `(children field ParsedType)`: the field holds a vector of drafts that parse to `ParsedType`.
-  - `(child field ParsedType)`: the field holds nil or a draft that parses to `ParsedType`.
 
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
 
-  Pure checks run in the order written, after the shape checks of the child fields. A pure check is held, not run,
-  when one before it that shares a field ran and failed. A held check holds nothing. A pure check written before one that reads a proper subset of its
-  fields is a compile error: move the smaller one first.
+  Pure checks run in the order written. A pure check is held, not run, when one before it that shares a field ran
+  and failed. A held check holds nothing. A pure check written before one that reads a proper subset of its fields
+  is a compile error: move the smaller one first.
+
+  A field may hold values [[parse]] issued, which are not checked again, but never a draft: parse the parts first.
 
   Write `defparsed` at the top level of a namespace: inside another form it throws `::bad-declaration`.
 
   The plan [[parse]] follows is built and checked when the form loads, so every declaration error throws
-  `::bad-declaration` then, not at the first parse. The fetch fns and the child types are evaluated and checked
-  before any class is defined, so a re-evaluation they refuse leaves the type as it was. A fetch fn therefore can't
-  name the type being defined; a child field may, by its own name. Only `defparsed` defines parsed types: the draft type and the
-  parsed type are defined together, so the draft type is the only one that parses to its parsed type.
+  `::bad-declaration` then, not at the first parse. The fetch fns are evaluated and checked before any class is
+  defined, so a re-evaluation they refuse leaves the type as it was. Only `defparsed` defines parsed types: the draft
+  type and the parsed type are defined together, so the draft type is the only one that parses to its parsed type.
 
   The parsed type has no `->Name` factory: only [[parse]] builds a value of it that [[parsed]] accepts."
   [parsed-name fields & clauses]
@@ -962,49 +960,15 @@
                         " symbol. Write (defparsed Name [fields] clauses ...), with a symbol for Name.")))
   (check-field-names! &form fields)
   (doseq [c clauses]
-    (when-not (and (seq? c) (symbol? (first c)) ('#{pure external fetch child children} (symbol (name (first c)))))
+    (when-not (and (seq? c) (symbol? (first c)) ('#{pure external fetch} (symbol (name (first c)))))
       (syntax-error! c ::rule/unknown-clause
                      (str (pr-str (if (seq? c) (first c) c)) " does not start a clause. A clause is (pure ...),"
-                          " (external ...), (fetch ...), (child ...) or (children ...). Use one of those."))))
+                          " (external ...) or (fetch ...). Use one of those."))))
   (let [clauses     (map #(cons (symbol (name (first %))) (rest %)) clauses)
-        by-head     (group-by first clauses)
-        fetches     (mapv #(parse-fetch-clause fields %) (get by-head 'fetch))
+        fetches     (mapv #(parse-fetch-clause fields %) (filter (comp #{'fetch} first) clauses))
         fetch-names (set (map :name fetches))
         checks      (mapv #(parse-check-clause parsed-name fields fetch-names %)
                           (filter (comp '#{pure external} first) clauses))
-        children    (into {}
-                          (for [[head field type :as c] (concat (get by-head 'child) (get by-head 'children))]
-                            (do (when-not (contains? (set fields) field)
-                                  (syntax-error! c ::rule/child-not-a-field
-                                                 (str "the child field " (pr-str field) " is not a field of the"
-                                                      " draft, and a child field must be a field of the draft."
-                                                      (did-you-mean field fields) " Name one of " fields ".")))
-                                [(keyword field) {:kind    (if (= 'child head) :one :many)
-                                                  :type    type
-                                                  ;; for a stale-type message: where to reload the child type
-                                                  :type-ns (let [r (when (symbol? type)
-                                                                     (if (= type parsed-name)
-                                                                       *ns*
-                                                                       (try (resolve type) (catch Exception _ nil))))]
-                                                             (cond
-                                                               (instance? clojure.lang.Namespace r) (ns-name r)
-                                                               (var? r)   (ns-name (.ns ^clojure.lang.Var r))
-                                                               (class? r) (class-ns r)))}])))
-        _           (doseq [{n :name, :keys [reads]} fetches
-                            :let [kids (filter (set (keys children)) reads)]
-                            :when (seq kids)]
-                      (syntax-error! &form ::rule/fetch-reads-child-field
-                                     (str "the fetch " n " reads the child field " (symbol (first kids)) ". A fetch"
-                                          " runs before the children's external checks, so it would read children"
-                                          " that may fail them. Read the children in the check itself, as in"
-                                          " (external ::check \"doc\" [" (symbol (first kids)) "] ...), and fetch"
-                                          " by the parent's own fields.")))
-        child-heads (map second (concat (get by-head 'child) (get by-head 'children)))
-        _           (when-not (apply distinct? ::sentinel child-heads)
-                      (syntax-error! &form ::rule/child-declared-twice
-                                     (str "a field is declared as a child twice: "
-                                          (vec (for [[f c] (frequencies child-heads) :when (< 1 c)] f))
-                                          ". Declare it once, with child or children.")))
         names       (concat (map :name checks) (map :name fetches))
         draft-name  (symbol (str parsed-name "Draft"))
         parsed-class-name (str (namespace-munge *ns*) "." parsed-name)
@@ -1026,36 +990,26 @@
                           (:name small) ", which reads only " (mapv symbol (:reads small)) ". Pure checks run in the"
                           " order written, and a check that fails holds every later one that shares a field with it, so a check"
                           " on fewer fields goes first. Move " (:name small) " before " (:name big) ".")))
-    (when-let [reserved (seq (filter #(= "parsed-types.child" (namespace %)) names))]
-      (syntax-error! &form ::rule/reserved-name
-                     (str "names in parsed-types.child are reserved for child-field checks: " (vec reserved)
-                          ". Name them in your own namespace, as in ::" (name (first reserved)) ".")))
     ;; when it expands, so that a refused defparsed never reaches its deftypes, which would redefine the classes
     (claim-class-names! (ns-name *ns*) parsed-name claims false)
-    (let [self?       #(contains? #{parsed-name (symbol parsed-class-name)} %)
-          child-types (into {} (for [[field {:keys [type]}] children :when (not (self? type))] [field type]))]
-      ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
-      ;; every class as it was. The private fns through `var`.
-      `(do
-         ;; the fetch fns and the child types, evaluated once and checked before any class is defined
-         ((var stage!) ~parsed-class-name ~(str (namespace-munge *ns*) "." draft-name)
-                       '~(mapv #(select-keys % [:name :reads]) fetches) [~@(map :f fetches)]
-                       '~(update-vals children #(select-keys % [:kind])) ~child-types)
-         ;; before the deftypes, which is what records the claim
-         ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
-         ~(defparsed-type parsed-name fields)
-         ~(defdraft-type draft-name fields)
-         ;; only this expansion may record a plan
-         ((var register!) ~parsed-name ~draft-name
-                          {:checks   ~checks
-                           :fetches  '~(mapv #(select-keys % [:name :reads]) fetches)
-                           :children '~(update-vals children #(dissoc % :type))}
-                          ~(builders parsed-name draft-name fields))
-         ~parsed-name))))
+    ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
+    ;; every class as it was. The private fns through `var`.
+    `(do
+       ;; the fetch fns, evaluated once and checked before any class is defined
+       ((var stage!) ~parsed-class-name ~(str (namespace-munge *ns*) "." draft-name)
+                     '~(mapv #(select-keys % [:name :reads]) fetches) [~@(map :f fetches)])
+       ;; before the deftypes, which is what records the claim
+       ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
+       ~(defparsed-type parsed-name fields)
+       ~(defdraft-type draft-name fields)
+       ;; only this expansion may record a plan
+       ((var register!) ~parsed-name ~draft-name
+                        {:checks  ~checks
+                         :fetches '~(mapv #(select-keys % [:name :reads]) fetches)}
+                        ~(builders parsed-name draft-name fields))
+       ~parsed-name)))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
-
-(declare plan-for)
 
 (defn- bad-declaration!
   "Throws `::bad-declaration` for the declaration of the draft class named `draft-class-name`, which broke `rule`, when
@@ -1070,22 +1024,11 @@
   (and (instance? DraftValue x) (some? (.get registry (class x)))))
 
 (defn- stage!
-  "Check what [[defparsed]] cannot see when it expands, only when it loads, before it defines any class: a child type
-  that is not a parsed type or a sum, and a fetch that is not a fn. Throws `::bad-declaration`, so a `defparsed` that
-  fails here changes nothing. Then keep `fetch-fns` and `child-types` for [[register!]]. `fetches` holds each
-  fetch's `:name` and `:reads`, in the order of `fetch-fns`; `children` maps each child field to its `:kind`, and
-  `child-types` maps each child field but those of the type being defined to its type. Called by the expansion of
-  [[defparsed]]."
-  [parsed-class-name draft-class-name fetches fetch-fns children child-types]
-  (doseq [[field type] child-types
-          :let [{:keys [kind]} (children field)]]
-    (when-not (or (parsed-type? type) (valid-sum? type))
-      (bad-declaration! draft-class-name ::rule/child-type-not-parsed
-                        (str "the child field " field " holds " (pr-str type) ", which is not a type defined with"
-                             " defparsed or a sum defined with defsum, in (" (if (= :one kind) "child" "children") " "
-                             (name field) " " (pr-str type) "). A child field holds drafts the parent parses. Name"
-                             " one of those.")
-                        {:field field, :got (pr-str type)})))
+  "Check what [[defparsed]] cannot see when it expands, only when it loads, before it defines any class: a fetch that
+  is not a fn. Throws `::bad-declaration`, so a `defparsed` that fails here changes nothing. Then keep `fetch-fns` for
+  [[register!]]. `fetches` holds each fetch's `:name` and `:reads`, in the order of `fetch-fns`. Called by the
+  expansion of [[defparsed]]."
+  [parsed-class-name draft-class-name fetches fetch-fns]
   (doseq [[{n :name, :keys [reads]} f] (map vector fetches fetch-fns)]
     (when-not (fn? f)
       (bad-declaration! draft-class-name ::rule/fetch-not-fn
@@ -1093,92 +1036,24 @@
                              (pr-str f) "). A fetch is called with the tuples it fetches. Write a fn of the tuples"
                              " it fetches, as in (fetch " n " " (mapv symbol reads) " rows-by-id).")
                         {:name n, :got (some-> f class .getName)})))
-  (.put pending parsed-class-name {:fetch-fns fetch-fns, :child-types child-types})
+  (.put pending parsed-class-name fetch-fns)
   nil)
-
-(defn- stale-child!
-  "Throws `::stale-type`: the child field `field` of the parent `parent`, a plan or `{:parses-to :draft-class}`,
-  declared as `child`, `{:type :type-ns}`, holds the draft `d`, which parses to `c`, a class with the name of the
-  type or of one of its members but not that class."
-  [{:keys [parses-to draft-class]} field {:keys [type type-ns]} d ^Class c]
-  (let [where (str (.getSimpleName ^Class draft-class) ": the child field " field)]
-    (if (stale? c)
-      (stale-value! where (str "a " (.getSimpleName (class d))) c)
-      (let [parent    (.getSimpleName ^Class parses-to)
-            parent-ns (class-ns parses-to)
-            ;; a sum is re-evaluated in its own namespace first, so it takes the new member
-            nss       (if (sum? type) [type-ns parent-ns] [parent-ns])
-            ;; re-evaluating a form in place works only when no namespace imports the class from another
-            in-place? (apply = (class-ns c) nss)]
-        (throw (ex-info (str where " holds a " (.getSimpleName (class d)) " of " (.getName c) ", but "
-                             (defined-in parses-to) " was evaluated against an older " (.getName c)
-                             (when (sum? type) (str ", through the sum " (sum-name type))) ". Types compare by class,"
-                             " like records, so a parent keeps the child types it was evaluated with. "
-                             (cond
-                               in-place?
-                               (str "Re-evaluate " (when (sum? type) (str "the defsum " (sum-name type) ", then "))
-                                    "the defparsed " parent ", or reload its namespace, as in " (reload-command nss)
-                                    ".")
-
-                               (sum? type)
-                               (str "Reload the namespace of the defsum " (sum-name type) ", then the parent's, in that"
-                                    " order, as in " (reload-command nss) ".")
-
-                               :else
-                               (str "Reload its namespace, which imports the new class, as in " (reload-command nss)
-                                    ".")))
-                        {:type ::stale-type, :rule ::rule/stale-child-type, :class (.getName c), :field field
-                         :parent (.getName ^Class parses-to)}))))))
-
-(defn- children-of-type?
-  "Whether `v` is what the child field `field` of `parent`, declared as `{:kind :type}`, may hold: drafts that parse to
-  the type's class itself, or one of its members. A draft of a class with that name but not the class throws
-  `::stale-type`."
-  [parent field {:keys [kind], parsed-type :type, :as child} v]
-  (let [drafts-it? (fn [d] (when (instance? DraftValue d)
-                                (not-loaded! (str (.getSimpleName ^Class (:draft-class parent)) ": the child field " field)
-                                             (class d)))
-                              (and (draft-value? d)
-                                (let [c (:parses-to (plan-for "pt/parse" d))]
-                                  (when (and (named-member parsed-type c) (not (member? parsed-type c)))
-                                    (stale-child! parent field child d c))
-                                  (member? parsed-type c))))]
-    (case kind
-      :one  (or (nil? v) (drafts-it? v))
-      :many (and (vector? v) (every? drafts-it? v)))))
-
-(defn- child-shape-check
-  "The pure check every child field gets: it holds drafts of the declared type. Every check that reads the field waits
-  on it."
-  [parent field {:keys [kind type], :as child}]
-  {:name  (keyword "parsed-types.child" (name field))
-   :doc   (str (name field) " holds " (if (= :one kind) "nil or a draft that parses to " "a vector of drafts that parse to ")
-               (type-name type) ".")
-   :kind  :pure
-   :shape? true
-   :reads [field]
-   :f     (fn [v] (children-of-type? parent field child v))})
 
 (defn- reads-set [x] (set (:reads x)))
 
 (defn- compile-plan
-  "Order the checks, and work out what each waits on.
+  "Order the checks, and work out what holds each.
 
-  - A pure check waits on every pure check before it that shares a field with it, and is held when one of those ran
-    and failed: one held in turn holds nothing. The shape checks of the child fields come first, so a check that reads a child field waits on its shape. It also waits on the children's own
-    pure checks, through [[failed-children]].
-  - A fetch waits on every pure check, so malformed input never reads the world.
-  - An external check waits on its fetches and on every pure check.
+  - A pure check is held when a pure check before it that shares a field ran and failed: one held in turn holds
+    nothing.
+  - An external check is held when any pure check failed, and fetches run only when none did, so malformed input
+    never reads the world.
 
   Pure checks run first, in the order written, then fetches, then external checks, each in the order written.
   [[defparsed]] refuses a pure check written before one that reads a proper subset of its fields, so a check on one
   field runs before a check relating it to another."
-  [parses-to draft-class fields {:keys [checks fetches children], :as decl}]
-  (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check {:parses-to parses-to, :draft-class draft-class} field child)])) children)
-        pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
-        external  (filterv #(= :external (:kind %)) checks)
-        waits-on  (fn [pred] (into #{} (comp (filter pred) (map :name)) pure))
-        all-pure  (waits-on any?)
+  [parses-to draft-class fields {:keys [checks], :as decl}]
+  (let [pure      (filterv #(= :pure (:kind %)) checks)
         pure'     (map-indexed (fn [i c]
                                  (assoc c :prereqs (into #{}
                                                          (comp (take i)
@@ -1187,19 +1062,16 @@
                                                                (map :name))
                                                          pure)))
                                pure)
-        fetches'  (for [fd fetches]
-                    (assoc fd :prereqs all-pure))
-        external' (for [c external]
-                    (assoc c :prereqs (into all-pure (:fetches c))))]
-    {:draft-class     draft-class
-     :parses-to       parses-to
-     :declaration     (assoc decl :parses-to parses-to)
-     :fields          fields
-     :children        children
-     :pure            (vec pure')
-     :fetches         (vec fetches')
-     :external        (vec external')
-     :checks-by-name  (into {} (map (juxt :name identity)) (concat pure' external'))}))
+        external' (for [c checks :when (= :external (:kind c))]
+                    (assoc c :prereqs (set (map :name pure))))]
+    {:draft-class    draft-class
+     :parses-to      parses-to
+     :declaration    (assoc decl :parses-to parses-to)
+     :fields         fields
+     :pure           (vec pure')
+     :fetches        (:fetches decl)
+     :external       (vec external')
+     :checks-by-name (into {} (map (juxt :name identity)) (concat pure' external'))}))
 
 (defn- describe
   "`x` for an error message: nil, a plain map, or a value of its type."
@@ -1212,16 +1084,12 @@
 
 (defn- register!
   "Build the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the `builders`
-  [[defparsed]] generated and the fetch fns and child types [[stage!]] kept. Called by the expansion of
-  [[defparsed]], when it loads, after its `deftype`s."
+  [[defparsed]] generated and the fetch fns [[stage!]] kept. Called by the expansion of [[defparsed]], when it loads,
+  after its `deftype`s."
   [parsed-type draft-type decl builders]
-  (let [{:keys [fetch-fns child-types]} (.remove pending (.getName ^Class parsed-type))
-        decl (-> decl
-                 (update :fetches #(mapv (fn [fd f] (assoc fd :f f)) % fetch-fns))
-                 (update :children #(into {} (map (fn [[field child]]
-                                                    [field (assoc child :type (get child-types field parsed-type))]))
-                                          %)))
-        plan (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
+  (let [fetch-fns (.remove pending (.getName ^Class parsed-type))
+        decl      (update decl :fetches #(mapv (fn [fd f] (assoc fd :f f)) % fetch-fns))
+        plan      (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
     (.put registry draft-type plan)
     (.put registry parsed-type plan)
     (.put latest (.getName ^Class parsed-type) parsed-type)))
@@ -1259,7 +1127,7 @@
   (.get registry (class draft)))
 
 (defn declaration
-  "The declaration `defparsed` wrote for `draft`'s type: `{:parses-to :checks :fetches :children}`, as data. Throws
+  "The declaration `defparsed` wrote for `draft`'s type: `{:parses-to :checks :fetches}`, as data. Throws
   `::bad-input` for anything but a draft."
   [draft]
   (:declaration (plan-for "pt/declaration" draft)))
@@ -1289,6 +1157,8 @@
         (keep #(try (Class/forName %) (catch ClassNotFoundException _ nil)))
         ["java.time.InstantSource"]))
 
+(declare parse-hint)
+
 (defn- children-or-refusal
   "What the walk in [[not-immutable]] does with `v`, at `path`: `[:refuse rule what fix]`, or `[:walk frames]`, a
   frame to visit for each value inside it, its metadata first, each with `acc`, which collects `v`'s height."
@@ -1307,7 +1177,16 @@
       (refuse "a clock, which reads the time each time it is asked" "Pass the instant it reads, as in (.instant clock).")
 
       (java-time-value? c) (walk nil)
+      ;; an issued value proved its own checks, and holds only immutable values, so it is not walked again
       (issued? v)          (walk nil)
+
+      (instance? DraftValue v)
+      [:refuse ::rule/draft-in-field (str "a draft, a " (.getSimpleName c))
+       "Parse it first, as in (pt/parse d), or each of a vector of drafts with (pt/parse-all ds)."]
+
+      (instance? ParsedValue v)
+      [:refuse ::rule/unissued-in-field (str "a " (.getSimpleName c) " that pt/parse did not issue")
+       (str "Pass the value pt/parse returns instead, as in " (parse-hint c) ".")]
 
       (and (instance? clojure.lang.Sorted v)
            (not (identical? clojure.lang.RT/DEFAULT_COMPARATOR (.comparator ^clojure.lang.Sorted v))))
@@ -1350,7 +1229,8 @@
   "nil when `v` is known to be immutable all the way down, else `[rule path what fix class-name]`: the rule, where
   inside the field the first value that is not is, what it is, the fix, and its class. Accepts nil, the values of
   [[immutable-classes]], classes, `java.time` values but clocks, values [[parse]] issued, and persistent vectors, maps
-  (records and drafts included), sets, lists and queues whose contents pass, map keys and metadata included. A sorted
+  (records included), sets, lists and queues whose contents pass, map keys and metadata included. Refuses a draft,
+  which no check of this parse looks inside, and a parsed type's value `parse` did not issue. A sorted
   collection must use the default comparator, since a custom one can read state that changes. Refuses everything
   else, lazy and other seqs too: realizing one could run side effects or never end. Refuses a value nested deeper
   than [[max-value-depth]], with the rule `value-too-deep`.
@@ -1399,31 +1279,27 @@
                         (recur (into (conj stack [:exit x acc parent]) (reverse frames)))))))))))))))
 
 (defn- refuse-mutable!
-  "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable:
-  the checks would prove a value the parsed value does not keep. Child fields are not walked, because each child is
-  checked as its own node. There is no opt-out. `walked` is as for [[not-immutable]]."
-  [draft {:keys [children]} values walked]
+  "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable,
+  or a draft or an unissued value: the checks would prove a value the parsed value does not keep. There is no
+  opt-out. `walked` is as for [[not-immutable]]."
+  [draft values walked]
   (doseq [[field v] values
-          ;; only a vector, the shape a `children` field takes: a list the reader read carries its line, and fails the
-          ;; shape check instead. A draft, the shape a `child` field takes, carries no metadata.
-          :when       (and (= :many (get-in children [field :kind])) (vector? v) (some? (meta v)))]
-    (throw (ex-info (str (.getSimpleName (class draft)) ": the child field " field " holds a vector with the metadata "
-                         (pr-str (meta v)) ". The parsed value holds a new vector of the parsed children, so the"
-                         " metadata would be dropped. Keep the metadata beside the draft, as in {:value x, :meta m},"
-                         " and pass the vector without it, as in (with-meta v nil).")
-                    {:type ::bad-input, :rule ::rule/child-field-metadata, :draft (.getName (class draft))
-                     :field field})))
-  (doseq [[field v] values
-          :when       (not (contains? children field))
           :let        [[rule path what fix got] (not-immutable v walked)]
           :when       what]
     (let [shown (if (< 8 (count path)) (str (subvec path 0 8) " and " (- (count path) 8) " levels more") path)]
       (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field
                            (when (seq path) (str " at " shown))
-                           " holds " what " (" got "). A parsed value holds only values known to be immutable, so"
-                           " what its checks proved stays true"
-                           (when (= rule ::rule/value-too-deep) ", and proving it walks a bounded depth")
-                           ". " fix)
+                           " holds " what " (" got "). "
+                           (case rule
+                             ::rule/draft-in-field
+                             "A field holds values pt/parse issued, never drafts: parse checks only the draft it is given."
+                             ::rule/unissued-in-field
+                             "A field holds values pt/parse issued, and this one carries no proof."
+                             (str "A parsed value holds only values known to be immutable, so what its checks proved"
+                                  " stays true"
+                                  (when (= rule ::rule/value-too-deep) ", and proving it walks a bounded depth")
+                                  "."))
+                           " " fix)
                       (merge {:type ::bad-input, :rule rule, :draft (.getName (class draft)), :field field
                               :path path, :got got}
                              ;; a path over the limit is long: the ex-data keeps its first steps and its length
@@ -1434,61 +1310,13 @@
   (let [plan   (plan-for fn-name draft)
         ;; every field read once, so the checks and the parsed value see the same values
         values ((:read-draft plan) draft)]
-    (refuse-mutable! draft plan values walked)
+    (refuse-mutable! draft values walked)
     {:draft   draft
      :values  values
      :plan    plan
      :fetched {}
      :failed  {}     ; check name -> failure entry
      :order   []}))  ; failed check names, in the order they failed
-
-(defn- child-path [path field i]
-  (if i (conj path field i) (conj path field)))
-
-(def ^:private max-depth
-  "The most levels a tree [[parse]] takes may have, counting the root. A deeper one throws `::bad-input`."
-  1000)
-
-(def ^:private max-nodes
-  "The most drafts one tree may hold, counting a draft each time it appears."
-  100000)
-
-(defn- too-big! [rule message data]
-  (throw (ex-info message (merge {:type ::bad-input, :rule rule, :max-depth max-depth, :max-nodes max-nodes} data))))
-
-(defn- flatten-tree
-  "The drafts of the tree under `root`, children before parents, each with its `:path` from the root. `fn-name` names
-  the fn that got `root`, and `walked` is as for [[not-immutable]]."
-  [fn-name tree root walked]
-  (loop [stack (list [root [] 1]), pre []]
-    (if-let [[draft path depth] (first stack)]
-      (let [_    (when (< max-depth depth)
-                   (too-big! ::rule/tree-too-deep
-                             (str "The tree under a " (.getSimpleName (class root)) " is deeper than " max-depth
-                                  " levels, counting the root. A tree is walked with a bounded stack."
-                                  " Parse a shallower tree, or split it and parse the parts.")
-                             {:path path}))
-            _    (when (<= max-nodes (count pre))
-                   (too-big! ::rule/tree-too-big
-                             (str "The tree under a " (.getSimpleName (class root)) " holds more than " max-nodes
-                                  " drafts, counting a draft each time it appears. A parse is bounded in size. Parse"
-                                  " it in smaller parts, as with (pt/parse-all parts).")
-                             {}))
-            st   (assoc (start fn-name draft walked) :tree tree :path path)
-            ;; the child fields of the right shape: their children are walked, and an empty vector is rebuilt too
-            ok   (filterv (fn [[field child]] (children-of-type? (:plan st) field child (get-in st [:values field])))
-                          (get-in st [:plan :children]))
-            kids (for [[field {:keys [kind]}] ok
-                       :let  [v (get-in st [:values field])]
-                       [i d] (if (= :one kind) (when v [[nil v]]) (map-indexed vector v))]
-                   [field (child-path path field i) d])
-            st   (assoc st :child-paths (reduce (fn [m [field p]] (update m field conj p))
-                                                (into {} (map (fn [[field]] [field []])) ok)
-                                                kids))]
-        ;; pushing the children in order pops the last first, so the reverse of this pre-order is a post-order with
-        ;; the children in order
-        (recur (into (rest stack) (map (fn [[_ p d]] [d p (inc depth)])) kids) (conj pre st)))
-      (vec (rseq pre)))))
 
 (defn- roots-of
   "The checks among `prereqs` that ran and failed, or nil. A held check did not run, so it holds nothing."
@@ -1500,95 +1328,25 @@
   [st n roots]
   (reduce #(update-in %1 [:failed %2 :blocked] (fnil conj []) n) st roots))
 
-(defn- run-check [st {n :name, :keys [prereqs f doc reads fetches], :as c}]
+(defn- run-check [st {n :name, :keys [prereqs f doc reads fetches]}]
   (if-let [roots (roots-of st prereqs)]
     (block st n roots)
-    (let [result (apply f (concat (map #(get (if (:shape? c) (:values st) (:inputs st)) %) reads)
-                                  (map #(get-in st [:fetched %]) fetches)))]
+    (let [result (apply f (concat (map (:values st) reads) (map (:fetched st) fetches)))]
       (if (true? result)
         st
         (-> st
             (assoc-in [:failed n] {:doc doc, :returned result})
             (update :order conj n))))))
 
-(defn- failed-children
-  "The paths of the children in the fields `c` reads that failed, or have a failure under them, in this phase. A shape
-  check reads only the field's form, so it waits on no child."
-  [st c bad]
-  (when-not (:shape? c)
-    (seq (for [field (:reads c)
-               path  (get-in st [:child-paths field])
-               :when (bad [(:tree st) path])]
-           path))))
-
-(defn- run-checks
-  "Run `checks` in order. A check that reads a child field whose children failed is held, not run: it would read
-  values that are not proven."
-  [st checks bad]
-  (reduce (fn [st {n :name, :keys [doc prereqs], :as c}]
-            (if-let [paths (and (not (roots-of st prereqs)) (failed-children st c bad))]
-              (-> st
-                  (assoc-in [:failed n] {:doc doc, :blocked-by (vec paths)})
-                  (update :order conj n))
-              (run-check st c)))
-          st
-          checks))
-
-(defn- run-pure [st bad]
-  (run-checks st (get-in st [:plan :pure]) bad))
-
-(declare build-parsed)
-
-(defn- child-inputs
-  "The node's field values, with each child field holding `(built path)` for the path of each of its children: a new
-  vector for `children`, empty ones included, and nil or the one child for `child`."
-  [{:keys [plan values child-paths]} built]
-  (reduce-kv (fn [m field paths]
-               (assoc m field (if (= :one (get-in plan [:children field :kind]))
-                                (some-> (first paths) built)
-                                (mapv built paths))))
-             values child-paths))
-
-(defn- pure-phase
-  "Run every node's pure checks, children before parents, and build each node's view: a value of its parsed type,
-  without the proof, holding its children's views. A parent's checks see each child as its view, which is closed like
-  any parsed value, and which `pt/parsed` refuses. A node is bad when it, or anything under it, failed."
-  [nodes]
-  (first (reduce (fn [[out bad views] {:keys [tree path child-paths plan], :as st}]
-                   (let [inputs (child-inputs st #(views [tree %]))
-                         view   (build-parsed plan inputs nil)
-                         st     (run-pure (assoc st :inputs inputs) bad)
-                         bad?   (or (seq (:failed st)) (some #(bad [tree %]) (apply concat (vals child-paths))))]
-                     [(conj out st) (cond-> bad bad? (conj [tree path])) (assoc views [tree path] view)]))
-                 [[] #{} {}]
-                 nodes)))
-
-(defn- external-phase
-  "Run every node's external checks, children before parents, holding a parent's checks over children that failed
-  theirs. In a tree that failed a pure check, none runs: each is only listed under the pure checks of its node that
-  failed."
-  [nodes]
-  (first (reduce (fn [[out bad] {:keys [tree path child-paths world?], :as st}]
-                   (let [externals (get-in st [:plan :external])
-                         st        (if world?
-                                     (run-checks st externals bad)
-                                     (reduce (fn [st {n :name, :keys [prereqs]}]
-                                               (if-let [roots (roots-of st prereqs)] (block st n roots) st))
-                                             st externals))
-                         bad? (or (seq (:failed st)) (some #(bad [tree %]) (apply concat (vals child-paths))))]
-                     [(conj out st) (cond-> bad bad? (conj [tree path]))]))
-                 [[] #{}]
-                 nodes)))
-
 (defn- fetch-phase
-  "Run every fetch the nodes need, each once per plan across all of them, with each distinct tuple of arguments once."
+  "Run every fetch the drafts that passed their pure checks need, each once per plan across all of them, with each
+  distinct tuple of arguments once."
   [sts]
-  ;; only nodes of trees whose every pure check passed reach the world, so no fetch here waits on a failure
   (let [wanted (for [[i st] (map-indexed vector sts)
-                     :when  (:world? st)
+                     :when  (empty? (:failed st))
                      fd     (get-in st [:plan :fetches])]
                  {:i i, :fd fd})
-        tuple  (fn [{:keys [i fd]}] (mapv #(get (:inputs (nth sts i)) %) (:reads fd)))]
+        tuple  (fn [{:keys [i fd]}] (mapv (:values (nth sts i)) (:reads fd)))]
     (reduce
      (fn [sts [_ ws]]
        (let [{fd :fd} (first ws)
@@ -1615,70 +1373,40 @@
      (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)]) wanted))))
 
 (defn- run-all
-  "Run the checks of every draft, and of every draft under it, and return one vector of nodes per draft. `fn-name`
-  names the fn that got them."
+  "Run the checks of every draft, and return the state of each. `fn-name` names the fn that got them."
   [fn-name drafts]
-  (let [walked       (java.util.IdentityHashMap.)
-        nodes        (pure-phase (into [] (comp (map-indexed (fn [i d] (flatten-tree fn-name i d walked))) cat) drafts))
-        unproven     (into #{} (comp (filter (comp seq :failed)) (map :tree)) nodes)
-        ;; nothing in a tree touches the world until every pure check in it has run and passed
-        nodes        (mapv #(assoc % :world? (not (unproven (:tree %)))) nodes)
-        nodes        (fetch-phase nodes)
-        nodes        (external-phase nodes)
-        by-tree      (group-by :tree nodes)]
-    (mapv #(get by-tree % []) (range (count drafts)))))
-
-(defn- tree-failures
-  "Every failure in the tree, shaped like the tree: the root's checks at the top, and each child's under its field
-  (and index, for `children`). `nil` when there are none."
-  [nodes]
-  (not-empty
-   (reduce (fn [m {:keys [path failed]}]
-             (cond
-               (empty? failed) m
-               (empty? path)   (merge m failed)
-               :else           (update-in m path merge failed)))
-           {}
-           nodes)))
+  (let [walked (java.util.IdentityHashMap.)
+        ;; every draft is read and walked before any check runs
+        sts    (mapv #(start fn-name % walked) drafts)
+        sts    (mapv #(reduce run-check % (get-in % [:plan :pure])) sts)
+        ;; a draft that failed a pure check fetches nothing, and its external checks are held
+        sts    (fetch-phase sts)]
+    (mapv #(reduce run-check % (get-in % [:plan :external])) sts)))
 
 (defn- failed-kinds
-  "The kinds, `:pure` or `:external`, of the checks that returned a failure in `nodes`. A held check returned nothing:
-  what holds it failed under it."
-  [nodes]
+  "The kinds, `:pure` or `:external`, of the checks that returned a failure in `sts`. A held check returned nothing:
+  what holds it failed."
+  [sts]
   (into #{}
-        (for [{:keys [plan failed]} nodes
+        (for [{:keys [plan failed]} sts
               [n entry]             failed
               :when                 (contains? entry :returned)]
           (:kind ((:checks-by-name plan) n)))))
 
 (defn- failed-names
-  "Each check that returned a failure in `nodes`, in the order they ran, as `[label doc]`, the label naming its path
-  when it is under the root."
-  [nodes]
-  (for [{:keys [path failed order]} nodes
-        n                           order
-        :when                       (contains? (failed n) :returned)]
-    [(str n (when (seq path) (str " at " path))) (:doc (failed n))]))
+  "Each check that returned a failure in `st`, in the order they ran, as `[name doc]`."
+  [{:keys [failed order]}]
+  (for [n order :when (contains? (failed n) :returned)] [n (:doc (failed n))]))
 
-(defn- build-parsed
-  "A value of the parsed type of `plan` with the fields in `values`, holding `proof`."
-  [plan values proof]
-  ((:make-parsed plan) values proof))
-
-(defn- issue-tree
-  "The parsed root of the tree that passed: every node rebuilt with the proof, children before parents, so each parent
-  holds its children's issued values. The checks saw the same fields, in values built without it."
-  [nodes]
-  (let [issued (reduce (fn [built {:keys [path plan], :as st}]
-                         (assoc built path (build-parsed plan (child-inputs st built) parse-token)))
-                       {}
-                       nodes)]
-    (get issued [])))
+(defn- issue
+  "The parsed value of `st`, whose checks all passed: built with the proof, from the fields the checks saw."
+  [{:keys [plan values]}]
+  ((:make-parsed plan) values parse-token))
 
 (defn- invalid!
   "Throws `::invalid` for `what`, naming each failed check of `named`, `[label doc]` pairs, and its doc: the first
   five, then how many more."
-  [what named nodes data]
+  [what named sts data]
   (let [shown (take 5 named)
         more  (- (count named) (count shown))]
     (throw (ex-info (str "Invalid " what ": " (count named) (if (= 1 (count named)) " check" " checks") " failed: "
@@ -1686,7 +1414,7 @@
                          (when (pos? more) (str ", and " more " more"))
                          ". A draft parses only when every check returns exactly true. Change the draft so they pass"
                          " and parse again; (:failures (ex-data e)) has what each returned.")
-                    (merge {:type ::invalid, :rule ::rule/checks-failed, :failed-kinds (failed-kinds nodes)} data)))))
+                    (merge {:type ::invalid, :rule ::rule/checks-failed, :failed-kinds (failed-kinds sts)} data)))))
 
 ;;; ------------------------------------------------ API ------------------------------------------------
 
@@ -1699,44 +1427,43 @@
     (make-draft (assoc (read-draft draft) field v))))
 
 (defn parse-all
-  "Parse each draft and the drafts under it. Returns a vector of parsed values aligned with `drafts`, or throws
-  `::invalid` once with every failure: `:failures` maps the index of each draft that failed to its failures, shaped
-  like [[parse]]'s, and `:failed-kinds` holds the kinds of check that failed in any of them. Exceptions out of a check
-  or fetch propagate, so an external check that throws stops the call. Throws `::bad-input` when `drafts` is a single
-  draft, a map, or not a sequential collection."
+  "Parse each draft. Returns a vector of parsed values aligned with `drafts`, or throws `::invalid` once with every
+  failure: `:failures` maps the index of each draft that failed to its failures, shaped like [[parse]]'s, and
+  `:failed-kinds` holds the kinds of check that failed in any of them. Each fetch runs once for the whole call, with
+  each distinct tuple once, so parsing the parts of a whole together costs one call per fetch. Exceptions out of a
+  check or fetch propagate, so an external check that throws stops the call. Throws `::bad-input` when `drafts` is a
+  single draft, a map, or not a sequential collection."
   [drafts]
   (when (or (map? drafts) (not (sequential? drafts)))
     (throw (ex-info (str "pt/parse-all got " (describe drafts) ". It takes a vector of drafts and returns a vector of"
                          " parsed values. Pass a vector, as in (pt/parse-all [draft]), or parse one draft with"
                          " (pt/parse draft).")
                     {:type ::bad-input, :rule ::rule/parse-all-not-a-vector, :got (some-> drafts class .getName)})))
-  (let [trees    (run-all "pt/parse-all" drafts)
-        failures (into (sorted-map) (keep-indexed (fn [i nodes] (some->> (tree-failures nodes) (vector i)))) trees)]
+  (let [sts      (run-all "pt/parse-all" drafts)
+        failures (into (sorted-map) (keep-indexed (fn [i st] (some->> (not-empty (:failed st)) (vector i)))) sts)]
     (when (seq failures)
-      (let [failing (map #(nth trees %) (keys failures))]
-        (invalid! (str "drafts at indexes " (vec (keys failures)))
-                  (for [i (keys failures), [label doc] (failed-names (nth trees i))] [(str label " in draft " i) doc])
-                  (apply concat failing)
-                  {:failures failures})))
-    (mapv issue-tree trees)))
+      (invalid! (str "drafts at indexes " (vec (keys failures)))
+                (for [i (keys failures), [n doc] (failed-names (nth sts i))] [(str n " in draft " i) doc])
+                sts
+                {:failures failures}))
+    (mapv issue sts)))
 
 (defn parse
-  "Parse `draft` and the drafts under it, running every check. Returns a new value of its parsed
-  type, whose child fields hold parsed values. When a check fails, throws `::invalid` with:
+  "Parse `draft`, running every check. Returns a new value of its parsed type. When a check fails, throws `::invalid`
+  with:
 
-  - `:failures`: every failure, shaped like the tree: the root's checks at the top, and each child's under its field
-    (and index, for `children`).
-  - `:failed-kinds`: a set of `:pure` and `:external`, the kinds of check that failed anywhere in the tree. A pure
-    failure means the input is malformed; an external one means a check of the world refused it.
+  - `:failures`: every failure, by check name.
+  - `:failed-kinds`: a set of `:pure` and `:external`, the kinds of check that failed. A pure failure means the input
+    is malformed; an external one means a check of the world refused it.
   - `:draft`: the name of the draft's class.
 
   Exceptions out of a check or fetch propagate."
   [draft]
-  (let [nodes (first (run-all "pt/parse" [draft]))]
-    (when-let [failures (tree-failures nodes)]
-      (invalid! (.getSimpleName ^Class (:parses-to (:plan (peek nodes)))) (failed-names nodes) nodes
-                {:draft (.getName (class draft)), :failures failures}))
-    (issue-tree nodes)))
+  (let [[st] (run-all "pt/parse" [draft])]
+    (when (seq (:failed st))
+      (invalid! (.getSimpleName ^Class (:parses-to (:plan st))) (failed-names st) [st]
+                {:draft (.getName (class draft)), :failures (:failed st)}))
+    (issue st)))
 
 (defn- issued?
   "Whether `x` is a parsed value that holds the proof: one [[parse]] built. Its class must be one [[defparsed]]
@@ -1895,8 +1622,7 @@
   (parsed sum v))
 
 (defn draft-of
-  "A draft with the fields of `parsed`, a value [[parse]] issued. Child fields hold drafts of the children. Throws
-  `::not-parsed` for any other value."
+  "A draft with the fields of `parsed`, a value [[parse]] issued. Throws `::not-parsed` for any other value."
   [parsed]
   (let [plan (when (issued? parsed) (.get registry (class parsed)))]
     (when-not plan
@@ -1914,11 +1640,7 @@
                       {:type ::not-parsed
                        :rule (if (instance? DraftValue parsed) ::rule/draft-of-a-draft ::rule/draft-of-unissued)
                        :got  (some-> parsed class .getName)})))
-    (let [values (reduce-kv (fn [vs field {:keys [kind]}]
-                              (update vs field #(if (= :one kind) (some-> % draft-of) (mapv draft-of %))))
-                            (into {} (map (fn [f] [f (get parsed f)])) (:fields plan))
-                            (:children plan))]
-      ((:make-draft plan) values))))
+    ((:make-draft plan) (into {} (map (fn [f] [f (get parsed f)])) (:fields plan)))))
 
 ;;; ------------------------------------------------ Building and reading ------------------------------------------------
 

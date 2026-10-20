@@ -241,96 +241,6 @@
                 :failed-kinds (apply set/union (keep :failed-kinds each))
                 :failures     failures})))))
 
-;;; Trees: a node holds child nodes, and one parse covers them all
-
-(defn- v-rows [tuples] (log! [::v-row tuples]) (into {} (map (fn [[v :as t]] [t {:v v}])) tuples))
-
-(pt/defparsed Node [v kids]
-  (children kids Node)
-  (pure ::v-int "v is an integer." [v] (log! ::v-int) (int? v))
-  (pure ::kids-below "Every child's v is below this one's." [v kids] (log! ::kids-below) (every? #(< (:v %) v) kids))
-  (external ::v-known "v is not 13." [] [row ::v-row] (log! ::v-known) (not= 13 (:v row)))
-  (fetch ::v-row [v] v-rows))
-
-(def ^:private gen-tree
-  (gen/recursive-gen (fn [inner]
-                       (gen/fmap (fn [[v kids]] (->NodeDraft v kids))
-                                 (gen/tuple (gen/one-of [gen/small-integer (gen/return nil)]) (gen/vector inner 0 3))))
-                     (gen/fmap (fn [v] (->NodeDraft v [])) (gen/one-of [gen/small-integer gen/small-integer
-                                                                         (gen/return nil)]))))
-
-(def ^:private gen-ordered-tree
-  "A tree that passes every pure check: each child's v below its parent's."
-  (letfn [(tree [depth v]
-            (gen/bind (gen/vector (gen/choose 1 4) 0 (if (zero? depth) 0 3))
-                      (fn [gaps]
-                        (gen/fmap (fn [kids] (->NodeDraft v (vec kids)))
-                                  (apply gen/tuple (map #(tree (dec depth) (- v %)) gaps))))))]
-    (gen/bind (gen/tuple (gen/choose 0 3) (gen/choose 0 30)) (fn [[depth v]] (tree depth v)))))
-
-(defn- nodes-of [tree] (tree-seq #(seq (:kids %)) :kids tree))
-
-(defn- tree-model
-  "Whether the tree parses, from first principles."
-  [node]
-  (and (int? (:v node))
-       (every? tree-model (:kids node))
-       (every? #(< (:v %) (:v node)) (:kids node))
-       (not-any? #(= 13 (:v %)) (nodes-of node))))
-
-(defspec a-tree-parses-exactly-when-every-node-passes 300
-  (prop/for-all [tree (gen/one-of [gen-tree gen-ordered-tree])]
-    (= (tree-model tree) (contains? (outcome #(pt/parse tree)) :ok))))
-
-(defspec nothing-in-a-tree-touches-the-world-until-every-pure-check-passes 300
-  (prop/for-all [tree (gen/one-of [gen-tree gen-ordered-tree])]
-    (reset! ran [])
-    (let [{:keys [failures]} (outcome #(pt/parse tree))
-          pure-failed?       (not (every? #(and (int? (:v %)) (every? (fn [k] (and (int? (:v k)) (< (:v k) (:v %))))
-                                                                       (:kids %)))
-                                          (nodes-of tree)))]
-      (or (not pure-failed?)
-          (and (some? failures)
-               (not-any? #(#{::v-known ::v-row} (if (vector? %) (first %) %)) @ran))))))
-
-(defspec a-parsed-tree-holds-parsed-nodes-and-fetches-once 300
-  (prop/for-all [tree gen-ordered-tree]
-    (reset! ran [])
-    (let [result (outcome #(pt/parse tree))
-          calls  (filterv #(and (vector? %) (= ::v-row (first %))) @ran)
-          vs     (into [] (comp (map (fn [n] [(:v n)])) (distinct)) (nodes-of tree))]
-      (and (= [[::v-row (sort vs)]] (mapv (fn [[n ts]] [n (sort ts)]) calls))
-           (if (:ok result)
-             (let [parsed (pt/parse tree)]
-               (and (every? #(pt/parsed? Node %) (nodes-of parsed))
-                    (= (map :v (nodes-of tree)) (map :v (nodes-of parsed)))))
-             (some #(= 13 (:v %)) (nodes-of tree)))))))
-
-(defn- fresh-tree
-  "The same tree, every node a new draft."
-  [node]
-  (->NodeDraft (:v node) (mapv fresh-tree (:kids node))))
-
-(defspec parse-all-agrees-with-parse-on-trees 200
-  (prop/for-all [trees (gen/vector (gen/one-of [gen-tree gen-ordered-tree]) 0 5)]
-    (let [each     (mapv #(outcome (fn [] (pt/parse (fresh-tree %)))) trees)
-          all      (outcome #(pt/parse-all (mapv fresh-tree trees)))
-          failures (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
-      (if (empty? failures)
-        (= all {:ok (mapv :ok each)})
-        (= all {:type         ::pt/invalid
-                :failed-kinds (apply set/union (keep :failed-kinds each))
-                :failures     failures})))))
-
-(defspec draft-of-round-trips-a-tree 200
-  (prop/for-all [tree gen-ordered-tree]
-    (let [result (outcome #(pt/parse tree))]
-      (or (not (:ok result))
-          (let [parsed (pt/parse tree)
-                again  (pt/parse (pt/draft-of parsed))]
-            (and (= (map :v (nodes-of parsed)) (map :v (nodes-of again)))
-                 (every? #(pt/parsed? Node %) (nodes-of again))))))))
-
 ;;; Sums
 
 (pt/defsum TripleOrPair [Triple PosPair])
@@ -346,7 +256,7 @@
                (gen/fmap (fn [a] [:parsed (->PosPairDraft a)]) (gen/fmap inc gen/nat))
                (gen/fmap (fn [d] [:forged d]) gen-any-draft)
                (gen/fmap (fn [a] [:draft (->PosPairDraft a)]) gen/small-integer)
-               (gen/fmap (fn [v] [:other (->NodeDraft v [])]) gen/small-integer)]))
+               (gen/fmap (fn [a] [:other (->NegPairDraft a)]) (gen/fmap #(- -1 %) gen/nat))]))
 
 (defspec match-runs-only-on-parsed-members 300
   (prop/for-all [[kind d] gen-candidate]
@@ -354,7 +264,7 @@
                    :parsed (pt/parse d)
                    :forged (Triple. (:user-id d) (:a d) (:b d) (:c d) nil)
                    :draft  d
-                   :other  (try (pt/parse d) (catch clojure.lang.ExceptionInfo _ d)))
+                   :other  (pt/parse d))
           result (try (which x) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))]
       (if (= :parsed kind)
         (= [(if (instance? Triple x) :triple :pair) (:a x)] result)

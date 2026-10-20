@@ -45,21 +45,12 @@
            ["a fetch over a field the draft does not have"
             '(pt/defparsed A [a] (fetch ::f [b] identity))
             #"fields of the draft"]
-           ["a fetch that reads a child field"
-            '(pt/defparsed A [a kids] (children kids Point) (fetch ::f [a kids] identity))
-            #"the fetch :parsed-types.defparsed-test/f reads the child field kids\. A fetch runs before the children's external checks"]
-           ["a child field that is not a field"
-            '(pt/defparsed A [a] (children b A))
-            #"child field must be a field"]
            ["a name used twice"
             '(pt/defparsed A [a] (pure ::c "d" [a] true) (pure ::c "d" [a] true))
             #"used twice"]
            ["a field named twice"
             '(pt/defparsed A [a a])
             #"field is named twice"]
-           ["a field declared as a child twice"
-            '(pt/defparsed A [a] (child a A) (children a A))
-            #"declared as a child twice"]
            ["a fetch bound to a field's name"
             '(pt/defparsed A [a] (external ::c "d" [] [a ::f] true) (fetch ::f [a] identity))
             #"fetch is bound to a field's name: \[a\]"]
@@ -74,7 +65,10 @@
             #"checks take no options"]
            ["an unknown clause"
             '(pt/defparsed A [a] (check ::c "d" [a] true))
-            #"A clause is \(pure"]]]
+            #"A clause is \(pure"]
+           ["a children clause, which does not exist: a field holds parsed values"
+            '(pt/defparsed A [kids] (children kids Point))
+            #"children does not start a clause"]]]
     (testing label
       (is (re-find re (str (compile-error form))))))
   (testing "a compile error is a ::pt/bad-declaration"
@@ -141,10 +135,7 @@
     (doseq [[label form re]
             [["a fetch that is not a fn"
               '(pt/defparsed Loaded [a] (external ::c "d" [] [r ::f] (some? r)) (fetch ::f [a] 42))
-              #"the fetch :parsed-types.defparsed-test/f is 42, not a fn"]
-             ["a child type that is not a parsed type"
-              '(pt/defparsed Loaded [a] (child a String))
-              #"the child field :a holds java.lang.String, which is not a type defined with defparsed"]]]
+              #"the fetch :parsed-types.defparsed-test/f is 42, not a fn"]]]
       (testing label
         (let [[data message] (load-error form)]
           (is (= ::pt/bad-declaration (:type data)))
@@ -154,8 +145,7 @@
     (let [cls     (resolve-here-class 'Kept)
           factory (resolve-here '->KeptDraft)
           old     (pt/parse (factory 1))]
-      (doseq [[label form] [["a fetch that is not a fn" '(pt/defparsed Kept [a] (fetch ::f [a] 42))]
-                            ["a child type that is not a parsed type" '(pt/defparsed Kept [a] (child a String))]]]
+      (doseq [[label form] [["a fetch that is not a fn" '(pt/defparsed Kept [a] (fetch ::f [a] 42))]]]
         (testing label
           (is (= ::pt/bad-declaration (:type (first (load-error form)))))
           (is (identical? cls (resolve-here-class 'Kept)))
@@ -168,9 +158,7 @@
     (let [draft ((resolve-here '->BrokenDraft) 1)]
       (doseq [[label thunk] [["parse" #(pt/parse draft)]
                              ["parsed" #(pt/parsed (resolve-here-class 'Broken) nil)]
-                             ["draft" #(eval-here '(pt/draft Broken {:a 1}))]
-                             ["a child field" #(do (eval-here '(pt/defparsed BrokenHolder [b] (child b Kept)))
-                                                   (pt/parse ((resolve-here '->BrokenHolderDraft) draft)))]]]
+                             ["draft" #(eval-here '(pt/draft Broken {:a 1}))]]]
         (testing label
           (let [e (thrown thunk)]
             (is (= {:type ::pt/bad-declaration, :rule :parsed-types.rule/type-not-loaded}
@@ -258,28 +246,16 @@
 
 ;;; REPL reloads
 
-(deftest re-evaluating-a-child-type-test
+(deftest re-evaluating-a-type-test
   (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
-  (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
   (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
   (let [old-kid   ((resolve-here '->KidDraft) 1)
         old-value (pt/parse old-kid)
-        parent    ((resolve-here '->ParentDraft) [old-kid])
         sink      (resolve-here 'kid-sink)]
-    (is (some? (pt/parse parent)))
     (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
     (let [new-kid ((resolve-here '->KidDraft) 2)]
       (is (not= (class old-kid) (class new-kid)) "the reload made a new class")
-      (testing "a parent evaluated before the reload says to re-evaluate it, when it gets a draft of the new class"
-        (let [e (thrown #(pt/parse ((resolve-here '->ParentDraft) [new-kid])))]
-          (is (= {:type ::pt/stale-type, :rule :parsed-types.rule/stale-child-type, :field :kids}
-                 (select-keys e [:type :rule :field])))
-          (is (re-find #"ParentDraft: the child field :kids holds a KidDraft of parsed_types.defparsed_test.Kid, but the defparsed Parent in parsed-types.defparsed-test was evaluated against an older"
-                       (:message e)))
-          (is (re-find #"Re-evaluate the defparsed Parent, or reload its namespace, as in \(require 'parsed-types.defparsed-test :reload\)"
-                       (:message e)))))
-      (testing "old drafts still parse together, with the plans they were defined with, as records would"
-        (is (some? (pt/parse parent)))
+      (testing "old drafts still parse, with the plans they were defined with, as records would"
         (is (= (class old-value) (class (pt/parse old-kid)))))
       (testing "a sink compiled before the reload says to re-evaluate the code that calls it"
         (let [e (thrown #(sink (pt/parse new-kid)))]
@@ -288,33 +264,22 @@
                        (:message e)))
           (is (re-find #"\(clojure.tools.namespace.repl/refresh\)" (:message e))))
         (is (identical? old-value (sink old-value)) "and still takes the values of its own class"))
-      (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
       (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
-      (testing "once re-evaluated, the parent and the sink take the new class"
-        (is (= [{:n 2}] (map #(into {} %) (:kids (pt/parse ((resolve-here '->ParentDraft) [new-kid]))))))
+      (testing "once re-evaluated, the sink takes the new class"
         (is (= {:n 2} (into {} ((resolve-here 'kid-sink) (pt/parse new-kid))))))
-      (testing "and say to build again what was built before the reload"
-        (let [e (thrown #(pt/parse ((resolve-here '->ParentDraft) [old-kid])))]
+      (testing "and says to build again what was built before the reload"
+        (let [e (thrown #((resolve-here 'kid-sink) old-value))]
           (is (= :parsed-types.rule/stale-value (:rule e)))
-          (is (re-find #"ParentDraft: the child field :kids got a KidDraft of parsed_types.defparsed_test.Kid from before the defparsed Kid in parsed-types.defparsed-test was re-evaluated"
-                       (:message e)))
           (is (re-find #"\(pt/parse \(->KidDraft \.\.\.\)\)" (:message e))))
-        (is (= :parsed-types.rule/stale-value (:rule (thrown #((resolve-here 'kid-sink) old-value)))))
         (is (= :parsed-types.rule/stale-value (:rule (thrown #(pt/parsed? (ns-resolve 'parsed-types.defparsed-test 'Kid) old-value)))))))))
 
 (deftest re-evaluating-a-member-of-a-sum-test
   (eval-here '(pt/defparsed Member [n]))
   (eval-here '(pt/defparsed NonMember [n]))
   (eval-here '(pt/defsum Members [Member NonMember]))
-  (eval-here '(pt/defparsed Holder [m] (child m Members)))
   (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
   (eval-here '(pt/defparsed Member [n]))
   (let [member (pt/parse ((resolve-here '->MemberDraft) 1))]
-    (testing "a holder evaluated against the sum before the reload names the sum and the holder to re-evaluate"
-      (let [e (thrown #(pt/parse ((resolve-here '->HolderDraft) ((resolve-here '->MemberDraft) 1))))]
-        (is (= :parsed-types.rule/stale-child-type (:rule e)))
-        (is (re-find #"through the sum Members\. .*Re-evaluate the defsum Members, then the defparsed Holder"
-                     (:message e)))))
     (testing "the sum names itself, and a match compiled before the reload names its namespace"
       (is (re-find #"Re-evaluate the defsum Members, then the namespace that calls pt/parsed\?"
                    (:message (thrown #(pt/parsed? (resolve-here 'Members) member)))))
@@ -328,10 +293,8 @@
         (is (= {:type ::pt/stale-type, :rule :parsed-types.rule/stale-sum} (select-keys e [:type :rule])))
         (is (re-find #"Re-evaluate the defsum Members after the defparsed Member, then this match" (:message e)))))
     (eval-here '(pt/defsum Members [Member NonMember]))
-    (eval-here '(pt/defparsed Holder [m] (child m Members)))
     (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
-    (testing "once the sum, the holder and the match are re-evaluated, they take the new class"
-      (is (= {:n 1} (into {} (:m (pt/parse ((resolve-here '->HolderDraft) ((resolve-here '->MemberDraft) 1)))))))
+    (testing "once the sum and the match are re-evaluated, they take the new class"
       (is (pt/parsed? (resolve-here 'Members) member))
       (is (= [:member 1] ((resolve-here 'which-member) member))))))
 
@@ -351,20 +314,8 @@
 (deftest every-reload-command-applies-test
   (let [nss   (fn [& suffixes] (map #(symbol (str "parsed-types.stale-fixture." %)) suffixes))
         debit #((fx "types" '->DebitDraft) 5)]
-    (apply require (concat (nss "types" "sum" "parent" "app") [:reload]))
+    (apply require (concat (nss "types" "sum" "app") [:reload]))
     (require (first (nss "types")) :reload)
-    (testing "a parent of a type of another namespace: reload the parent's namespace"
-      (let [e (thrown #(pt/parse ((fx "parent" '->OneDraft) (debit))))]
-        (is (= :parsed-types.rule/stale-child-type (:rule e)))
-        (is (= "(require 'parsed-types.stale-fixture.parent :reload)" (apply-fix! e)))
-        (is (not (re-find #"Re-evaluate the defparsed One" (:message e))) "re-evaluating it alone keeps the old import")
-        (is (= 5 (:amount (:debit (pt/parse ((fx "parent" '->OneDraft) (debit)))))))))
-    (testing "a parent of a sum of another namespace: reload the sum's namespace, then the parent's"
-      (let [e (thrown #(pt/parse ((fx "parent" '->EntryDraft) [(debit)])))]
-        (is (= :parsed-types.rule/stale-child-type (:rule e)))
-        (is (= "(require 'parsed-types.stale-fixture.sum 'parsed-types.stale-fixture.parent :reload)" (apply-fix! e)))
-        (is (not (re-find #"or reload its namespace" (:message e))) "no parent-only fix")
-        (is (= [5] (map :amount (:lines (pt/parse ((fx "parent" '->EntryDraft) [(debit)]))))))))
     (testing "a match compiled before the reload: reload the sum's namespace, then the match's"
       (let [e (thrown #((fx "app" 'transact) (pt/parse (debit))))]
         (is (= :parsed-types.rule/stale-match (:rule e)))
@@ -402,10 +353,9 @@
     (testing "a sum and a match defined before the reload still take the value"
       (is (pt/parsed? (resolve-here 'RlSum) parsed))
       (is (= [:line 1] ((resolve-here 'rl-match) parsed))))
-    (testing "a type defined after the reload holds children of a type defined before it"
-      (eval-here '(pt/defparsed RlEntry [lines] (children lines RlSum)))
-      (is (= [1] (map :n (:lines (pt/parse ((resolve-here '->RlEntryDraft) [((resolve-here '->RlLineDraft) 1)]))))))
-      (is (pt/parsed? line-type (first (:lines (pt/parse ((resolve-here '->RlEntryDraft) [good])))))))))
+    (testing "a type defined after the reload holds a value parsed before it"
+      (eval-here '(pt/defparsed RlEntry [lines]))
+      (is (identical? parsed (first (:lines (pt/parse ((resolve-here '->RlEntryDraft) [parsed])))))))))
 
 (deftest a-hand-written-class-with-the-same-name-is-refused-test
   (eval-here '(pt/defparsed Genuine [n]))
@@ -519,13 +469,6 @@
     (testing (str field)
       (is (re-find #"special form|simple symbols"
                    (str (compile-error (list 'pt/defparsed 'Special [field]))))))))
-
-(deftest reserved-check-names-test
-  (testing "parsed-types.child names belong to the child-field checks"
-    (is (re-find #"reserved for child-field checks"
-                 (str (compile-error '(pt/defparsed R [kids]
-                                        (children kids Point)
-                                        (pure :parsed-types.child/kids "d" [kids] false))))))))
 
 (def ^:private order (atom []))
 

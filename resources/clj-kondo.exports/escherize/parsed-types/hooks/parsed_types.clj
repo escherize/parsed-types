@@ -23,9 +23,6 @@
                 fetch
                 (let [[_ _ f] args] f)
 
-                (child children)
-                (second args)
-
                 nil))]))))
 
 (defmacro match
