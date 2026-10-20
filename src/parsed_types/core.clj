@@ -1290,14 +1290,15 @@
         ["java.time.InstantSource"]))
 
 (defn- children-or-refusal
-  "What the walk in [[not-immutable]] does with `v`, at `path`: `[:refuse rule what fix]`, or `[:walk children]`, the
-  values inside it to walk, each as `[value path]`, its metadata first."
-  [v path]
+  "What the walk in [[not-immutable]] does with `v`, at `path`: `[:refuse rule what fix]`, or `[:walk frames]`, a
+  frame to visit for each value inside it, its metadata first, each with `acc`, which collects `v`'s height."
+  [v path acc]
   (let [c        (class v)
         refuse   (fn [what fix] [:refuse ::rule/mutable-value what fix])
-        walk     (fn [items] [:walk (cond->> items
-                                      (and (instance? clojure.lang.IObj v) (some? (meta v)))
-                                      (cons [(meta v) (conj path '<meta>)]))])]
+        frame    (fn [x p] [:visit x p acc])
+        walk     (fn [frames] [:walk (cond->> frames
+                                       (and (instance? clojure.lang.IObj v) (some? (meta v)))
+                                       (cons (frame (meta v) (conj path '<meta>))))])]
     (cond
       (contains? immutable-classes c) (walk nil)
       (class? v)                      (walk nil)
@@ -1314,13 +1315,13 @@
               "Use (sorted-map ...) or (sorted-set ...), which sort with compare, or a plain map or set.")
 
       (instance? clojure.lang.IPersistentMap v)
-      (walk (mapcat (fn [[k x]] [[k (conj path '<key>)] [x (conj path k)]]) v))
+      (walk (mapcat (fn [[k x]] [(frame k (conj path '<key>)) (frame x (conj path k))]) v))
 
       (or (instance? clojure.lang.IPersistentVector v) (list? v) (instance? clojure.lang.PersistentQueue v))
-      (walk (map-indexed (fn [i x] [x (conj path i)]) v))
+      (walk (map-indexed (fn [i x] (frame x (conj path i))) v))
 
       (instance? clojure.lang.IPersistentSet v)
-      (walk (map (fn [x] [x (conj path '<element>)]) v))
+      (walk (map (fn [x] (frame x (conj path '<element>))) v))
 
       ;; not (vec a): vec of an Object[] of 32 or fewer elements shares the array
       (.isArray c)                        (refuse "a Java array" "Copy it into a vector, as in (into [] a).")
@@ -1372,7 +1373,7 @@
               (recur stack))
             (let [path  a
                   depth (count path)
-                  known (when (some? x) (.get heights x))]
+                  known (when (instance? clojure.lang.IObj x) (.get heights x))]
               (cond
                 (< max-value-depth depth)
                 [::rule/value-too-deep path (str "a value nested deeper than " max-value-depth " levels")
@@ -1380,23 +1381,22 @@
                       " (pr-str v).")
                  (.getName (class x))]
 
-                (nil? x)
+                ;; the common leaves first, with no lookup: none holds a value, or has metadata
+                (or (nil? x) (and (contains? immutable-classes (class x)) (not (instance? clojure.lang.IObj x))))
                 (do (bump! parent 0) (recur stack))
 
                 (and known (<= (+ depth (long known)) max-value-depth))
                 (do (bump! parent known) (recur stack))
 
                 :else
-                (let [[result & more] (children-or-refusal x path)]
+                (let [acc             (long-array 1)
+                      [result & more] (children-or-refusal x path acc)]
                   (if (= :refuse result)
                     (let [[rule what fix] more] [rule path what fix (.getName (class x))])
-                    (let [children (first more)]
-                      (if (empty? children)
+                    (let [frames (first more)]
+                      (if (empty? frames)
                         (do (bump! parent 0) (recur stack))
-                        (let [acc (long-array 1)]
-                          (recur (into (conj stack [:exit x acc parent])
-                                       (map (fn [[cv cp]] [:visit cv cp acc]))
-                                       (reverse children))))))))))))))))
+                        (recur (into (conj stack [:exit x acc parent]) (reverse frames)))))))))))))))
 
 (defn- refuse-mutable!
   "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable:
