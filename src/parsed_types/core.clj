@@ -402,7 +402,7 @@
         _       (when-not (sum? s)
                   (refuse! ::rule/match-not-a-sum
                            (str "match: " sum-name " is not a sum defined with defsum. match branches on the members"
-                                " of a sum. Name one, or define it, as in (pt/defsum " sum-name " [Debit Credit]).")
+                                " of a sum. Name a sum, or define one, as in (pt/defsum Transaction [Debit Credit]).")
                            {}))
         _       (when-not (zero? (mod (count clauses) 3))
                   (refuse! ::rule/match-clause-shape
@@ -489,8 +489,8 @@
                           " its fields. Make it (external ...), or remove the fetch bindings.")))
     (when-not (and (vector? args) (every? symbol? args))
       (syntax-error! form ::rule/check-no-field-vector
-                     (str what " has " (pr-str args) " where a check needs a vector of the fields it reads. Write it"
-                          " after the doc string, like [" (first fields) "].")))
+                     (str what " has " (pr-str args) ", not a vector of the fields it reads, which a check needs."
+                          " Write it after the doc string, like [" (first fields) "].")))
     (when-let [unknown (seq (remove (set fields) args))]
       (syntax-error! form ::rule/check-reads-unknown-field
                      (str what " reads fields the draft does not have: " (vec unknown) "."
@@ -501,8 +501,10 @@
     (when-not (every? #(and (= 2 (count %)) (symbol? (first %)) (contains? fetch-names (second %))) pairs)
       (syntax-error! form ::rule/check-bad-fetch-binding
                      (str what " binds " (pr-str binds) ". A check's fetches are pairs of a local and a fetch declared"
-                          " in this defparsed. Write them like [account ::account], naming one of "
-                          (vec (sort fetch-names)) ".")))
+                          " in this defparsed. Write them like [account ::account], "
+                          (if (seq fetch-names)
+                            (str "naming one of " (vec (sort fetch-names)) ".")
+                            "and declare the fetch, as in (fetch ::account [account-id] accounts-by-id)."))))
     (when-let [twice (seq (for [[l c] (frequencies (map first pairs)) :when (< 1 c)] l))]
       (syntax-error! form ::rule/check-two-fetches-one-local
                      (str what " binds two fetches to one local: " (vec twice) ". Give each fetch its own local.")))
@@ -596,7 +598,8 @@
                           (for [[head field type :as c] (concat (get by-head 'child) (get by-head 'children))]
                             (do (when-not (contains? (set fields) field)
                                   (syntax-error! c ::rule/child-not-a-field
-                                                 (str (pr-str field) ": a child field must be a field of the draft."
+                                                 (str "the child field " (pr-str field) " is not a field of the"
+                                                      " draft, and a child field must be a field of the draft."
                                                       (did-you-mean field fields) " Name one of " fields ".")))
                                 [(keyword field) {:kind (if (= 'child head) :one :many), :type type}])))
         child-heads (map second (concat (get by-head 'child) (get by-head 'children)))
@@ -896,7 +899,7 @@
       (let [_    (when (< max-depth depth)
                    (too-big! ::rule/tree-too-deep
                              (str "The tree under a " (.getSimpleName (class root)) " is deeper than " max-depth
-                                  " levels, at " path ", counting the root. A tree is walked with a bounded stack."
+                                  " levels, counting the root. A tree is walked with a bounded stack."
                                   " Parse a shallower tree, or split it and parse the parts.")
                              {:path path}))
             _    (when (<= max-nodes (count pre))

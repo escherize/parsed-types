@@ -85,7 +85,7 @@
    [:field-reserved-for-proof (compiling '(pt/defparsed E1 [parse-proof])) "[parse-proof]" "as in proof"]
    ;; sums and match
    [:bad-sum-members (compiling '(pt/defsum Bad [Debit Debit])) "[Debit Debit]" "(defsum Bad [Debit Credit])"]
-   [:match-not-a-sum (compiling '(fn [x] (pt/match Debit x Debit d 1))) "Debit is not a sum" "(pt/defsum Debit"]
+   [:match-not-a-sum (compiling '(fn [x] (pt/match Debit x Debit d 1))) "Debit is not a sum" "(pt/defsum Transaction [Debit Credit])"]
    [:match-clause-shape (compiling '(fn [x] (pt/match Txn x Debit d))) "2 clause forms" "Debit d (f d)"]
    [:match-not-a-type (compiling '(fn [x] (pt/match Txn x nope d 1 Credit c 2))) "nope is not a type"
     "[Debit Credit]"]
@@ -108,13 +108,14 @@
     "needs a doc string" "\"The amount is positive.\""]
    [:pure-check-fetches (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a] [r ::f] true) (fetch ::f [a] rows)))
     "binds fetches [r :parsed-types.errors-test/f]" "Make it (external ...)"]
-   [:check-no-field-vector (compiling '(pt/defparsed E1 [a] (pure ::c "d" a true))) "has a where" "like [a]"]
+   [:check-no-field-vector (compiling '(pt/defparsed E1 [a] (pure ::c "d" a true))) "has a, not a vector of the fields it reads" "like [a]"]
    [:check-reads-unknown-field (compiling '(pt/defparsed E1 [amount] (pure ::c "d" [amont] true))) "[amont]"
     "Did you mean amount?" "[amount]"]
    [:check-reads-field-twice (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a a] true))) "reads a field twice: [a]"
     "Name each field once"]
    [:check-bad-fetch-binding (compiling '(pt/defparsed E1 [a] (external ::c "d" [a] [x ::nope] true)))
-    "binds [x :parsed-types.errors-test/nope]" "[account ::account]"]
+    "binds [x :parsed-types.errors-test/nope]" "[account ::account]"
+    "(fetch ::account [account-id] accounts-by-id)"]
    [:check-two-fetches-one-local (compiling '(pt/defparsed E1 [a] (external ::c "d" [] [r ::f r ::g] true)
                                                (fetch ::f [a] rows) (fetch ::g [a] rows)))
     "two fetches to one local: [r]" "Give each fetch its own local"]
@@ -127,7 +128,7 @@
    [:fetch-bad-fields (compiling '(pt/defparsed E1 [account-id] (fetch ::f [acount-id] rows))) "reads [acount-id]"
     "Did you mean account-id?" "[account-id]"]
    [:fetch-no-fn (compiling '(pt/defparsed E1 [a] (fetch ::f [a]))) "has no function" "rows-by-id"]
-   [:child-not-a-field (compiling '(pt/defparsed E1 [kids] (children kid Debit))) "kid: a child field"
+   [:child-not-a-field (compiling '(pt/defparsed E1 [kids] (children kid Debit))) "the child field kid is not a field of the draft"
     "Did you mean kids?"]
    [:child-declared-twice (compiling '(pt/defparsed E1 [a] (child a Debit) (children a Debit)))
     "declared as a child twice: [a]" "Declare it once"]
