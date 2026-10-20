@@ -447,8 +447,8 @@
            ~@(mapcat (fn [[t b e]]
                        [`(parsed? ~t ~v) `(let [~b ~v] ~e)])
                      triples)
-           ;; `v` is no member, so this throws
-           :else (parsed ~sum-name ~v))))))
+           ;; through `var`, because it is private: `v` is no member this match handles, so this throws
+           :else ((var match-fell-through!) ~sum-name '~(mapv #(symbol (.getSimpleName ^Class %)) types) ~v))))))
 
 ;;; ------------------------------------------------ defparsed ------------------------------------------------
 
@@ -1268,6 +1268,23 @@
                        :expected (if (sum? parsed-type) (str (:name parsed-type)) (.getName ^Class parsed-type))
                        :got      (some-> x class .getName)}))))
   x)
+
+(defn- match-fell-through!
+  "Throws `::not-parsed` for `v`, which no clause of a [[match]] on `sum` took. `handled` names the member types the
+  match handles. Called by the expansion of [[match]]."
+  [sum handled v]
+  (when (parsed? sum v)
+    (let [got (symbol (.getSimpleName (class v)))]
+      (throw (ex-info (str "match on " (:name sum) " got a parsed " got ", but this match was compiled before " got
+                           " joined the sum, and handles only " handled ". A match handles every member of its sum."
+                           " Re-evaluate the match, or reload its namespace, so that it must handle " got ".")
+                      {:type     ::not-parsed
+                       :rule     ::rule/match-compiled-before-member
+                       :expected (str (:name sum))
+                       :handled  handled
+                       :got      (.getName (class v))}))))
+  ;; not parsed as any member, so this throws
+  (parsed sum v))
 
 (defn draft-of
   "A draft with the fields of `parsed`, a value [[parse]] issued. Child fields hold drafts of the children. Throws

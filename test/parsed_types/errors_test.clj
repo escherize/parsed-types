@@ -181,6 +181,11 @@
    [:got-other-type #(pt/parsed Debit (pt/parse (->CreditDraft 1))) "got a Credit" "(pt/parse (->DebitDraft ...))"]
    [:draft-of-a-draft #(pt/draft-of draft) "got a DebitDraft, which is already a draft" "Use the draft as it is"]
    [:draft-of-unissued #(pt/draft-of (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue" "(->DebitDraft ...)"]
+   [:match-compiled-before-member
+    ;; what a match on Growing compiled when it held only Debit does once Credit joins
+    #((var parsed-types.core/match-fell-through!) (pt/sum 'Growing [Debit Credit]) '[Debit]
+      (pt/parse (->CreditDraft 1)))
+    "got a parsed Credit, but this match was compiled before Credit joined the sum" "Re-evaluate the match"]
    ;; pt/draft
    [:draft-from-non-map #(pt/draft Debit (identity 5)) "pt/draft got a Long to build a DebitDraft" "{:user-id ...}"]
    [:draft-unknown-keys #(pt/draft Debit (identity {:amont 1})) "DebitDraft has no fields [:amont]"

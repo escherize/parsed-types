@@ -286,6 +286,23 @@
       (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse (->DebitDraft 5))))))
       (is (= (.getName ^Class real-type) (.getName ^Class (eval-in 'pt-owner.my-app.bank 'Debit)))))))
 
+(deftest a-match-compiled-before-a-member-joined-throws-test
+  (eval-here '(pt/defparsed MA [x]))
+  (eval-here '(pt/defparsed MB [x]))
+  (eval-here '(pt/defparsed MC [x]))
+  (eval-here '(pt/defsum Grows [MA MB]))
+  (eval-here '(defn- grows-match [v] (pt/match Grows v MA a [:a a] MB b [:b b])))
+  (eval-here '(pt/defsum Grows [MA MB MC]))
+  (let [e (try ((resolve-here 'grows-match) (pt/parse ((resolve-here '->MCDraft) 1))) nil
+               (catch clojure.lang.ExceptionInfo e e))]
+    (is (= {:type ::pt/not-parsed, :rule :parsed-types.rule/match-compiled-before-member, :handled '[MA MB]}
+           (select-keys (ex-data e) [:type :rule :handled])))
+    (is (re-find #"compiled before MC joined the sum.*Re-evaluate the match" (ex-message e))))
+  (testing "values that are not parsed still get the sink's own error"
+    (is (= :parsed-types.rule/got-draft
+           (:rule (try ((resolve-here 'grows-match) ((resolve-here '->MCDraft) 1)) nil
+                       (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
+
 ;;; Field names
 
 (pt/defparsed Awkward [count map set str seq into contains? or when keys]
