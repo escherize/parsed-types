@@ -275,6 +275,28 @@
     (is (= {:a 1} (into {} (pt/parse (pt/draft Closure {:a 1})))))
     (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (pt/draft Closure {:a 2}))))))))
 
+(defn- rows-by-id [tuples] (into {} (map (fn [t] [t {:id (first t)}])) tuples))
+
+;; public: only the quoted form below names it
+(def not-a-fn 42)
+
+(deftest a-fetch-may-be-a-var-test
+  (binding [*ns* (the-ns 'parsed-types.core-test)]
+    (eval '(pt/defparsed ByVar [id]
+             (external ::found "The row exists." [] [row ::row] (some? row))
+             (fetch ::row [id] #'rows-by-id))))
+  (let [parse-one #(pt/parse (binding [*ns* (the-ns 'parsed-types.core-test)] (eval '(pt/draft ByVar {:id 1}))))]
+    (testing "the var is called through, so with-redefs stubs the fetch"
+      (is (some? (parse-one)))
+      (with-redefs [rows-by-id (fn [tuples] (into {} (map (fn [t] [t nil])) tuples))]
+        (is (= #{:external} (:failed-kinds (thrown-data parse-one)))))))
+  (testing "a var that holds anything but a fn is refused when the defparsed loads"
+    (let [e (try (binding [*ns* (the-ns 'parsed-types.core-test)]
+                   (eval '(pt/defparsed ByNumber [id] (fetch ::row [id] #'not-a-fn))))
+                 nil
+                 (catch Exception e e))]
+      (is (= :parsed-types.rule/fetch-not-fn (:rule (ex-data (or (ex-cause e) e))))))))
+
 (deftest empty-throws-test
   (let [real  (pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"}))
         draft (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"})]

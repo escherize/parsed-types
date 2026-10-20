@@ -937,7 +937,8 @@
   - `(external name doc [field ...] [local fetch-name ...]? body ...)`: a check over the named fields and the
     results of the named fetches.
   - `(fetch name [field ...] f)`: `f` takes every distinct tuple of the fields, and returns a map from each tuple to
-    what it fetched.
+    what it fetched. `f` is a fn, or a var that holds one, as in `#'rows-by-id`: a var is called through, so a test
+    can stub it with `with-redefs`.
 
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
 
@@ -1042,16 +1043,17 @@
 
 (defn- stage!
   "Check what [[defparsed]] cannot see when it expands, only when it loads, before it defines any class: a fetch that
-  is not a fn. Throws `::bad-declaration`, so a `defparsed` that fails here changes nothing. Then keep `fetch-fns` for
+  is not a fn, or a var that holds one. A var is called through, so `with-redefs` on it reaches the fetch. Throws `::bad-declaration`, so a `defparsed` that fails here changes nothing. Then keep `fetch-fns` for
   [[register!]]. `fetches` holds each fetch's `:name` and `:reads`, in the order of `fetch-fns`. Called by the
   expansion of [[defparsed]]."
   [parsed-class-name draft-class-name fetches fetch-fns]
   (doseq [[{n :name, :keys [reads]} f] (map vector fetches fetch-fns)]
-    (when-not (fn? f)
+    (when-not (or (fn? f) (and (var? f) (fn? @f)))
       (bad-declaration! draft-class-name ::rule/fetch-not-fn
                         (str "the fetch " n " is " (pr-str f) ", not a fn, in (fetch " n " " (mapv symbol reads) " "
                              (pr-str f) "). A fetch is called with the tuples it fetches. Write a fn of the tuples"
-                             " it fetches, as in (fetch " n " " (mapv symbol reads) " rows-by-id).")
+                             " it fetches, or a var that holds one, as in (fetch " n " " (mapv symbol reads)
+                             " rows-by-id) or (fetch " n " " (mapv symbol reads) " #'rows-by-id).")
                         {:name n, :got (some-> f class .getName)})))
   (.put pending parsed-class-name fetch-fns)
   nil)
