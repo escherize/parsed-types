@@ -454,6 +454,19 @@
     (is (re-find #"at \[0 0 0 0 0 0 0 0\] and 12 levels more holds an atom" msg))
     (is (= 20 (count (:path (refusal nested)))) "the ex-data keeps the whole path")))
 
+(deftest nil-past-the-depth-limit-is-refused-test
+  (testing "nil is a leaf, but one nested past the limit is too deep, not a NullPointerException"
+    (let [data (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (nth (iterate vector nil) 1001)})))]
+      (is (= {:rule :parsed-types.rule/value-too-deep, :got "nil"} (select-keys data [:rule :got]))))))
+
+(deftype HandMade [] parsed_types.core.ParsedValue (issuedWith [_ _] false))
+
+(deftest a-hand-made-parsed-value-in-a-field-names-no-draft-test
+  (let [message (try (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (->HandMade)})) nil
+                     (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+    (is (str/includes? message "A class that only implements ParsedValue is never parsed"))
+    (is (not (str/includes? message "pt/draft HandMade")))))
+
 (defn- on-daemon
   "What `f` returns on a daemon thread within `ms`, or ::timed-out, so a walk that does not finish fails the test and
   does not hold the JVM open."

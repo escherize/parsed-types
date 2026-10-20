@@ -136,7 +136,8 @@ Declarations (`::bad-declaration`):
 
 - `name-not-symbol`: a type or sum named by anything but a symbol, in `defparsed`, `defsum`, `match` or `pt/draft`.
 - `name-with-dot`: a type name with a dot.
-- `missing-argument`: `defparsed`, `defsum`, `match` or `pt/draft` called with one argument.
+- `missing-argument`: `defparsed`, `defsum`, `match` or `pt/draft` called with one argument (`::bad-input` for
+  `pt/draft`).
 - `unknown-clause`: a clause other than `pure`, `external` or `fetch`.
 - `check-options`: an options map on a check.
 - `name-not-qualified`: a check or fetch name that isn't a qualified keyword.

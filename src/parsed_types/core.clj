@@ -786,7 +786,8 @@
                      " sum. "
                      (if-let [[d p] (first (keep (fn [^Class c]
                                                    (when (.isAssignableFrom DraftValue c)
-                                                     (some->> (.get registry c) :parses-to (vector c))))
+                                                     (some->> (.get registry c) :parses-to
+                                                              (#(when (member? s %) [c %])))))
                                                  extra))]
                        (str (simple d) " is the draft of " (simple p) ", and a match branches on parsed values."
                             " Write " (simple p) " for " (simple d) ".")
@@ -1257,7 +1258,10 @@
       (if (issued? v)
         [:walk []]
         [:refuse ::rule/unissued-in-field (str "a value of " (.getSimpleName c) " that pt/parse did not issue")
-         (str "Pass the value pt/parse returns instead, as in " (parse-hint c) ".")])
+         (if (parsed-type? c)
+           (str "Pass the value pt/parse returns instead, as in " (parse-hint c) ".")
+           (str "A class that only implements ParsedValue is never parsed: pass a value of a type defparsed defined,"
+                " as pt/parse returns it."))])
 
       (instance? DraftValue v)
       [:refuse ::rule/draft-in-field "a draft"
@@ -1342,7 +1346,8 @@
                 [::rule/value-too-deep path (str "a value nested deeper than " max-value-depth " levels")
                  (str "Store a flatter value: for nested vectors, (vec (flatten v)), or keep it as text, as in"
                       " (pr-str v).")
-                 (.getName (class x))]
+                 ;; x may be nil, nested past the limit
+                 (if (nil? x) "nil" (.getName (class x)))]
 
                 ;; the root, when it is a leaf: a leaf inside a value gets no frame
                 (leaf? x)
@@ -1486,11 +1491,11 @@
   (for [n order :when (contains? (failed n) :returned)] [n (:doc (failed n)) (:returned (failed n))]))
 
 (defn- truthy-hint
-  "A hint for a check that returned `x`, a value that is truthy but not `true`, as `(seq xs)` or a count does: it
-  fails, which is rarely what the body meant. Empty for nil, false, a string or a map, which a check returns on
-  purpose to say why it failed."
+  "A hint for a check that returned `x`, a value that is truthy but not `true`, as `(seq xs)` does: it fails, which is
+  rarely what the body meant. Empty for nil, false, a string or a map, which a check returns on purpose to say why it
+  failed, and for a number, which `(boolean ...)` would turn into a check that always passes."
   [x]
-  (if (or (not x) (true? x) (string? x) (map? x))
+  (if (or (not x) (true? x) (string? x) (map? x) (number? x))
     ""
     (str ", which returned " (binding [*print-length* 5, *print-level* 3] (pr-str x)) ", which is truthy but not"
          " true; wrap the body in (boolean ...)")))

@@ -329,16 +329,16 @@
         (get {:seq (seq [1 2]), :num 3, :lazy (range), :nil nil, :false false, :str "too long", :map {:length 9}} k)))
 
 (deftest a-truthy-result-that-is-not-true-gets-a-hint-test
-  (testing "a seq or a number is truthy but not true: the message says to wrap the body in (boolean ...)"
-    (doseq [[k shown] [[:seq "(1 2)"] [:num "3"] [:lazy "(0 1 2 3 4 ...)"]]]
+  (testing "a seq is truthy but not true: the message says to wrap the body in (boolean ...)"
+    (doseq [[k shown] [[:seq "(1 2)"] [:lazy "(0 1 2 3 4 ...)"]]]
       (is (str/includes? (:message (error #(pt/parse (pt/draft Truthy {:k k}))))
                          (str "(Returns the value k names.), which returned " shown ", which is truthy but not true;"
                               " wrap the body in (boolean ...)")))))
   (testing "and the fix passes"
     (is (some? ((compiling '(do (pt/defparsed Truthy2 [xs] (pure ::xs-seq "Wrapped." [xs] (boolean (seq xs))))
                                 (pt/parse (pt/draft Truthy2 {:xs [1]}))))))))
-  (testing "nil, false, a string and a map are failures on purpose: no hint"
-    (doseq [k [:nil :false :str :map]]
+  (testing "nil, false, a string and a map are failures on purpose, and (boolean 3) always passes: no hint"
+    (doseq [k [:nil :false :str :map :num]]
       (is (not (str/includes? (:message (error #(pt/parse (pt/draft Truthy {:k k})))) "boolean")) (pr-str k)))))
 
 (deftest match-naming-a-draft-type-says-which-type-test
@@ -349,7 +349,11 @@
       (is (str/includes? message "DebitDraft is the draft of Debit, and a match branches on parsed values. Write Debit for DebitDraft."))
       (is (not (str/includes? message "add the types to the defsum"))))
     (testing "and the fix compiles"
-      (is (fn? ((compiling '(fn [x] (pt/match Txn x Debit d 1 Credit c 2)))))))))
+      (is (fn? ((compiling '(fn [x] (pt/match Txn x Debit d 1 Credit c 2))))))))
+  (testing "a draft of a type outside the sum gets no such hint, since that type is not a member either"
+    (let [message (:message (error (compiling '(fn [x] (pt/match Txn x UnitDraft u 1 Debit d 2 Credit c 3)))))]
+      (is (str/includes? message "not members: [UnitDraft]"))
+      (is (not (str/includes? message "Write Unit"))))))
 
 (pt/defparsed Unit [])
 
