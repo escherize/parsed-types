@@ -24,6 +24,7 @@ The README covers how to use the library; this page covers what it promises and 
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | The checks see the values that are issued | Each field is read once, from the type's own Java field, by a fn `defparsed` generates. The issued value holds the same field values the checks saw | `parse-matches-the-tree-model` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`, `parse-matches-the-tree-model`: each against a model written by hand, down to every path, `:blocked-by`, `:blocked` and `:failed-kinds` |
+| Pure checks run in the order written, and a failure holds the later checks on its fields | After the shape checks of the child fields, each pure check runs in its written place, held when a pure check before it that shares a field failed. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `parse-matches-the-model`, `parse-matches-the-tree-model` |
 | Malformed input never reaches a fetch or an external check, anywhere in a tree | Fetches and external checks wait on every pure check in the tree | `nothing-touches-the-world-until-every-pure-check-passes`, `nothing-in-a-failing-tree-fetches` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | Tuples gathered across the call and deduplicated; a missing answer throws `::bad-fetch` | `parse-all-fetches-once-with-each-distinct-tuple`, `fetches-see-checked-values-and-run-once`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Fetches grouped by declaration | `parse-all-agrees-with-parse-across-declarations`, `parse-all-agrees-with-parse-on-trees` |
@@ -115,7 +116,9 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
 - an options map: checks take no options;
 - a field named twice, named `/`, like a special form, with a dot in it, starting with `__`, named `parse-proof`, or compiling
   to the same Java name as another field (`a-b` and `a_b`);
-- a field declared as a child twice, or a child field that isn't a field.
+- a field declared as a child twice, or a child field that isn't a field;
+- a pure check written before a pure check that reads a proper subset of its fields. Pure checks run in the order
+  written, and a failed one holds every later one that shares a field, so the smaller check goes first.
 
 `pt/draft` refuses a literal map that names a key that isn't a field, or leaves a field out. `match` refuses a missing
 member, a type that isn't a member, and a member handled twice. A call to `pt/defparsed-type`, `pt/defdraft-type` or

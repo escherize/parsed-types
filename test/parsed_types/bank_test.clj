@@ -109,15 +109,15 @@
   (pure ::some-transfers "A payroll pays someone."
         [transfers]
         (boolean (seq transfers)))
+  (pure ::no-repeat-payee "No account is paid twice."
+        [transfers]
+        (= (count transfers) (count (set (map :to-id transfers)))))
   (pure ::one-source "Every transfer draws on the payroll's account."
         [from-id transfers]
         (every? #(= from-id (:from-id %)) transfers))
   (pure ::one-payer "Every transfer is made by the payroll's user."
         [user-id transfers]
         (every? #(= user-id (:user-id %)) transfers))
-  (pure ::no-repeat-payee "No account is paid twice."
-        [transfers]
-        (= (count transfers) (count (set (map :to-id transfers)))))
   (external ::covers-total "The account holds the sum of every transfer."
             [transfers] [source ::source]
             (<= (reduce + 0M (map :amount transfers)) (:balance source 0M)))
@@ -148,13 +148,12 @@
                                                                     :returned false
                                                                     :blocked  [::source-exists ::destination-exists
                                                                                ::owns-source ::funds-available]}}}
-                          ;; held: they read transfers, and transfer 1 failed
+                          ;; held: it reads transfers, and transfer 1 failed; it holds every later check that
+                          ;; reads transfers
                           ::some-transfers   {:doc        "A payroll pays someone."
                                               :blocked-by [[:transfers 1]]
-                                              :blocked    [::one-source ::one-payer ::covers-total]}
-                          ::no-repeat-payee  {:doc        "No account is paid twice."
-                                              :blocked-by [[:transfers 1]]
-                                              :blocked    [::one-source ::one-payer ::covers-total]}}}
+                                              :blocked    [::no-repeat-payee ::one-source ::one-payer
+                                                           ::covers-total]}}}
            (select-keys (thrown-data #(pt/parse (payroll :ada 1  2 10M  3 -5M))) [:failed-kinds :failures])))
     (is (= [] @fetched)))
   (testing "each transfer fits the balance, but together they don't: only the parent can see that"

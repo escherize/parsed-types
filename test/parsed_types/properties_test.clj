@@ -22,7 +22,7 @@
   (pure ::a-int "a is an integer." [a] (log! ::a-int) (int? a))
   (pure ::b-string "b is a string." [b] (log! ::b-string) (string? b))
   (pure ::c-int "c is an integer." [c] (log! ::c-int) (int? c))
-  ;; same fields as ::b-string, so it runs whatever that returns, and must accept any b
+  ;; written after ::b-string, which reads b too, so it runs only when that passes
   (pure ::b-short "b has at most 3 characters."
         [b]
         (log! ::b-short)
@@ -159,10 +159,12 @@
   "The outcome of parsing a TripleDraft with these fields, from first principles."
   [{:keys [user-id a b c], :as fields}]
   (let [externals [::may-use-row ::user-known]
-        singles   [[::a-int "a is an integer." (int? a)]
-                   [::b-string "b is a string." (string? b)]
-                   [::c-int "c is an integer." (int? c)]
-                   [::b-short "b has at most 3 characters." (or (<= (count (str b)) 3) {:length (count (str b))})]]
+        singles   (cond-> [[::a-int "a is an integer." (int? a)]
+                           [::b-string "b is a string." (string? b)]
+                           [::c-int "c is an integer." (int? c)]]
+                    ;; a pure check is held when one written before it that shares a field failed
+                    (string? b)
+                    (conj [::b-short "b has at most 3 characters." (or (<= (count (str b)) 3) {:length (count (str b))})]))
         failed    (into {} (for [[n doc r] singles :when (not (true? r))] [n {:doc doc, :returned r}]))
         relation  (cond
                     (or (failed ::a-int) (failed ::c-int)) :blocked
@@ -170,7 +172,8 @@
                     :else                                  :failed)
         failed    (cond-> failed
                     (= :failed relation) (assoc ::a-below-c {:doc "a is below c.", :returned false}))
-        blocked   (fn [n] (vec (concat (when (and (= :blocked relation) (#{::a-int ::c-int} n)) [::a-below-c])
+        blocked   (fn [n] (vec (concat (when (= ::b-string n) [::b-short])
+                                       (when (and (= :blocked relation) (#{::a-int ::c-int} n)) [::a-below-c])
                                        externals)))]
     (if (seq failed)
       {:type         ::pt/invalid

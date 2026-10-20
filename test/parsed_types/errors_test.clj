@@ -148,6 +148,9 @@
     "declared as a child twice: [a]" "Declare it once"]
    [:name-used-twice (compiling '(pt/defparsed E1 [a] (pure ::c "d" [a] true) (pure ::c "d" [a] true)))
     "used twice: [:parsed-types.errors-test/c]" "Give each its own name"]
+   [:pure-check-order (compiling '(pt/defparsed E1 [a b] (pure ::ab "d" [a b] true) (pure ::a "d" [a] true)))
+    "the pure check :parsed-types.errors-test/ab reads [a b], and is written before :parsed-types.errors-test/a"
+    "Move :parsed-types.errors-test/a before :parsed-types.errors-test/ab."]
    [:reserved-name (compiling '(pt/defparsed E1 [kids] (children kids Debit) (pure :parsed-types.child/kids "d" [kids] true)))
     "[:parsed-types.child/kids]" "as in ::kids"]
    ;; when a defparsed loads

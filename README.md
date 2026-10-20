@@ -83,7 +83,9 @@ flowchart LR
 ```
 
 A check's argument vector names the fields it reads. An `external` check also binds fetches, as in
-`[account ::account]`. A check passes only when it returns exactly `true`.
+`[account ::account]`. A check passes only when it returns exactly `true`. Pure checks run in the order written, and
+a failed one holds every later pure check that shares a field with it. So write a check on fewer fields first:
+`defparsed` refuses a check written before one that reads a proper subset of its fields.
 
 `defsum` names a closed set of parsed types. `match` runs a branch only for a value `parse` made. A `match` that
 leaves out a member doesn't compile, so adding a member to the sum breaks every `match` that misses it.
@@ -158,13 +160,13 @@ A failure reports every check by name. `:blocked` names the checks that didn't r
 ;; a journal entry: transactions by one user whose debits and credits balance
 (pt/defparsed JournalEntry [user-id lines]
   (children lines Transaction)
-  (pure ::one-user "Every line is made by the entry's user."
-        [user-id lines]
-        (every? #(= user-id (:user-id %)) lines))
   (pure ::balanced "The debits and the credits add up to the same amount."
         [lines]
         (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
-           (reduce + 0M (map :amount (filter #(instance? Credit %) lines))))))
+           (reduce + 0M (map :amount (filter #(instance? Credit %) lines)))))
+  (pure ::one-user "Every line is made by the entry's user."
+        [user-id lines]
+        (every? #(= user-id (:user-id %)) lines)))
 
 (defn post-entry! [entry]
   (run! transact! (:lines (pt/parsed JournalEntry entry))))

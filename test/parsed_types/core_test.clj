@@ -92,6 +92,26 @@
   (testing "who is acting is a field: the same card, another user"
     (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (->RenameCardDraft 2 1 "New"))))))))
 
+(pt/defparsed Written [a b c]
+  (pure ::a-int "a is an integer." [a] (log! ::a-int) (int? a))
+  (pure ::a-pos "a is positive." [a] (log! ::a-pos) (pos? a))
+  (pure ::a-below-b "a is below b." [a b] (log! ::a-below-b) (< a b))
+  (pure ::c-int "c is an integer." [c] (log! ::c-int) (int? c)))
+
+(deftest pure-checks-run-in-the-order-written-test
+  (testing "in the order written, not by how many fields each reads"
+    (is (= [::a-int ::a-pos ::a-below-b ::c-int] (runs #(pt/parse (->WrittenDraft 1 2 3))))))
+  (testing "a failed check holds every later pure check that shares a field with it, and no other"
+    (is (= [::a-int ::c-int] (runs #(thrown-data (fn [] (pt/parse (->WrittenDraft :x 2 3)))))))
+    (is (= {::a-int {:doc "a is an integer.", :returned false, :blocked [::a-pos ::a-below-b]}}
+           (:failures (thrown-data #(pt/parse (->WrittenDraft :x 2 3)))))))
+  (testing "a check written before one that reads a proper subset of its fields does not compile"
+    (is (re-find #"the pure check :parsed-types.core-test/ab reads \[a b\], and is written before :parsed-types.core-test/a, which reads only \[a\]\..*Move :parsed-types.core-test/a before :parsed-types.core-test/ab\."
+                 (try (binding [*ns* (the-ns 'parsed-types.core-test)]
+                        (eval '(pt/defparsed Unordered [a b] (pure ::ab "d" [a b] true) (pure ::a "d" [a] true))))
+                      ""
+                      (catch Throwable e (ex-message (ex-cause e))))))))
+
 (deftest order-test
   (testing "shape checks first, then checks over several fields, then fetches, then external checks"
     (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]

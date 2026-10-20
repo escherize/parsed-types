@@ -722,13 +722,13 @@
 
     (defparsed JournalEntry [user-id lines]
       (children lines Transaction)
-      (pure ::one-user \"Every line is made by the entry's user.\"
-            [user-id lines]
-            (every? #(= user-id (:user-id %)) lines))
       (pure ::balanced \"The debits and the credits add up to the same amount.\"
             [lines]
             (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
-               (reduce + 0M (map :amount (filter #(instance? Credit %) lines))))))
+               (reduce + 0M (map :amount (filter #(instance? Credit %) lines)))))
+      (pure ::one-user \"Every line is made by the entry's user.\"
+            [user-id lines]
+            (every? #(= user-id (:user-id %)) lines)))
 
   Clauses:
 
@@ -741,6 +741,10 @@
   - `(child field ParsedType)`: the field holds nil or a draft that parses to `ParsedType`.
 
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
+
+  Pure checks run in the order written, after the shape checks of the child fields. A pure check is held, not run,
+  when one before it that shares a field failed. A pure check written before one that reads a proper subset of its
+  fields is a compile error: move the smaller one first.
 
   The plan [[parse]] follows is built and checked when the form loads, so every declaration error throws
   `::bad-declaration` then, not at the first parse. Only `defparsed` defines parsed types: the draft type and the
@@ -787,6 +791,16 @@
                      (str "a check or fetch name is used twice: "
                           (vec (for [[x c] (frequencies names) :when (< 1 c)] x))
                           ". A failure is reported under its name. Give each its own name.")))
+    (when-let [[big small] (first (for [[i big] (map-indexed vector (filter #(= :pure (:kind %)) checks))
+                                        small (drop (inc i) (filter #(= :pure (:kind %)) checks))
+                                        :let  [b (set (:reads big)), sm (set (:reads small))]
+                                        :when (and (set/subset? sm b) (not= sm b))]
+                                    [big small]))]
+      (syntax-error! &form ::rule/pure-check-order
+                     (str "the pure check " (:name big) " reads " (mapv symbol (:reads big)) ", and is written before "
+                          (:name small) ", which reads only " (mapv symbol (:reads small)) ". Pure checks run in the"
+                          " order written, and a check holds every later one that shares a field with it, so a check"
+                          " on fewer fields goes first. Move " (:name small) " before " (:name big) ".")))
     (when-let [reserved (seq (filter #(= "parsed-types.child" (namespace %)) names))]
       (syntax-error! &form ::rule/reserved-name
                      (str "names in parsed-types.child are reserved for child-field checks: " (vec reserved)
@@ -904,13 +918,15 @@
 (defn- compile-plan
   "Order the checks, and work out what each waits on.
 
-  - A pure check waits on every pure check that reads a proper subset of its fields: a check on one field (its shape)
-    runs before a check relating it to another. A check that reads a child field also waits on that field's shape
-    check, and on the children's own pure checks.
+  - A pure check waits on every pure check before it that shares a field with it. The shape checks of the child
+    fields come first, so a check that reads a child field waits on its shape. It also waits on the children's own
+    pure checks, through [[failed-children]].
   - A fetch waits on every pure check, so malformed input never reads the world.
   - An external check waits on its fetches and on every pure check.
 
-  Pure checks run first, fewest fields first, then fetches, then external checks, each in declaration order."
+  Pure checks run first, in the order written, then fetches, then external checks, each in the order written.
+  [[defparsed]] refuses a pure check written before one that reads a proper subset of its fields, so a check on one
+  field runs before a check relating it to another."
   [parses-to draft-class fields {:keys [checks fetches children], :as decl}]
   (validate-declaration! parses-to draft-class decl)
   (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check {:parses-to parses-to, :draft-class draft-class} field child)])) children)
@@ -918,15 +934,14 @@
         external  (filterv #(= :external (:kind %)) checks)
         waits-on  (fn [pred] (into #{} (comp (filter pred) (map :name)) pure))
         all-pure  (waits-on any?)
-        shapes-of (fn [c] (into #{} (keep #(:name (get shape %))) (:reads c)))
-        pure'     (for [c pure
-                        :let [rs (reads-set c)]]
-                    (assoc c
-                           :prereqs (-> (waits-on #(and (not= (:name %) (:name c))
-                                                        (set/subset? (reads-set %) rs)
-                                                        (not= (reads-set %) rs)))
-                                        (into (shapes-of c))
-                                        (disj (:name c)))))
+        pure'     (map-indexed (fn [i c]
+                                 (assoc c :prereqs (into #{}
+                                                         (comp (take i)
+                                                               (filter #(seq (set/intersection (reads-set %)
+                                                                                               (reads-set c))))
+                                                               (map :name))
+                                                         pure)))
+                               pure)
         fetches'  (for [fd fetches]
                     (assoc fd :prereqs all-pure))
         external' (for [c external]
@@ -936,7 +951,7 @@
      :declaration     (assoc decl :parses-to parses-to)
      :fields          fields
      :children        children
-     :pure            (vec (sort-by (comp count reads-set) pure'))
+     :pure            (vec pure')
      :fetches         (vec fetches')
      :external        (vec external')
      :checks-by-name  (into {} (map (juxt :name identity)) (concat pure' external'))}))
