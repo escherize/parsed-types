@@ -103,8 +103,9 @@
 (defn- map-type-methods
   "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws unless a default
   is given. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name` throws for any other change.
-  Every function in these bodies is written qualified, so no field name can shadow it."
-  [fields this k v assoc-form final-name]
+  `same-proof`, of the other value's symbol, is the form that says whether it holds this value's proof, or nil for a
+  type without one. Every function in these bodies is written qualified, so no field name can shadow it."
+  [fields this k v assoc-form final-name same-proof]
   (clojure.core/let [nf      (gensym "not-found")
                      f       (gensym "f")
                      init    (gensym "init")
@@ -112,7 +113,9 @@
                      kws     (mapv keyword fields)
                      lookup  (fn [missing] `(case ~k ~@(mapcat (fn [fld] [(keyword fld) fld]) fields) ~missing))
                      entries `[~@(map (fn [fld] `(clojure.lang.MapEntry/create ~(keyword fld) ~fld)) fields)]]
-    ;; not MapEquivalence: like a record, a value is equal only to a value of its own type, never to a plain map
+    ;; not MapEquivalence: like a record, a value is equal only to a value of its own type, never to a plain map. A
+    ;; parsed value also holds the same proof: one parse issued never equals one built without it. The hash reads only
+    ;; the fields, which equal values share.
     `[clojure.lang.IPersistentMap
       (~'assoc [~this ~k ~v] ~assoc-form)
       (~'assocEx [~this ~k ~v] (~final-name ~this "assocEx"))
@@ -143,6 +146,7 @@
       (~'empty [~this] (~final-name ~this "empty"))
       ;; like defrecord: the same class, and each field `=`, so 1.0M equals 1.00M and an Integer equals a Long
       (~'equiv [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
+                                             ~@(when same-proof [(same-proof o)])
                                              ~@(map (fn [fld] `(clojure.core/= ~fld (.valAt ~(with-meta o {:tag 'clojure.lang.ILookup})
                                                                                                 ~(keyword fld))))
                                                     fields)))
@@ -183,6 +187,7 @@
       Object
       (~'hashCode [~this] (clojure.lang.APersistentMap/mapHash ~this))
       (~'equals [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
+                                              ~@(when same-proof [(same-proof o)])
                                               (clojure.lang.APersistentMap/mapEquals ~this ~o)))
       (~'toString [~this] (clojure.core/str (clojure.core/into {} ~this)))]))
 
@@ -245,7 +250,9 @@
        (deftype ~name [~@fields ~(with-meta 'parse-proof {:volatile-mutable true})]
          parsed_types.core.ParsedValue
          (~'issuedWith [~this ~t] (clojure.core/identical? ~t ~'parse-proof))
-         ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!))
+         ;; the other value is of this class, so it is this generated type, and the proof goes only into it
+         ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!
+                             (fn [o] `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
        (ns-unmap *ns* '~(symbol (str "->" name)))
        ~(print-method-form name))))
 
@@ -257,7 +264,7 @@
     `(do
        (deftype ~name [~@fields]
          parsed_types.core.DraftValue
-         ~@(map-type-methods fields this k v `(assoc-draft ~this ~k ~v) `fixed!))
+         ~@(map-type-methods fields this k v `(assoc-draft ~this ~k ~v) `fixed! nil))
        ~(print-method-form name))))
 
 ;;; ------------------------------------------------ Sums ------------------------------------------------

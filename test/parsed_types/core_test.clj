@@ -60,7 +60,8 @@
       (testing "it reads as a map and through its fields"
         (is (= {:user-id 1, :card-id 1, :title "New"} (into {} parsed)))
         (is (not= {:user-id 1, :card-id 1, :title "New"} parsed) "a parsed value never equals a plain map")
-        (is (= parsed (RenameCard. 1 1 "New" nil)) "it equals a value of its type with the same fields, parsed or not")
+        (is (= parsed (pt/parse (->RenameCardDraft 1 1 "New"))) "it equals another parsed value with the same fields")
+        (is (not= parsed (RenameCard. 1 1 "New" nil)) "and never a value of its type built without the proof")
         (is (not= parsed (->RenameCardDraft 1 1 "New")) "and not its draft")
         (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
@@ -174,8 +175,14 @@
       (is (false? (contains? real :parse-proof)))
       (is (= ::none (get real :parse-proof ::none)))
       (is (= ::pt/no-field (:type (thrown-data #(:parse-proof real))))))
-    (testing "equality, hash and print ignore it, so a forgery is equal: proof is pt/parsed, never ="
-      (is (= real (RenameCard. 1 1 "New" nil)))
+    (testing "equality holds the proof: a value parse issued never equals one built without it"
+      (is (not= real (RenameCard. 1 1 "New" nil)))
+      (is (not= (RenameCard. 1 1 "New" nil) real))
+      (is (not (.equals ^Object real (RenameCard. 1 1 "New" nil))))
+      (is (false? (contains? #{real} (RenameCard. 1 1 "New" nil))))
+      (is (= real (pt/parse (->RenameCardDraft 1 1 "New"))) "two parsed values with equal fields are equal")
+      (is (= (RenameCard. 1 1 "New" nil) (RenameCard. 1 1 "New" nil)) "and so are two unproven ones"))
+    (testing "hash and print read only the fields"
       (is (= (hash real) (hash (RenameCard. 1 1 "New" nil))))
       (is (= (pr-str real) (pr-str (RenameCard. 1 1 "New" nil))))
       (is (not (re-find #"proof" (pr-str real)))))))

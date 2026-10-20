@@ -101,7 +101,9 @@
                     (not= parsed (into {} draft))
                     (not= (into {} draft) parsed)
                     (not= parsed draft)
-                    (= parsed forged)
+                    (= parsed (pt/parse (fresh draft)))
+                    (not= parsed forged)
+                    (not= forged parsed)
                     (not (identical? parsed forged))))
              true)))))
 
