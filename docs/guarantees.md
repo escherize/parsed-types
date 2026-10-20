@@ -26,6 +26,7 @@ The README covers how to use the library; this page covers what it promises and 
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others | `compile-errors-test` |
 | Threads that first use a declaration at once keep their remembered passes | The first plan stored wins | `concurrent-first-use-test` |
+| A parent defined before its child type was re-evaluated says so, and never reports the child as bad input | A child draft whose parsed type has the name of a declared member, but isn't that class, throws `::stale-type`; members are never matched by name | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
 
 ## Errors
 
@@ -41,6 +42,7 @@ message says what went wrong and how to fix it.
 | `::bad-input` | `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft, or a tree is over the limits | depends on the cause |
 | `::bad-declaration` | a declaration error, when compiling or when a declaration is first used, or `check` named a check that doesn't exist | `:draft` when found at first use |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
+| `::stale-type` | a parent was defined against a child type that a REPL has since re-evaluated | `:parent`, `:field`, `:child` |
 
 Class names in ex-data are strings, so ex-data can be serialized. For `::invalid`:
 
@@ -109,8 +111,10 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
 Re-evaluating a `defparsed` makes new classes.
 
 - A draft of the old class still parses, under the declaration it now reads.
-- A parent declared before a child type was re-evaluated refuses drafts of the child, old and new, with a failure of
-  its child-field check. Re-evaluate the parent.
+- A parent declared before a child type was re-evaluated throws `::stale-type` for drafts of the child, old and new:
+  "JournalEntry was defined against an older Debit. Re-evaluate the defparsed for JournalEntry." When the child
+  field names a sum, the message says to re-evaluate the `defsum` first. The parent never accepts the new class by
+  name, so one tree never mixes old and new classes.
 - A `defsum` and every compiled `(pt/parsed T ...)` and `match` still name the old class, so they refuse
   values of the new one until their namespaces are reloaded.
 
@@ -155,15 +159,16 @@ and a child parsed elsewhere, perhaps for another user, can't be reused.
 - `tree-properties-test`: `test.check` properties over random trees with `:one` and `:many` children, malformed
   children and edits to child fields, against a model of the whole failure map.
 
-Each of these deliberately broken copies of the library fails at least one test: fetches grouped by draft type;
-an external check waiting only on its fetches; a truthy return counted as a pass; a tree fetching after a pure check
+Each of these deliberately broken copies of the library fails at least one test: fetches grouped by draft type; an
+external check waiting only on its fetches; a truthy return counted as a pass; a tree fetching after a pure check
 failed; passes read under a replaced declaration; tuples not deduplicated; a missing fetch answer allowed; `draft-of`
 forgetting passes or leaving a child parsed; a parsed parent holding a raw child; checks or fetches seeing children as
 drafts or as open maps; `:blocked-by` naming one child; `:failed-kinds` missing a kind; a grandchild failure not holding
 the grandparent; fields read through `get`; two draft types for one parsed type; `check` on a subset letting a tree
-fetch; a child-field check remembered; racing threads keeping different plans; an unknown key returning `nil`; a
-literal `pt/draft` leaving a field out; reserved check names allowed; a map-type method calling a function a field can
-shadow; the depth limit off or missing; `match` binding a value `parse` didn't make.
+fetch; a child-field check remembered; racing threads keeping different plans; an unknown key returning `nil`; a literal
+`pt/draft` leaving a field out; reserved check names allowed; a map-type method calling a function a field can shadow;
+the depth limit off or missing; `match` binding a value `parse` didn't make; a stale child type reported as a failed
+check; members of a child field matched by name.
 
 ## Lint
 

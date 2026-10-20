@@ -173,18 +173,47 @@
 (defn- eval-here [form]
   (binding [*ns* (the-ns 'parsed-types.defparsed-test)] (eval form)))
 
+(defn- thrown [thunk]
+  (try (thunk) nil
+       (catch clojure.lang.ExceptionInfo e [(ex-message e) (ex-data e)])))
+
 (deftest re-evaluating-a-child-type-test
   (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
   (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
   (let [old-kid ((resolve 'parsed-types.defparsed-test/->KidDraft) 1)
         parent  ((resolve 'parsed-types.defparsed-test/->ParentDraft) [old-kid])]
     (is (some? (pt/parse parent)))
-    (testing "after the child type is re-evaluated, the parent no longer accepts the old child, remembered or not"
-      (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
-      (is (= #{:pure} (:failed-kinds (try (pt/parse parent) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
-    (testing "a draft of the old class does not stop the new class from parsing"
-      (is (some? (pt/check old-kid nil)))
-      (is (some? (pt/parse ((resolve 'parsed-types.defparsed-test/->KidDraft) 2)))))))
+    (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
+    (let [new-kid ((resolve 'parsed-types.defparsed-test/->KidDraft) 2)]
+      (testing "after the child type is re-evaluated, the parent says it is stale, for the old child and the new"
+        (doseq [[label thunk] [["the old child, remembered" #(pt/parse parent)]
+                               ["the new child" #(pt/parse ((resolve 'parsed-types.defparsed-test/->ParentDraft)
+                                                            [new-kid]))]
+                               ["check" #(pt/check parent nil)]]]
+          (testing label
+            (is (= ["Parent was defined against an older Kid. Re-evaluate the defparsed for Parent."
+                    {:type   ::pt/stale-type
+                     :parent "parsed_types.defparsed_test.Parent"
+                     :field  :kids
+                     :child  "parsed_types.defparsed_test.Kid"}]
+                   (thrown thunk))))))
+      (testing "a draft of the old class does not stop the new class from parsing"
+        (is (some? (pt/check old-kid nil)))
+        (is (some? (pt/parse new-kid))))
+      (testing "re-evaluating the parent makes it accept the new child"
+        (eval-here '(pt/defparsed Parent [kids] (children kids Kid)))
+        (is (some? (pt/parse ((resolve 'parsed-types.defparsed-test/->ParentDraft) [new-kid]))))))))
+
+(deftest re-evaluating-a-member-of-a-sum-test
+  (eval-here '(pt/defparsed Member [n]))
+  (eval-here '(pt/defsum Members [Member]))
+  (eval-here '(pt/defparsed Holder [m] (child m Members)))
+  (eval-here '(pt/defparsed Member [n]))
+  (testing "the parent names the sum to re-evaluate first"
+    (is (= (str "Holder was defined against an older Member, through the sum Members. Re-evaluate the defsum for"
+                " Members, then the defparsed for Holder.")
+           (first (thrown #(pt/parse ((resolve 'parsed-types.defparsed-test/->HolderDraft)
+                                      ((resolve 'parsed-types.defparsed-test/->MemberDraft) 1)))))))))
 
 ;;; Concurrent first use
 

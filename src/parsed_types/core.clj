@@ -32,8 +32,8 @@
   passes of the checks that do not read the field it sets.
 
   Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (checks
-  failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or `::bad-fetch`. Its
-  message says what went wrong and how to fix it."
+  failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration`, `::bad-fetch` or
+  `::stale-type`. Its message says what went wrong and how to fix it."
   (:require
    [clojure.set :as set]
    [clojure.string])
@@ -593,25 +593,47 @@
                                            " memoize.")
                           {:name n, :locals locals})))))
 
+(defn- stale-type!
+  "Throws `::stale-type`: `parent` declared `field` against `old`, a class a REPL has since replaced with another of
+  the same name."
+  [^Class parent field type ^Class old]
+  (let [p (.getSimpleName parent), c (.getSimpleName old)]
+    (throw (ex-info (if (sum? type)
+                      (str p " was defined against an older " c ", through the sum " (:name type) ". Re-evaluate the"
+                           " defsum for " (:name type) ", then the defparsed for " p ".")
+                      (str p " was defined against an older " c ". Re-evaluate the defparsed for " p "."))
+                    {:type ::stale-type, :parent (.getName parent), :field field, :child (.getName old)}))))
+
 (defn- children-of-type?
-  "Whether `v` is what a child field of `kind` and `parsed-type` may hold."
-  [kind parsed-type v]
-  (let [drafts-it? (fn [d] (and (draft-value? d) (member? parsed-type (:parses-to (plan-for d)))))]
+  "Whether `v` is what the child field `field` of `parent`, of `kind` and `parsed-type`, may hold. Throws
+  `::stale-type` for a draft that parses to a class with the name of a declared member, but not that class: the member
+  was re-evaluated at a REPL after `parent` was defined. Members are never matched by name, so one tree never mixes
+  old and new classes."
+  [parent field kind parsed-type v]
+  (let [drafts-it? (fn [d]
+                     (and (draft-value? d)
+                          (let [^Class cls (:parses-to (plan-for d))
+                                old        (some #(when (= (.getName ^Class %) (.getName cls)) %)
+                                                 (if (sum? parsed-type) (:members parsed-type) [parsed-type]))]
+                            (cond
+                              (member? parsed-type cls) true
+                              old                       (stale-type! parent field parsed-type old)
+                              :else                     false))))]
     (case kind
       :one  (or (nil? v) (drafts-it? v))
       :many (and (vector? v) (every? drafts-it? v)))))
 
 (defn- child-shape-check
-  "The pure check every child field gets: it holds drafts of the declared type. Every check that reads the field waits
-  on it."
-  [field {:keys [kind type]}]
+  "The pure check every child field of `parent` gets: it holds drafts of the declared type. Every check that reads the
+  field waits on it."
+  [parent field {:keys [kind type]}]
   {:name  (keyword "parsed-types.child" (name field))
    :doc   (str (name field) " holds " (if (= :one kind) "nil or a draft that parses to " "a vector of drafts that parse to ")
                (type-name type) ".")
    :kind  :pure
    :shape? true
    :reads [field]
-   :f     (fn [v] (children-of-type? kind type v))})
+   :f     (fn [v] (children-of-type? parent field kind type v))})
 
 (defn- reads-set [x] (set (:reads x)))
 
@@ -633,7 +655,7 @@
                                          " One draft type owns each parsed type, so a parsed value means its checks"
                                          " passed. Give this draft its own parsed type.")
                         {:parses-to (.getName ^Class parses-to), :owner claimed})))
-  (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check field child)])) children)
+  (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check parses-to field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
         _         (when (< 64 (count pure))
                     (bad-declaration! draft-class (str "more than 64 pure checks, counting one per child field. Combine"
@@ -773,7 +795,7 @@
             st   (assoc (start draft nm) :tree tree :path path)
             kids (for [[field {:keys [kind type]}] (get-in st [:plan :children])
                        :let  [v (get-in st [:values field])]
-                       :when (children-of-type? kind type v)
+                       :when (children-of-type? (get-in st [:plan :parses-to]) field kind type v)
                        [i d] (if (= :one kind) (when v [[nil v]]) (map-indexed vector v))]
                    [field (child-path path field i) d])
             st   (assoc st :child-paths (reduce (fn [m [field p]] (update m field (fnil conj []) p)) {} kids))]
