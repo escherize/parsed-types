@@ -242,8 +242,8 @@
   The type has one more field, `parse-proof`, which is not a key: it is not in the map's keys, seq, count, equality,
   hash or printed form. [[parse]] sets it to the proof; any other constructor call leaves it something else. The field
   is `volatile-mutable`, which Clojure compiles to a field that is not public, so interop cannot read it, and nothing
-  sets it after the constructor: code outside the type can only ask `issuedWith` whether it holds a given object. The positional factory `->Name` is removed, so
-  code outside this library has no plain function that builds one."
+  sets it after the constructor: code outside the type can only ask `issuedWith` whether it holds a given object.
+  The positional factory `->Name` is removed, so code outside this library has no plain function that builds one."
   [name fields]
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v"), t (gensym "t")]
     `(do
@@ -252,7 +252,8 @@
          (~'issuedWith [~this ~t] (clojure.core/identical? ~t ~'parse-proof))
          ;; the other value is of this class, so it is this generated type, and the proof goes only into it
          ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!
-                             (fn [o] `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
+                             (fn [o]
+                               `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
        (ns-unmap *ns* '~(symbol (str "->" name)))
        ~(print-method-form name))))
 
@@ -639,38 +640,78 @@
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
-(defn- mutable-kind
-  "What `v` is when it is a value that can change after it is checked, or nil. Looks at `v` itself, not inside it.
-  A denylist of the usual mutable holders, so an opaque immutable value still passes."
-  [v]
-  (cond
-    (nil? v)                                        nil
-    (.isArray (class v))                            "a Java array"
-    (instance? clojure.lang.IAtom v)                "an atom"
-    (instance? clojure.lang.IRef v)                 "a reference type"
-    (instance? clojure.lang.Volatile v)             "a volatile"
-    (= "java.util.concurrent.atomic"
-       (.getPackageName (class v)))                 "an atomic value"
-    (and (or (instance? java.util.Collection v) (instance? java.util.Map v))
-         (not (instance? clojure.lang.IPersistentCollection v))) "a mutable Java collection"))
+(declare issued?)
+
+(def ^:private immutable-classes
+  "Classes whose values never change, by exact class: `BigDecimal` and `BigInteger` can be subclassed, so a subclass is
+  not trusted."
+  #{Boolean Character String clojure.lang.Keyword clojure.lang.Symbol java.util.UUID java.util.regex.Pattern
+    Long Integer Short Byte Double Float BigDecimal BigInteger clojure.lang.BigInt clojure.lang.Ratio})
+
+(def ^:private max-value-depth
+  "The most levels of nesting a field's value may have. A deeper one throws `::bad-input`."
+  1000)
+
+(defn- java-time-value?
+  "Whether `c` is a final class of the `java.time` package, such as `Instant`, `LocalDate` or `ZoneOffset`: the JDK
+  documents them as immutable. `java.time.format`, `java.time.temporal` and the rest are other packages."
+  [^Class c]
+  (and (= "java.time" (.getPackageName c)) (Modifier/isFinal (.getModifiers c))))
+
+(defn- not-immutable
+  "nil when `v` is known to be immutable all the way down, else `[path what class-name]`: where inside the field the
+  first value that is not is, what it is with the fix, and its class. Accepts nil, the values of
+  [[immutable-classes]], classes, `java.time` values, values [[parse]] issued, and persistent vectors, maps (records
+  and drafts included), sets, lists and queues whose contents pass, map keys included. Refuses everything else, lazy and other seqs too: realizing one could run
+  side effects or never end."
+  [v path]
+  (let [c       (class v)
+        refuse  (fn [what] [path what (.getName ^Class c)])]
+    (cond
+      (< max-value-depth (count path))           (refuse (str "nested deeper than " max-value-depth " levels;"
+                                                              " flatten it"))
+      (nil? v)                                   nil
+      (contains? immutable-classes c)            nil
+      (class? v)                                 nil
+      (java-time-value? c)                       nil
+      (issued? v)                                nil
+      (instance? clojure.lang.IPersistentMap v)  (some (fn [[k x]] (or (not-immutable k (conj path '<key>))
+                                                                       (not-immutable x (conj path k))))
+                                                       v)
+      (or (instance? clojure.lang.IPersistentVector v) (list? v)
+          (instance? clojure.lang.PersistentQueue v)) (some (fn [[i x]] (not-immutable x (conj path i)))
+                                                            (map-indexed vector v))
+      (instance? clojure.lang.IPersistentSet v)  (some #(not-immutable % (conj path '<element>)) v)
+      (.isArray c)                               (refuse "a Java array; copy it into a vector")
+      (instance? clojure.lang.IAtom v)           (refuse "an atom; deref it")
+      (instance? clojure.lang.IRef v)            (refuse "a reference type; deref it")
+      (instance? clojure.lang.Volatile v)        (refuse "a volatile; deref it")
+      (instance? java.util.Date v)               (refuse (str (.getName c) " is mutable; use java.time.Instant"))
+      (instance? clojure.lang.LazySeq v)         (refuse "a lazy seq; pass (vec ...)")
+      (instance? clojure.lang.ISeq v)            (refuse "a seq, which may be lazy; pass (vec ...)")
+      (or (instance? java.util.Collection v)
+          (instance? java.util.Map v))           (refuse "a mutable Java collection; copy it into a vector, map or set")
+      :else                                      (refuse (str (.getName c) " is not known to be immutable; convert it"
+                                                              " to an immutable value")))))
 
 (defn- refuse-mutable!
-  "Throws `::bad-input` when a field of `draft` holds a value that can change after it is checked: the checks would
-  prove a value the parsed value does not keep."
-  [draft values]
+  "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable:
+  the checks would prove a value the parsed value does not keep. Child fields are not walked, because each child is
+  checked as its own node. There is no opt-out."
+  [draft {:keys [children]} values]
   (doseq [[field v] values
-          :let [kind (mutable-kind v)]
-          :when kind]
-    (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field " holds " kind " (" (.getName (class v))
-                         "), which can change after it is checked. Hold an immutable value: deref the atom, or copy"
-                         " the array or collection into a vector or map.")
-                    {:type ::bad-input, :draft (.getName (class draft)), :field field, :got (.getName (class v))}))))
+          :when       (not (contains? children field))
+          :let        [[path what got] (not-immutable v [])]
+          :when       what]
+    (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field (when (seq path) (str " at " path))
+                         " holds " what ".")
+                    {:type ::bad-input, :draft (.getName (class draft)), :field field, :path path, :got got}))))
 
 (defn- start [draft]
   (let [plan   (plan-for draft)
         ;; every field read once, so the checks and the parsed value see the same values
         values ((:read-draft plan) draft)]
-    (refuse-mutable! draft values)
+    (refuse-mutable! draft plan values)
     {:draft   draft
      :values  values
      :plan    plan

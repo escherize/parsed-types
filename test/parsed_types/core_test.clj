@@ -257,31 +257,45 @@
       (is (= ::pt/cannot-change (:type (thrown-data #(walk/postwalk identity {:rename [real]})))))
       (is (= ::pt/cannot-change (:type (thrown-data #(walk/prewalk identity [real]))))))))
 
+(defrecord Point [x y])
+
+(defn- refusal [v]
+  (select-keys (thrown-data #(pt/parse (->OtherDraft 1 1 v))) [:type :field :path :got]))
+
 (deftest mutable-field-values-are-refused-test
-  (testing "a field that holds a value that can change after it is checked is bad input, before any check runs"
-    (doseq [[label v] [["an array" (int-array [1])]
-                       ["an atom" (atom "New")]
-                       ["a ref" (ref "New")]
-                       ["an agent" (agent "New")]
-                       ["a volatile" (volatile! "New")]
-                       ["an atomic value" (java.util.concurrent.atomic.AtomicLong. 1)]
-                       ["a Java list" (java.util.ArrayList. ["New"])]
-                       ["a Java map" (java.util.HashMap. {:a 1})]
-                       ["a Java set" (java.util.HashSet. #{1})]]]
+  (testing "a field must hold a value known to be immutable, all the way down; anything else is bad input"
+    (doseq [[label v path got] [["an array" (int-array [1]) [] "[I"]
+                                ["an atom" (atom 1) [] "clojure.lang.Atom"]
+                                ["a ref" (ref 1) [] "clojure.lang.Ref"]
+                                ["a volatile" (volatile! 1) [] "clojure.lang.Volatile"]
+                                ["an atomic value" (java.util.concurrent.atomic.AtomicLong. 1) []
+                                 "java.util.concurrent.atomic.AtomicLong"]
+                                ["a java.util.Date" (java.util.Date.) [] "java.util.Date"]
+                                ["a Java list" (java.util.ArrayList. [1]) [] "java.util.ArrayList"]
+                                ["a Java map" (java.util.HashMap. {:a 1}) [] "java.util.HashMap"]
+                                ["a lazy seq" (map inc [1 2]) [] "clojure.lang.LazySeq"]
+                                ["a seq" (seq [1 2]) [] "clojure.lang.PersistentVector$ChunkedSeq"]
+                                ["a transient" (transient []) [] "clojure.lang.PersistentVector$TransientVector"]
+                                ["an atom in a vector in a map" {:a [1 (atom 1)]} [:a 1] "clojure.lang.Atom"]
+                                ["an atom as a map key" {(atom 1) 1} '[<key>] "clojure.lang.Atom"]
+                                ["an array in a set in a record" (->Point #{(int-array 1)} 2) '[:x <element>] "[I"]]]
       (testing label
-        (is (= {:type ::pt/bad-input, :draft "parsed_types.core_test.RenameCardDraft", :field :title
-                :got (.getName (class v))}
-               (thrown-data #(pt/parse (->RenameCardDraft 1 1 v)))))
-        (is (= [] (runs #(thrown-data (fn [] (pt/parse (->RenameCardDraft 1 1 v))))))))))
-  (testing "the message names the field and the fix"
-    (is (= (str "RenameCardDraft: the field :title holds an atom (clojure.lang.Atom), which can change after it is"
-                " checked. Hold an immutable value: deref the atom, or copy the array or collection into a vector or"
-                " map.")
-           (try (pt/parse (->RenameCardDraft 1 1 (atom "New"))) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))))
-  (testing "a denylist, one level deep: persistent collections and opaque values pass, and so does mutability nested
-            inside a field"
-    (is (some? (pt/parse (->OtherDraft {:a [1]} #{1} (Object.)))))
-    (is (some? (pt/parse (->OtherDraft [(atom 1)] {:a (int-array 1)} nil))))))
+        (is (= {:type ::pt/bad-input, :field :title, :path path, :got got} (refusal v))))))
+  (testing "no check runs"
+    (is (= [] (runs #(thrown-data (fn [] (pt/parse (->RenameCardDraft 1 1 (atom "New")))))))))
+  (testing "the message names the field, the path in it and the fix"
+    (doseq [[v message] [[{:a [1 (atom 1)]} "OtherDraft: the field :title at [:a 1] holds an atom; deref it."]
+                         [(java.util.Date. 0) "OtherDraft: the field :title holds java.util.Date is mutable; use java.time.Instant."]
+                         [(map inc [1]) "OtherDraft: the field :title holds a lazy seq; pass (vec ...)."]
+                         [(int-array 1) "OtherDraft: the field :title holds a Java array; copy it into a vector."]]]
+      (is (= message (try (pt/parse (->OtherDraft 1 1 v)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
+  (testing "immutable values pass: scalars, java.time values, persistent collections, records and parsed values"
+    (doseq [v [nil true \a "s" :k 'sym 1 (int 1) 1.5 1M 1N 1/3 (biginteger 1) (random-uuid) #"re" String
+               (java.time.Instant/now) (java.time.LocalDate/of 2026 1 1) (java.time.ZoneId/of "Europe/Paris")
+               (java.time.Duration/ofSeconds 1) java.time.DayOfWeek/MONDAY
+               [1 [2 #{3}] '(4 5) {:a {:b (java.time.Instant/now)}}] (sorted-map :a 1) clojure.lang.PersistentQueue/EMPTY
+               (->Point 1 [2]) (pt/parse (->OtherDraft 1 1 nil))]]
+      (is (some? (pt/parse (->OtherDraft 1 1 v))) (pr-str v)))))
 
 (deftest error-messages-name-the-fix-test
   (let [real    (pt/parse (->RenameCardDraft 1 1 "New"))
