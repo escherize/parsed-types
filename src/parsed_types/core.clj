@@ -36,7 +36,6 @@
    [clojure.set :as set]
    [clojure.string])
   (:import
-   (clojure.lang Reflector)
    (com.google.common.collect MapMaker)
    (java.lang.reflect Field Modifier)
    (java.util Map)))
@@ -200,6 +199,21 @@
   `(defmethod print-method ~name [x# ^java.io.Writer w#]
      (.write w# (str "#" (.getName (class x#))))
      (print-method (into {} x#) w#)))
+
+(defn- builders
+  "The form of the plain fns the plan of `parsed-name` and `draft-name`, with `fields`, uses to build and read values,
+  so that parsing calls no reflection:
+
+  - `:make-parsed`, of a map of the fields and a proof, builds a parsed value;
+  - `:make-draft`, of a map of the fields, builds a draft;
+  - `:read-draft`, of a draft, returns a map of its fields, each read once from its Java field, not through `get`."
+  [parsed-name draft-name fields]
+  (clojure.core/let [m (gensym "m"), proof (gensym "proof"), d (vary-meta (gensym "d") assoc :tag draft-name)
+                     kws (mapv keyword fields)]
+    `{:fields      ~kws
+      :make-parsed (fn [~m ~proof] (new ~parsed-name ~@(map (fn [k] `(clojure.core/get ~m ~k)) kws) ~proof))
+      :make-draft  (fn [~m] (new ~draft-name ~@(map (fn [k] `(clojure.core/get ~m ~k)) kws)))
+      :read-draft  (fn [~d] ~(into {} (map (fn [f] [(keyword f) `(. ~d ~(symbol (str "-" f)))])) fields))}))
 
 (defn- defparsed-type
   "The form that defines `name`, a bare parsed type with `fields`: a map that only [[parse]] issues. `assoc`, `dissoc`
@@ -439,7 +453,8 @@
        ~(defparsed-type parsed-name fields)
        ~(defdraft-type draft-name fields)
        ;; through `var`, because `register!` is private: only this expansion may record a plan
-       ((var register!) ~parsed-name ~draft-name {:checks ~checks, :fetches ~fetches, :children ~children})
+       ((var register!) ~parsed-name ~draft-name {:checks ~checks, :fetches ~fetches, :children ~children}
+        ~(builders parsed-name draft-name fields))
        ~parsed-name)))
 
 ;;; ------------------------------------------------ State ------------------------------------------------
@@ -464,9 +479,6 @@
         (comp (remove #(Modifier/isStatic (.getModifiers ^Field %)))
               (map #(.getName ^Field %)))
         (.getDeclaredFields (class f))))
-
-(defn- basis [^Class cls]
-  (mapv keyword (Reflector/invokeStaticMethod cls "getBasis" (object-array 0))))
 
 (defn- draft-value?
   "Whether `x` is a draft of a type [[defparsed]] defined. A type that only implements `DraftValue` is not."
@@ -548,7 +560,7 @@
   - An external check waits on its fetches and on every pure check.
 
   Pure checks run first, fewest fields first, then fetches, then external checks, each in declaration order."
-  [parses-to draft-class {:keys [checks fetches children], :as decl}]
+  [parses-to draft-class fields {:keys [checks fetches children], :as decl}]
   (validate-declaration! draft-class decl)
   (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check parses-to field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
@@ -571,7 +583,7 @@
     {:draft-class     draft-class
      :parses-to       parses-to
      :declaration     (assoc decl :parses-to parses-to)
-     :fields          (basis draft-class)
+     :fields          fields
      :children        children
      :pure            (vec (sort-by (comp count reads-set) pure'))
      :fetches         (vec fetches')
@@ -589,10 +601,11 @@
     :else                                               (str "a " (.getSimpleName (class x)))))
 
 (defn- register!
-  "Build and check the plan of `draft-type`, which parses to `parsed-type`, and record it for both. Called by the
-  expansion of [[defparsed]], when it loads; throws `::bad-declaration` then."
-  [parsed-type draft-type decl]
-  (let [plan (compile-plan parsed-type draft-type decl)]
+  "Build and check the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the
+  `builders` [[defparsed]] generated. Called by the expansion of [[defparsed]], when it loads; throws
+  `::bad-declaration` then."
+  [parsed-type draft-type decl builders]
+  (let [plan (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
     (.put registry draft-type plan)
     (.put registry parsed-type plan)))
 
@@ -631,17 +644,11 @@
           (recur (into (vec more) (:prereqs x)) (conj seen n))))
       seen)))
 
-(defn- read-fields
-  "The draft's field values, read once from its Java fields, not through `get`, which a type could make answer
-  differently on each call."
-  [draft fields]
-  (into {} (map (fn [f] [f (Reflector/getInstanceField draft (munge (name f)))])) fields))
-
 (defn- start [draft names]
   (let [plan (plan-for draft)]
     {:draft   draft
      ;; every field read once, so the checks and the parsed value see the same values
-     :values  (read-fields draft (:fields plan))
+     :values  ((:read-draft plan) draft)
      :plan    plan
      :needed  (needed plan (or names (keys (:checks-by-name plan))))
      :fetched {}
@@ -845,14 +852,10 @@
         :when                       (contains? (failed n) :returned)]
     (str n (when (seq path) (str " at " path)))))
 
-(defn- construct ^Object [^Class cls fields values]
-  (Reflector/invokeConstructor cls (object-array (map #(get values %) fields))))
-
 (defn- build-parsed
   "A value of the parsed type of `plan` with the fields in `values`, holding `proof`."
-  ^Object [plan values proof]
-  (Reflector/invokeConstructor (:parses-to plan)
-                               (object-array (concat (map #(get values %) (:fields plan)) [proof]))))
+  [plan values proof]
+  ((:make-parsed plan) values proof))
 
 (defn- issue-tree
   "The parsed root of the tree that passed: every node rebuilt with the proof, children before parents, so each parent
@@ -888,10 +891,10 @@
 (defn assoc-draft
   "`draft` with `field` set to `v`: a new draft. This is what `assoc` on a draft does; call `assoc`."
   [draft field v]
-  (let [{:keys [fields draft-class]} (plan-for draft)]
+  (let [{:keys [fields make-draft read-draft]} (plan-for draft)]
     (when-not (some #{field} fields)
       (no-field! draft field))
-    (construct draft-class fields (assoc (read-fields draft fields) field v))))
+    (make-draft (assoc (read-draft draft) field v))))
 
 (defn parse-all
   "Parse each draft and the drafts under it. Returns a vector of parsed values aligned with `drafts`, or throws
@@ -991,7 +994,7 @@
                               (update vs field #(if (= :one kind) (some-> % draft-of) (mapv draft-of %))))
                             (into {} (map (fn [f] [f (get parsed f)])) (:fields plan))
                             (:children plan))]
-      (construct (:draft-class plan) (:fields plan) values))))
+      ((:make-draft plan) values))))
 
 ;;; ------------------------------------------------ Building and reading ------------------------------------------------
 
@@ -999,7 +1002,7 @@
   "A draft of `draft-type` with the fields in `m`, nil for each one `m` leaves out. A non-map, or a key that is not a
   field, throws `::bad-input`. Called by [[draft]]."
   [^Class draft-type m]
-  (let [fields (basis draft-type)]
+  (let [{:keys [fields make-draft]} (.get registry draft-type)]
     (when-not (map? m)
       (throw (ex-info (str "Expected a map to build a " (.getSimpleName draft-type) ", got " (describe m)
                            ". Pass a map with some of its fields " fields ".")
@@ -1008,7 +1011,7 @@
       (throw (ex-info (str (.getSimpleName draft-type) " has no fields " (vec unknown) ". Remove them, or use its"
                            " fields " fields ".")
                       {:type ::bad-input, :unknown-fields (vec unknown), :fields fields})))
-    (construct draft-type fields m)))
+    (make-draft m)))
 
 (defmacro draft
   "A draft of the parsed type `parsed-type`, defined with [[defparsed]], with the fields in `m`.
@@ -1026,7 +1029,7 @@
                   (refuse! (str "draft: " parsed-type " is not a type defined with defparsed. Name a parsed type that"
                                 " defparsed defined, not a sum or a draft.")))
         dsym    (symbol (.getName ^Class dcls))
-        flds    (basis dcls)]
+        flds    (:fields (.get registry cls))]
     (if (map? m)
       (do (when-let [unknown (seq (remove (set flds) (keys m)))]
             (refuse! (str "draft: " parsed-type " has no fields " (vec unknown) "; its fields are " flds
