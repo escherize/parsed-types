@@ -770,6 +770,19 @@
                                      " as in " (reload-command nss) ".")))
                          {:type ::stale-type, :rule ::rule/stale-sum, :sum (str sum-name), :class (name-of t)
                           :sum-ns sum-ns}))))
+     ;; before the missing members: a clause that names a draft type is usually the member it misses
+     (when (seq extra)
+       (refuse! ::rule/match-not-a-member
+                (str "match on " sum-name ": not members: " (mapv simple extra) ". A clause handles a member of the"
+                     " sum. "
+                     (if-let [[d p] (first (keep (fn [^Class c]
+                                                   (when (.isAssignableFrom DraftValue c)
+                                                     (some->> (.get registry c) :parses-to (vector c))))
+                                                 extra))]
+                       (str (simple d) " is the draft of " (simple p) ", and a match branches on parsed values."
+                            " Write " (simple p) " for " (simple d) ".")
+                       "Remove those clauses, or add the types to the defsum."))
+                {:extra (mapv name-of extra)}))
      (when (seq missing)
        (let [simple (mapv simple missing)]
          (refuse! ::rule/match-missing-member
@@ -777,11 +790,6 @@
                        " one to the sum breaks every match that misses it. Add a clause for each, as in "
                        (first simple) " x (f x).")
                   {:missing missing})))
-     (when (seq extra)
-       (refuse! ::rule/match-not-a-member
-                (str "match on " sum-name ": not members: " (mapv #(symbol (.getSimpleName ^Class %)) extra) ". A"
-                     " clause handles a member of the sum. Remove those clauses, or add the types to the defsum.")
-                {:extra (mapv name-of extra)}))
      ;; distinct by name: two classes of one name are the type before and after a REPL re-evaluated it
      (when-not (apply distinct? (map name-of types))
        (refuse! ::rule/match-member-twice
@@ -1426,9 +1434,19 @@
           (:kind ((:checks-by-name plan) n)))))
 
 (defn- failed-names
-  "Each check that returned a failure in `st`, in the order they ran, as `[name doc]`."
+  "Each check that returned a failure in `st`, in the order they ran, as `[name doc returned]`."
   [{:keys [failed order]}]
-  (for [n order :when (contains? (failed n) :returned)] [n (:doc (failed n))]))
+  (for [n order :when (contains? (failed n) :returned)] [n (:doc (failed n)) (:returned (failed n))]))
+
+(defn- truthy-hint
+  "A hint for a check that returned `x`, a value that is truthy but not `true`, as `(seq xs)` or a count does: it
+  fails, which is rarely what the body meant. Empty for nil, false, a string or a map, which a check returns on
+  purpose to say why it failed."
+  [x]
+  (if (or (not x) (true? x) (string? x) (map? x))
+    ""
+    (str ", which returned " (binding [*print-length* 5, *print-level* 3] (pr-str x)) ", which is truthy but not"
+         " true; wrap the body in (boolean ...)")))
 
 (defn- issue
   "The parsed value of `st`, whose checks all passed: built with the proof, from the fields the checks saw."
@@ -1436,13 +1454,15 @@
   ((:make-parsed plan) values parse-token))
 
 (defn- invalid!
-  "Throws `::invalid` for `what`, naming each failed check of `named`, `[label doc]` pairs, and its doc: the first
-  five, then how many more."
+  "Throws `::invalid` for `what`, naming each failed check of `named`, `[label doc returned]` triples, and its doc:
+  the first five, then how many more."
   [what named sts data]
   (let [shown (take 5 named)
         more  (- (count named) (count shown))]
     (throw (ex-info (str "Invalid " what ": " (count named) (if (= 1 (count named)) " check" " checks") " failed: "
-                         (clojure.string/join ", " (map (fn [[label doc]] (str label " (" doc ")")) shown))
+                         (clojure.string/join ", " (map (fn [[label doc returned]]
+                                                         (str label " (" doc ")" (truthy-hint returned)))
+                                                       shown))
                          (when (pos? more) (str ", and " more " more"))
                          ". A draft parses only when every check returns exactly true. Change the draft so they pass"
                          " and parse again; (:failures (ex-data e)) has what each returned.")
@@ -1475,7 +1495,7 @@
         failures (into (sorted-map) (keep-indexed (fn [i st] (some->> (not-empty (:failed st)) (vector i)))) sts)]
     (when (seq failures)
       (invalid! (str "drafts at indexes " (vec (keys failures)))
-                (for [i (keys failures), [n doc] (failed-names (nth sts i))] [(str n " in draft " i) doc])
+                (for [i (keys failures), [n doc returned] (failed-names (nth sts i))] [(str n " in draft " i) doc returned])
                 sts
                 {:failures failures}))
     (mapv issue sts)))

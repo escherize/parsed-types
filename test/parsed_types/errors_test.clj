@@ -324,6 +324,33 @@
   (is (str/includes? (:message (error #(pt/parse (pt/draft Seven {:a :a, :b :b, :c :c, :d :d, :e :e, :f :f, :g :g}))))
                      "(e is an integer.), and 2 more.")))
 
+(pt/defparsed Truthy [k]
+  (pure ::returns "Returns the value k names." [k]
+        (get {:seq (seq [1 2]), :num 3, :lazy (range), :nil nil, :false false, :str "too long", :map {:length 9}} k)))
+
+(deftest a-truthy-result-that-is-not-true-gets-a-hint-test
+  (testing "a seq or a number is truthy but not true: the message says to wrap the body in (boolean ...)"
+    (doseq [[k shown] [[:seq "(1 2)"] [:num "3"] [:lazy "(0 1 2 3 4 ...)"]]]
+      (is (str/includes? (:message (error #(pt/parse (pt/draft Truthy {:k k}))))
+                         (str "(Returns the value k names.), which returned " shown ", which is truthy but not true;"
+                              " wrap the body in (boolean ...)")))))
+  (testing "and the fix passes"
+    (is (some? ((compiling '(do (pt/defparsed Truthy2 [xs] (pure ::xs-seq "Wrapped." [xs] (boolean (seq xs))))
+                                (pt/parse (pt/draft Truthy2 {:xs [1]}))))))))
+  (testing "nil, false, a string and a map are failures on purpose: no hint"
+    (doseq [k [:nil :false :str :map]]
+      (is (not (str/includes? (:message (error #(pt/parse (pt/draft Truthy {:k k})))) "boolean")) (pr-str k)))))
+
+(deftest match-naming-a-draft-type-says-which-type-test
+  (let [{:keys [rule message]} (error (compiling '(fn [x] (pt/match Txn x DebitDraft d 1 Credit c 2))))]
+    (testing "the clause that is not a member is reported first, since naming the parsed type fixes both"
+      (is (= :parsed-types.rule/match-not-a-member rule)))
+    (testing "and the message names the parsed type, not the defsum"
+      (is (str/includes? message "DebitDraft is the draft of Debit, and a match branches on parsed values. Write Debit for DebitDraft."))
+      (is (not (str/includes? message "add the types to the defsum"))))
+    (testing "and the fix compiles"
+      (is (fn? ((compiling '(fn [x] (pt/match Txn x Debit d 1 Credit c 2)))))))))
+
 (pt/defparsed Unit [])
 
 ;; public: a check below calls it by its qualified name
