@@ -570,6 +570,48 @@
     (is (= ::pt/cannot-change (try (empty m) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))
     (is (= [[:amount 1M] [:count 2]] (reduce-kv (fn [acc k v] (conj acc [k v])) [] m)) "kvreduce in field order")))
 
+(deftest every-java-map-mutator-throws-ex-info-test
+  (let [f2   (reify java.util.function.BiFunction (apply [_ _ _] 9M))
+        f1   (reify java.util.function.Function (apply [_ _] 9M))
+        keep (reify java.util.function.Predicate (test [_ _] true))
+        op   (fn [thunk] (select-keys (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-data e))) [:type :op]))]
+    (doseq [[label ^java.util.Map m] [["a parsed value" (pt/parse (->MoneyDraft 1M 2))] ["a draft" (->MoneyDraft 1M 2)]]]
+      (testing label
+        (testing "the default methods of java.util.Map"
+          (doseq [[name thunk] [["replaceAll" #(.replaceAll m f2)]
+                                ["compute" #(.compute m :amount f2)]
+                                ["computeIfAbsent" #(.computeIfAbsent m :amount f1)]
+                                ["computeIfPresent" #(.computeIfPresent m :amount f2)]
+                                ["merge" #(.merge m :amount 9M f2)]
+                                ["putIfAbsent" #(.putIfAbsent m :amount 9M)]
+                                ["replace" #(.replace m :amount 9M)]
+                                ["replace" #(.replace m :amount 1M 9M)]
+                                ["remove" #(.remove m :amount 1M)]]]
+            (is (= {:type ::pt/cannot-change, :op name} (op thunk)) name)))
+        (testing "the views, their iterators and their entries"
+          (doseq [[name thunk] [["keySet().clear" #(.clear (.keySet m))]
+                                ["keySet().remove" #(.remove (.keySet m) :amount)]
+                                ["keySet().add" #(.add (.keySet m) :x)]
+                                ["keySet().removeIf" #(.removeIf (.keySet m) keep)]
+                                ["keySet().iterator().remove" #(let [it (.iterator (.keySet m))] (.next it) (.remove it))]
+                                ["values().remove" #(.remove (.values m) 2)]
+                                ["values().retainAll" #(.retainAll (.values m) [])]
+                                ["values().addAll" #(.addAll (.values m) [1])]
+                                ["values().clear" #(.clear (.values m))]
+                                ["entrySet().removeAll" #(.removeAll (.entrySet m) (vec (.entrySet m)))]
+                                ["entrySet().iterator().remove" #(let [it (.iterator (.entrySet m))] (.next it) (.remove it))]
+                                ["setValue" #(.setValue ^java.util.Map$Entry (first (.entrySet m)) 9M)]]]
+            (is (= {:type ::pt/cannot-change, :op name} (op thunk)) name)))
+        (testing "while the views read like a java.util.HashMap's"
+          (let [h (java.util.HashMap. {:amount 1M, :count 2})]
+            (is (= (.keySet h) (.keySet m)))
+            (is (= #{:amount :count} (.keySet m)))
+            (is (= (.entrySet h) (.entrySet m)))
+            (is (= (.hashCode (.entrySet h)) (.hashCode (.entrySet m))))
+            (is (= (set (.values h)) (set (.values m))))
+            (is (.contains (.values m) 2))
+            (is (= 2 (count (.toArray (.values m) (object-array 0)))))))))))
+
 (deftest conj-test
   (let [d (->MoneyDraft 1M 2)]
     (is (= 5M (:amount (conj d [:amount 5M]))))

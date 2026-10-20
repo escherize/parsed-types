@@ -247,6 +247,76 @@
                        " this vector has " (count v) " elements. Write (conj x [k v]), or (assoc x k v).")
                   {:type ::bad-input, :rule ::rule/conj-not-a-pair, :got v})))
 
+(defn- read-only-entry
+  "A `java.util.Map$Entry` of `e`, an entry of `x`, a draft or parsed value, whose `setValue` throws as `fail`, the
+  [[final!]] or [[fixed!]] of `x`, does. Called by the types [[defparsed]] defines."
+  [x fail ^java.util.Map$Entry e]
+  (let [k (.getKey e), v (.getValue e)]
+    (reify java.util.Map$Entry
+      (getKey [_] k)
+      (getValue [_] v)
+      (setValue [_ _] (fail x "setValue" k))
+      ;; as java.util.Map$Entry specifies
+      (equals [_ o] (and (instance? java.util.Map$Entry o)
+                         (java.util.Objects/equals k (.getKey ^java.util.Map$Entry o))
+                         (java.util.Objects/equals v (.getValue ^java.util.Map$Entry o))))
+      (hashCode [_] (bit-xor (java.util.Objects/hashCode k) (java.util.Objects/hashCode v)))
+      (toString [_] (str k "=" v)))))
+
+(defn- read-only-view
+  "The `java.util` view `view`, `\"keySet\"`, `\"values\"` or `\"entrySet\"`, of `x`, a draft or parsed value, over
+  the vector `items`: a `Set`, or for `values` a `Collection`. Each mutator, of the view or of its iterator, throws as
+  `fail`, the [[final!]] or [[fixed!]] of `x`, does. Called by the types [[defparsed]] defines."
+  [x fail view items]
+  (let [refuse (fn [op] (fail x (str view "()." op) nil))
+        values? (= "values" view)
+        ^java.util.Collection back (if values?
+                                     (java.util.ArrayList. ^java.util.Collection items)
+                                     (java.util.LinkedHashSet. ^java.util.Collection items))
+        iter   (fn []
+                 (let [it (.iterator back)]
+                   (reify java.util.Iterator
+                     (hasNext [_] (.hasNext it))
+                     (next [_] (.next it))
+                     (remove [_] (refuse "iterator().remove")))))]
+    ;; a Set, so a key set or entry set equals a set with the same members; values is only a Collection, as for
+    ;; java.util.HashMap, equal only to itself
+    (if values?
+      (reify java.util.Collection
+        (size [_] (.size back))
+        (isEmpty [_] (.isEmpty back))
+        (contains [_ o] (.contains back o))
+        (containsAll [_ c] (.containsAll back c))
+        (iterator [_] (iter))
+        (toArray [_] (.toArray back))
+        (^objects toArray [_ ^objects a] (.toArray back a))
+        (add [_ _] (refuse "add"))
+        (addAll [_ _] (refuse "addAll"))
+        (remove [_ _] (refuse "remove"))
+        (removeAll [_ _] (refuse "removeAll"))
+        (retainAll [_ _] (refuse "retainAll"))
+        (removeIf [_ _] (refuse "removeIf"))
+        (clear [_] (refuse "clear"))
+        (toString [_] (.toString back)))
+      (reify java.util.Set
+        (size [_] (.size back))
+        (isEmpty [_] (.isEmpty back))
+        (contains [_ o] (.contains back o))
+        (containsAll [_ c] (.containsAll back c))
+        (iterator [_] (iter))
+        (toArray [_] (.toArray back))
+        (^objects toArray [_ ^objects a] (.toArray back a))
+        (add [_ _] (refuse "add"))
+        (addAll [_ _] (refuse "addAll"))
+        (remove [_ _] (refuse "remove"))
+        (removeAll [_ _] (refuse "removeAll"))
+        (retainAll [_ _] (refuse "retainAll"))
+        (removeIf [_ _] (refuse "removeIf"))
+        (clear [_] (refuse "clear"))
+        (equals [_ o] (.equals back o))
+        (hashCode [_] (.hashCode back))
+        (toString [_] (.toString back))))))
+
 (defn- map-type-methods
   "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws unless a default
   is given. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name`, the form of a fn, throws for
@@ -325,14 +395,27 @@
       (~'size [~this] ~(count fields))
       (~'isEmpty [~this] ~(empty? fields))
       (~'containsValue [~this ~o] (clojure.core/boolean (clojure.core/some #(clojure.core/= ~o %) [~@fields])))
-      (~'keySet [~this] ~(set kws))
-      (~'values [~this] [~@fields])
-      (~'entrySet [~this] (clojure.core/set ~entries))
-      ;; ex-info, a RuntimeException like UnsupportedOperationException, so it is unchecked all the same
+      ;; views whose mutators, and their iterators' and entries', throw like the map's own
+      (~'keySet [~this] ((var read-only-view) ~this ~final-name "keySet" ~kws))
+      (~'values [~this] ((var read-only-view) ~this ~final-name "values" [~@fields]))
+      (~'entrySet [~this] ((var read-only-view) ~this ~final-name "entrySet"
+                                                (clojure.core/mapv (fn [e#] ((var read-only-entry) ~this ~final-name e#))
+                                                                   ~entries)))
+      ;; ex-info, a RuntimeException like UnsupportedOperationException, so it is unchecked all the same. The default
+      ;; methods of java.util.Map would call put, or setValue on an entry, so each throws here first.
       (~'put [~this ~k ~v] (~final-name ~this "put" ~k))
       (~'putAll [~this ~o] (~final-name ~this "putAll" nil))
       (~'remove [~this ~k] (~final-name ~this "remove" ~k))
+      (~'remove [~this ~k ~v] (~final-name ~this "remove" ~k))
       (~'clear [~this] (~final-name ~this "clear" nil))
+      (~'replaceAll [~this ~f] (~final-name ~this "replaceAll" nil))
+      (~'compute [~this ~k ~f] (~final-name ~this "compute" ~k))
+      (~'computeIfAbsent [~this ~k ~f] (~final-name ~this "computeIfAbsent" ~k))
+      (~'computeIfPresent [~this ~k ~f] (~final-name ~this "computeIfPresent" ~k))
+      (~'merge [~this ~k ~v ~f] (~final-name ~this "merge" ~k))
+      (~'putIfAbsent [~this ~k ~v] (~final-name ~this "putIfAbsent" ~k))
+      (~'replace [~this ~k ~v] (~final-name ~this "replace" ~k))
+      (~'replace [~this ~k ~o ~v] (~final-name ~this "replace" ~k))
 
       Object
       (~'hashCode [~this] (clojure.lang.APersistentMap/mapHash ~this))
