@@ -43,6 +43,15 @@
   (pure ::f "f is an integer." [f] (int? f))
   (pure ::g "g is an integer." [g] (int? g)))
 
+(pt/defparsed Throwy [amount]
+  (pure ::amount-positive "The amount is positive." [amount] (pos? amount)))
+
+(defn- nil-rows [tuples] (into {} (map (fn [t] [t nil])) tuples))
+
+(pt/defparsed ThrowyRow [id]
+  (external ::balance-positive "The balance is positive." [] [row ::row] (pos? (:balance row)))
+  (fetch ::row [id] nil-rows))
+
 (defn- error
   "What `thunk` threw: the first ex-info with a `:type`, through compiler wrapping, as `{:type :rule :message}`."
   [thunk]
@@ -185,6 +194,11 @@
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
    [:checks-failed #(pt/parse (pt/draft Debit {:user-id 1, :account-id :x, :amount -5})) "Invalid Debit: 2 checks failed"
     ":parsed-types.errors-test/amount-positive (The amount is positive.)" "Change the draft so they pass"]
+   [:checks-failed #(pt/parse (pt/draft Throwy {:amount :x}))
+    "Invalid Throwy: 1 check failed: :parsed-types.errors-test/amount-positive (The amount is positive.) threw ClassCastException: "
+    "(pure ::amount-number \"amount is a number.\" [amount] (number? amount))" "(:threw (ex-data e)) names every check that threw"]
+   [:checks-failed #(pt/parse (pt/draft ThrowyRow {:id 1}))
+    "(The balance is positive.) threw NullPointerException: " "guard it in the body, as in (and (some? row) (:ok? row))"]
    ;; sinks
    [:not-a-parsed-type #(pt/parsed :x real) "pt/parsed got :x as its type" "(pt/parsed Debit x)"]
    [:got-unparsed #(pt/parsed Debit nil) "got nil" "Write (pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...})) and pass the result"]
@@ -476,6 +490,25 @@
         (is (= :parsed-types.rule/missing-argument rule) (pr-str form))
         (is (some? fix) message)
         (is (some? ((compiling (wrap (read-string (str/replace (str fix) "..." "1")))))) fix))))
+  (testing "a pure check that throws: the guard the message names, written before it, holds it"
+    (let [guard (re-find #"\(pure ::\S+ \"[^\"]*\" \[\w+\] \(\S+ \w+\)\)" (:message (error #(pt/parse (pt/draft Throwy {:amount :x})))))
+          data  (ex-data (try ((compiling (list 'do (list 'pt/defparsed 'Throwy2 '[amount] (binding [*ns* (the-ns 'parsed-types.errors-test)] (read-string guard))
+                                                          '(pure ::amount-positive "The amount is positive." [amount] (pos? amount)))
+                                                '(pt/parse (pt/draft Throwy2 {:amount :x})))))
+                              nil
+                              (catch clojure.lang.ExceptionInfo e e)))]
+      (is (some? guard))
+      (is (= ::pt/invalid (:type data)))
+      (is (= #{} (:threw data)) "nothing throws")
+      (is (= [::amount-positive] (get-in data [:failures ::amount-number :blocked])) "the guard holds the check")))
+  (testing "an external check that throws on a fetch that found nothing: the guard the message names returns false"
+    (let [e (try ((compiling '(do (pt/defparsed ThrowyRow2 [id]
+                                    (external ::ok "The row is ok." [] [row ::row] (and (some? row) (:ok? row)))
+                                    (fetch ::row [id] nil-rows))
+                                  (pt/parse (pt/draft ThrowyRow2 {:id 1})))))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+      (is (= {:type ::pt/invalid, :threw #{}} (select-keys (ex-data e) [:type :threw])))))
   (testing "parse of a value parse issued says it is already parsed"
     (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
 

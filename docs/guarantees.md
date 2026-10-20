@@ -31,7 +31,8 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on each library interface print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to every `:blocked` and `:failed-kinds` |
 | Pure checks run in the order written, and a failure holds the later checks on its fields | Each pure check runs in its written place, held when a pure check before it that shares a field ran and failed. A held check didn't run, so it holds nothing and lists nothing under `:blocked`. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `a-held-check-holds-nothing-test`, `parse-matches-the-model` |
-| Malformed input never reaches a fetch or an external check | A draft that failed a pure check fetches nothing, and its external checks are held | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test` |
+| A check body that throws is recorded, and its phase keeps going | Each `Exception` a pure or external check's body throws becomes its failure, `{:doc :threw}`, and holds later checks as a failure does. The other checks of its phase run. `:threw` names the checks that threw, and the first exception, in run order, is the cause. An exception from a fetch or from the library, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-is-recorded-test`, `parse-all-records-a-thrown-check-per-draft-test`, `what-a-check-throws-that-is-not-recorded-test` |
+| Malformed input never reaches a fetch or an external check | A draft whose pure check failed or threw fetches nothing, and its external checks are held | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | `parse-all` gathers the tuples of every draft in the call, per declaration and fetch, and deduplicates them; a missing answer throws `::bad-fetch`. So a parent built from `(pt/parse-all parts)` costs one call per fetch, not one per part | `parse-all-fetches-once-with-each-distinct-tuple`, `batching-test`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Each draft's checks see only that draft | `parse-all-agrees-with-parse`, `parse-all-agrees-with-parse-across-declarations` |
 | A fetch may be a var | A var that holds a fn passes the load-time check and is called through, so `with-redefs` on it reaches the fetch | `a-fetch-may-be-a-var-test` |
@@ -46,8 +47,7 @@ This page lists what parsed-types promises, the test that pins each promise, its
 
 ## Accepted limits
 
-The proof makes a parsed value impossible to build by accident, and hard to forge by mistake. These ways around it,
-and these gaps, are accepted:
+The proof stops accidents, not forgers. These ways around it, and these gaps, are accepted:
 
 - **Reflection can forge:** `setAccessible` reaches the proof field.
 - **Any private var of `parsed-types.core` can forge.** Code can name the private token as
@@ -89,11 +89,11 @@ The ex-data holds the same facts as data. When a key is not a field, the message
 `Did you mean :account-id?`, and `:suggestion` holds it. Where a fix builds a value, it names `pt/draft` with the type's own fields, as in
 `(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))`. `parsed-types.errors-test` has an example of every
 rule, and fails when `core.clj` has a rule with no example, an `ex-info` without a `:rule`, or a `throw` of anything
-but an `ex-info`. Class names in ex-data are strings, so ex-data can be serialized.
+but an `ex-info`. Class names in ex-data are strings, so ex-data can be serialized, but for the exception a `:threw` entry holds.
 
 | `:type` | Thrown when | Other ex-data |
 |---|---|---|
-| `::invalid` | `parse` or `parse-all` ran the checks and some failed. The message names the first five failed checks with their docs, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
+| `::invalid` | `parse` or `parse-all` ran the checks and some failed or threw. The message names the first five with their docs and what each threw, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:failures`, `:threw`, `:failed-kinds`, and `:draft` from `parse` |
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed` | `:class`, and `:ns` where it applies |
 | `::cannot-change` | a change to a parsed value, a `dissoc`, `with-meta` or `empty` on a draft, or a `java.util.Map` mutator on either | `:parsed` or `:draft`, `:op`, `:key` |
@@ -105,11 +105,16 @@ but an `ex-info`. Class names in ex-data are strings, so ex-data can be serializ
 For `::invalid`:
 
 - `:failures` maps each failed or held check's name to `{:doc :returned :blocked}`. `:returned` is what the check
-  returned; a held check has none. `:blocked` lists the checks a failure held. From `parse-all`, `:failures` maps
-  the index of each draft that failed to its failures.
-- `:failed-kinds` is a set of `:pure` and `:external`: the kinds of check that returned a failure. A pure failure
+  returned. A check whose body threw has `:threw`, the exception, instead. A held check has neither. `:blocked` lists
+  the checks a failure held.
+- `:threw` is the set of the checks that threw, `#{}` when none did. One that is not empty means a check has a bug,
+  not that the input is bad. The ex-info's cause is the first exception thrown, in the order the checks ran.
+- `:failed-kinds` is a set of `:pure` and `:external`: the kinds of check that failed or threw. A pure failure
   means the input is malformed. An external one means a check of the world refused it.
-- `:draft` is the name of the draft's class.
+- `:draft` is the name of the draft's class, from `parse` only.
+
+From `parse-all`, `:failures` maps the index of each draft that failed to its failures, and `:threw` maps the index
+of each draft where a check threw to that set, `{}` when none did.
 
 ### Every rule
 
@@ -174,7 +179,8 @@ Parsing (`::bad-input`, `::invalid`, `::bad-fetch`):
 - `value-too-deep`: a field nests deeper than 1000 levels.
 - `draft-in-field`: a field holds a draft. Fix: `(pt/parse d)`, or `(pt/parse-all ds)` for a vector.
 - `unissued-in-field`: a field holds a value of a parsed type that `parse` didn't issue.
-- `checks-failed`: some check returned anything but `true`.
+- `checks-failed`: some check returned anything but `true`, or threw. Fix for a pure check that threw: a pure check
+  written before it that guards its input, as in `(pure ::amount-number "amount is a number." [amount] (number? amount))`.
 - `fetch-missing-tuples`: a fetch returned no map, or no entry for some tuple.
 
 Sinks (`::bad-input`, `::not-parsed`, `::stale-type`):
@@ -228,15 +234,15 @@ them throws `type-not-loaded` until the `defparsed` is fixed and re-evaluated.
 - **Depth.** Nesting deeper than 1000 levels is refused, with the rule `value-too-deep`. The message shows the first
   8 steps of a longer path, and so does `:path` in the ex-data, with `:depth` for its length. The walk keeps its own
   stack, so a thread with a small stack gets the same answer.
-- **Cost.** The walk costs time per value inside a field: about 25 us for 1,000 numbers in 100 vectors. An issued
-  value in a field costs one step, so a large immutable value parsed once is not walked again by each parent that
-  holds it. `clojure -M:bench` prints the current numbers.
+- **Cost.** The walk costs about 25 us for 1,000 numbers in 100 vectors; an issued value in a field costs one step.
+  `clojure -M:bench` prints the current numbers.
 - **Fetch calls.** One call per declaration and fetch for the whole `parse-all`, with each distinct tuple once.
-  Drafts that failed a pure check add no tuple.
+  Drafts whose pure check failed or threw add no tuple.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` evaluates its values as Clojure evaluates the same map literal:** in the order written for up to 8
   keys, and in hash order beyond, since the reader makes a hash map of a larger literal.
-- **Exceptions** thrown by a check or fetch propagate out of `parse` and stop `parse-all`.
+- **Exceptions.** A fetch's exception propagates out of `parse` and stops `parse-all`: a database outage is not
+  bad input. A check body's is recorded, as above.
 
 ## REPL reloads
 
@@ -258,31 +264,17 @@ Each command names the namespaces in the order they depend on each other, and wo
 until its `ns` form runs again, so the message offers re-evaluating single forms only when every form involved is in
 one namespace.
 
-Reloading `parsed-types.core` itself keeps everything defined before working: the token is a `defonce`, and the
-library defines its interfaces and its sum class only when they are not loaded yet.
-
 ## Tests
 
-`clojure -X:test` runs:
-
-- `bank-test`: transfers, payrolls built from parsed transfers, and payments, against an in-memory bank;
-- `readme-test`: every code block of the README, run;
-- `core-test`: each behavior, the proof, mutable values, and the ways to forge or change a value we know of;
-- `defparsed-test`: compile errors, load errors, unknown keys, field names, REPL reloads, with the namespaces under
-  `test/parsed_types/stale_fixture` reloaded to apply each reload command a message prints;
-- `properties-test`: `test.check` properties over random drafts, against a model written by hand;
-- `errors-test`: an example of every error rule, with the values and the fix its message must hold, and a check
-  that every test this page cites exists.
-
-`clojure -M:bench` prints timings; it is not part of the tests.
+`clojure -X:test` runs `bank-test` (an in-memory bank), `readme-test` (every README block), `core-test` (each
+behavior, the proof, mutable values, and known ways to forge or change a value), `defparsed-test` (compile and load
+errors, unknown keys, field names, and REPL reloads, applying each reload command a message prints),
+`properties-test` (`test.check` properties against a model written by hand), and `errors-test` (an example of every
+rule, and a check that every test this page cites exists). `clojure -M:bench` prints timings.
 
 ## Lint
 
-The library ships a clj-kondo config. A check that uses a field it didn't name is an unresolved symbol in the editor,
-and one that names a field it doesn't use is an unused binding. `match` lints as a `let` per branch. A private var
-of `parsed-types.core` named outside it, as in `#'pt/issue`, is flagged, and
-`the-lint-config-flags-every-private-var-test` keeps the list whole. Copy the config with:
-
-```
-clj-kondo --lint "$(clojure -Spath)" --dependencies --copy-configs --skip-lint
-```
+The library ships a clj-kondo config, installed as the README shows. A check that uses a field it didn't name is an
+unresolved symbol, and one that names a field it doesn't use is an unused binding. `match` lints as a `let` per
+branch. A private var of `parsed-types.core` named outside it, as in `#'pt/issue`, is flagged, and
+`the-lint-config-flags-every-private-var-test` keeps the list whole.

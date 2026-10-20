@@ -226,7 +226,7 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 
 | `:type` | Thrown when |
 |---|---|
-| `::invalid` | a check failed; `:failures` has each one |
+| `::invalid` | a check failed or threw; `:failures` has each one, and `:threw` names those that threw |
 | `::not-parsed` | a sink, `match` or `draft-of` got a value `parse` didn't make |
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after |
 | `::cannot-change` | code changed a parsed value, or called `dissoc`, `with-meta` or `empty` on a draft |
@@ -235,17 +235,18 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 | `::bad-declaration` | a `defparsed`, `defsum` or `match` has an error, or misses an argument, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no map, or no entry for a tuple |
 
-The library sets no HTTP status codes; a handler maps `:type` to its own. From `parse-all`, `:failures` maps the
-index of each draft that failed to its failures:
+`:threw` names the checks whose body threw, so a handler can send a bug in a check to its 500 before it reads
+`:failed-kinds`. From `parse-all`, `:failures` and `:threw` map the index of each draft that failed to its entries:
 
 ```clojure
 (defn order-route [request]
   (try
     {:status 201, :body (handle-order request)}
     (catch clojure.lang.ExceptionInfo e
-      (let [{:keys [type failed-kinds failures]} (ex-data e)]
+      (let [{:keys [type threw failed-kinds failures]} (ex-data e)]
         (cond
           (not= ::pt/invalid type) (throw e)
+          (seq threw)              {:status 500, :body "A check threw."}
           (:pure failed-kinds)     {:status 400, :body failures}
           :else                    {:status 422, :body failures})))))
 
@@ -257,7 +258,8 @@ index of each draft that failed to its failures:
 
 A key that isn't a field throws instead of reading nil. A check passes only on exactly `true`; for a truthy result
 such as `(seq xs)`, the message says to wrap the body in `(boolean ...)`. An external check gets nil when a fetch
-found nothing, so guard it, as `(:price product)` does. There is no `check` or `check-all`, because each returned a
+found nothing, so guard it, as `(:price product)` does. A check body that throws is recorded under `:threw`, and its
+exception is the cause; the other checks of its phase still run. An exception from a fetch propagates. There is no `check` or `check-all`, because each returned a
 truthy value whether the checks passed or failed. A test stubs a fetch declared through its var, as
 `#'customers-by-id` is, with `(with-redefs [customers-by-id stub] ...)`.
 

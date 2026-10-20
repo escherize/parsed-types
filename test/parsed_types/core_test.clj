@@ -86,6 +86,7 @@
             :rule         :parsed-types.rule/checks-failed
             :failed-kinds #{:pure}
             :draft        "parsed_types.core_test.RenameCardDraft"
+            :threw        #{}
             :failures    {::card-id-positive {:doc      "The card id is a positive integer."
                                               :returned false
                                               :blocked  [::title-not-the-card-id ::may-write-card]}
@@ -98,6 +99,7 @@
             :rule         :parsed-types.rule/checks-failed
             :failed-kinds #{:external}
             :draft        "parsed_types.core_test.RenameCardDraft"
+            :threw        #{}
             :failures     {::may-write-card {:doc "User 1 may write the card.", :returned false}}}
            (thrown-data #(pt/parse (pt/draft RenameCard {:user-id 1, :card-id 3, :title "New"}))))))
   (testing "who is acting is a field: the same card, another user"
@@ -172,6 +174,7 @@
     (is (= {:type         ::pt/invalid
             :rule         :parsed-types.rule/checks-failed
             :failed-kinds #{:pure :external}
+            :threw        {}
             :failures    {1 {::may-write-card {:doc "User 1 may write the card.", :returned false}}
                           2 {::card-id-positive {:doc      "The card id is a positive integer."
                                                  :returned false
@@ -551,3 +554,101 @@
     (with-redefs [pt/children-or-refusal (fn [v path acc] (swap! walked inc) (f v path acc))]
       (is (some? (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title inner})))))
     (is (= 1 @walked) "the issued value itself, not the vectors inside it")))
+
+;;; A check body that throws
+
+(defn- boom! [^String message] (throw (IllegalStateException. message)))
+
+(def ^:private remote-rows (fn [tuples] (into {} (map (fn [t] [t :row])) tuples)))
+
+(pt/defparsed Throwing [amount note]
+  (pure ::amount-positive "The amount is positive." [amount] (log! ::amount-positive) (pos? amount))
+  (pure ::amount-small "The amount is below 100." [amount] (log! ::amount-small) (< amount 100))
+  (pure ::note-string "The note is a string." [note] (log! ::note-string) (string? note))
+  (external ::note-known "The note is known." [note] (log! ::note-known) (string? note)))
+
+(pt/defparsed Remote [id]
+  (external ::first-throws "Throws for id 1." [id] [row ::row] (log! ::first-throws) (if (= 1 id) (boom! "first") (some? row)))
+  (external ::second-throws "Throws for ids 1 and 2." [id] (log! ::second-throws) (if (#{1 2} id) (boom! "second") true))
+  (external ::id-is-3 "The id is 3." [id] (log! ::id-is-3) (= 3 id))
+  (fetch ::row [id] remote-rows))
+
+(defn- thrown [thunk]
+  (try (thunk) nil (catch Throwable t t)))
+
+(deftest a-check-that-throws-is-recorded-test
+  (testing "a pure check that throws is that check's failure, holds later checks on its fields, and the phase goes on"
+    (let [e    (thrown #(pt/parse (pt/draft Throwing {:amount :x, :note "n"})))
+          data (ex-data e)
+          ex   (get-in data [:failures ::amount-positive :threw])]
+      (is (instance? ClassCastException ex))
+      (is (= {::amount-positive {:doc "The amount is positive.", :threw ex, :blocked [::amount-small ::note-known]}}
+             (:failures data))
+          "no :returned, and the check on the same field and the external check are held")
+      (is (= #{::amount-positive} (:threw data)))
+      (is (= #{:pure} (:failed-kinds data)))
+      (is (identical? ex (ex-cause e)) "the exception is the cause")
+      (is (= [::amount-positive ::note-string] (runs #(thrown (fn [] (pt/parse (pt/draft Throwing {:amount :x, :note "n"}))))))
+          "the pure check on another field runs; nothing touches the world")))
+  (testing "a thrown check and a failed one are reported together"
+    (let [data (ex-data (thrown #(pt/parse (pt/draft Throwing {:amount :x, :note 5}))))]
+      (is (= #{::amount-positive} (:threw data)))
+      (is (= {:doc "The note is a string.", :returned false} (dissoc (get-in data [:failures ::note-string]) :blocked)))))
+  (testing "external checks that throw: every one runs, and the first to throw is the cause"
+    (let [e    (thrown #(pt/parse (pt/draft Remote {:id 1})))
+          data (ex-data e)]
+      (is (= ::pt/invalid (:type data)))
+      (is (= #{::first-throws ::second-throws} (:threw data)))
+      (is (= #{:external} (:failed-kinds data)))
+      (is (= {:doc "The id is 3.", :returned false} (get-in data [:failures ::id-is-3])))
+      (is (= "first" (ex-message (ex-cause e))))
+      (is (not (contains? (get-in data [:failures ::first-throws]) :returned)))
+      (is (= [::first-throws ::second-throws ::id-is-3] (remove vector? (runs #(thrown (fn [] (pt/parse (pt/draft Remote {:id 1}))))))))))
+  (testing "no check threw: :threw is empty"
+    (is (= #{} (:threw (ex-data (thrown #(pt/parse (pt/draft Remote {:id 4}))))))))
+  (testing "the message names what each check threw"
+    (is (str/includes? (ex-message (thrown #(pt/parse (pt/draft Remote {:id 1}))))
+                       ":parsed-types.core-test/first-throws (Throws for id 1.) threw IllegalStateException: first"))))
+
+(deftest parse-all-records-a-thrown-check-per-draft-test
+  (testing "one draft's thrown check stops no other draft, and the batch throws one ::invalid"
+    (let [e    (thrown #(pt/parse-all [(pt/draft Remote {:id 2})
+                                       (pt/draft Throwing {:amount :x, :note "n"})
+                                       (pt/draft Remote {:id 3})
+                                       (pt/draft Throwing {:amount 5, :note 7})]))
+          data (ex-data e)]
+      (is (= ::pt/invalid (:type data)))
+      (is (= {0 #{::second-throws}, 1 #{::amount-positive}} (:threw data)) "keyed by index, like :failures")
+      (is (= #{0 1 3} (set (keys (:failures data)))))
+      (is (= #{:pure :external} (:failed-kinds data)))
+      (is (instance? ClassCastException (ex-cause e))
+          "every pure check runs before any external one, so the pure throw of draft 1 is first")))
+  (testing "no check threw: :threw is an empty map"
+    (is (= {} (:threw (ex-data (thrown #(pt/parse-all [(pt/draft Remote {:id 4})]))))))))
+
+(defn- failing-fetch [_tuples] (throw (IllegalStateException. "database down")))
+
+(pt/defparsed Fetching [id]
+  (external ::found "The row is found." [] [row ::row] (some? row))
+  (fetch ::row [id] failing-fetch))
+
+(pt/defparsed Interrupted [x]
+  (pure ::stops "Throws InterruptedException." [x] (throw (InterruptedException. (str x)))))
+
+(pt/defparsed Erroring [x]
+  (pure ::errs "Throws an Error." [x] (throw (AssertionError. (str x)))))
+
+(deftest what-a-check-throws-that-is-not-recorded-test
+  (testing "an exception out of a fetch propagates unchanged"
+    (let [e (thrown #(pt/parse (pt/draft Fetching {:id 1})))]
+      (is (instance? IllegalStateException e))
+      (is (= "database down" (ex-message e)))))
+  (testing "an Error propagates"
+    (is (instance? AssertionError (thrown #(pt/parse (pt/draft Erroring {:x 1}))))))
+  (testing "an InterruptedException propagates, with the thread's interrupt flag set again"
+    (Thread/interrupted)
+    ;; read the flag before any assertion: clojure.test counts in a transaction, which can clear it
+    (let [e     (thrown #(pt/parse (pt/draft Interrupted {:x 1})))
+          flag? (Thread/interrupted)]
+      (is (instance? InterruptedException e))
+      (is (true? flag?) "the flag is set again; Thread/interrupted cleared it"))))
