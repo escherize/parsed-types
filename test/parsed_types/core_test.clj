@@ -8,7 +8,7 @@
 
 (set! *warn-on-reflection* true)
 
-;; What ran, in order. A check may not close over a local, so the log is a var.
+;; What ran, in order.
 (def ^:private ran (atom []))
 
 (defn- log! [x] (swap! ran conj x) true)
@@ -265,7 +265,7 @@
   (fetch ::row [a] (let [db {1 :one}] (fn [tuples] (into {} (map (fn [[id :as t]] [t (get db id)])) tuples)))))
 
 (deftest a-fetch-may-close-over-a-local-test
-  (testing "a fetch reads the world, so it may hold a database handle; only pure checks must close over nothing"
+  (testing "a fetch reads the world, so it may hold a database handle"
     (is (= {:a 1} (into {} (pt/parse (->ClosureDraft 1)))))
     (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (->ClosureDraft 2))))))))
 

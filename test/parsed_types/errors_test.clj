@@ -162,11 +162,6 @@
                            ((in-ns-named 'errs.my_app '(pt/defparsed Owned [x]))))
     "errs.my_app.Owned is already defined by a defparsed in the namespace errs.my-app" "the namespace errs.my_app"
     "Rename one of the namespaces"]
-   [:pure-check-closes-over-locals
-    ;; a defparsed inside a let compiles once its type exists, as when a REPL re-evaluates it
-    #(do ((compiling '(pt/defparsed Guarded [a])))
-         ((compiling '(let [x 1] (pt/defparsed Guarded [a] (pure ::c "d" [a] (= a x)))))))
-    "the pure check :parsed-types.errors-test/c closes over locals [x]" "make the check external"]
    ;; parsing
    [:parse-all-not-a-vector #(pt/parse-all draft) "pt/parse-all got a DebitDraft" "(pt/parse-all [draft])"
     "(pt/parse draft)"]

@@ -47,7 +47,7 @@
    [clojure.string])
   (:import
    (com.google.common.collect MapMaker)
-   (java.lang.reflect Field Modifier)
+   (java.lang.reflect Modifier)
    (java.util Map)))
 
 (set! *warn-on-reflection* true)
@@ -828,14 +828,6 @@
   (throw (ex-info (str (.getSimpleName ^Class draft-class) ": " message)
                   (merge {:type ::bad-declaration, :rule rule, :draft (.getName ^Class draft-class)} data))))
 
-(defn- closed-over-locals
-  "The locals `f` closes over. A check must close over none, or what it reads would not be what it declares."
-  [f]
-  (into []
-        (comp (remove #(Modifier/isStatic (.getModifiers ^Field %)))
-              (map #(.getName ^Field %)))
-        (.getDeclaredFields (class f))))
-
 (defn- draft-value?
   "Whether `x` is a draft of a type [[defparsed]] defined. A type that only implements `DraftValue` is not."
   [x]
@@ -843,9 +835,9 @@
 
 (defn- validate-declaration!
   "Throw `::bad-declaration` for what `defparsed` cannot see when it expands, only when it loads: a child type that is
-  not a parsed type or a sum, a fetch that is not a fn, and a pure check that closes over a local. A child field may
-  hold `parses-to`, the type being defined, which is registered only once its plan is."
-  [parses-to draft-class {:keys [checks fetches children]}]
+  not a parsed type or a sum, and a fetch that is not a fn. A child field may hold `parses-to`, the type being
+  defined, which is registered only once its plan is."
+  [parses-to draft-class {:keys [fetches children]}]
   (doseq [[field {:keys [kind type]}] children]
     (when-not (or (identical? type parses-to) (parsed-type? type) (valid-sum? type))
       (bad-declaration! draft-class ::rule/child-type-not-parsed
@@ -860,14 +852,7 @@
                         (str "the fetch " n " is " (pr-str f) ", not a fn, in (fetch " n " " (mapv symbol reads) " "
                              (pr-str f) "). A fetch is called with the tuples it fetches. Write a fn of the tuples"
                              " it fetches, as in (fetch " n " " (mapv symbol reads) " rows-by-id).")
-                        {:name n, :got (some-> f class .getName)})))
-  (doseq [{n :name, :keys [kind f reads]} checks]
-    (when-let [locals (and (= :pure kind) (seq (closed-over-locals f)))]
-      (bad-declaration! draft-class ::rule/pure-check-closes-over-locals
-                        (str "the pure check " n " closes over locals " (mapv symbol locals) ", in (pure " n " ... "
-                             (mapv symbol reads) " ...). A pure check reads only the fields it names. Read the value"
-                             " from a field, or make the check external.")
-                        {:name n, :locals locals}))))
+                        {:name n, :got (some-> f class .getName)}))))
 
 (defn- stale-child!
   "Throws `::stale-type`: the child field `field` of the parent `parent`, a plan or `{:parses-to :draft-class}`,

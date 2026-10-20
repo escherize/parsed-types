@@ -34,7 +34,7 @@ The README covers how to use the library; this page covers what it promises and 
 | `match` handles every member of a sum, and only parsed values reach a branch | `match` compares its clauses with the sum when it expands, and runs a branch only when `pt/parsed?` accepts the value | `match-compile-errors-test`, `match-runs-only-on-parsed-members` |
 | A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
-| A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others. A pure check that closes over a local is refused when it loads | `compile-errors-test`, `declaration-errors-at-load-test` |
+| A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others | `compile-errors-test` |
 | Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
 | Only types `defparsed` defined count as types | `pt/parsed`, `pt/parsed?`, `defsum` and child fields accept a class only when `defparsed` registered it, by identity. A class that only implements `ParsedValue` is refused with `::bad-input` | `the-type-argument-is-checked-test`, `only-sum-builds-a-sum-test` |
 | A sum is built only from distinct parsed types | A sum isn't a map, so `assoc` can't change one. Every use checks its members, so one built with its constructor is checked too. Sums are equal when their names and members are | `only-sum-builds-a-sum-test` |
@@ -129,9 +129,7 @@ a parsed type's `->Name` doesn't compile.
 The expansion builds and checks the plan when it loads, before any `parse`. It throws `::bad-declaration` when:
 
 - a child field names something that isn't a type defined with `defparsed` or a sum defined with `defsum`;
-- a fetch's function isn't a fn;
-- a pure check closes over a local. The first time, a `defparsed` compiles only at top level, so this happens only
-  when one is re-evaluated inside a `let` after its type exists.
+- a fetch's function isn't a fn.
 
 ## Behavior worth knowing
 
@@ -236,8 +234,8 @@ generation pass where code expected another, and needed a second way to ask a ty
 of proof, kept beside the value, and it cost bitmasks, a 64-check limit and a weak map.
 
 **A check's argument vector is its reads.** One list says what the check reads, and the compiler holds the body to
-it. A pure check that closes over a local reads something it didn't declare, so it is refused. An external check or a
-fetch may hold a database handle.
+it. A check may close over a local, and the library doesn't look: a guard against that caught only a
+`defparsed` re-evaluated inside a `let`, and cost a rule and a reflective scan.
 
 **Building and reading need no reflection.** `defparsed` knows each class and its fields when it expands, so it
 generates the fns that build a parsed value, build a draft and read a draft's fields.

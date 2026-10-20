@@ -8,7 +8,7 @@
 
 (set! *warn-on-reflection* true)
 
-;;; An in-memory bank. A check may not close over a local, so the bank and the fetch log are vars.
+;;; An in-memory bank.
 
 (def ^:private accounts (atom {}))
 

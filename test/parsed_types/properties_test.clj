@@ -9,7 +9,7 @@
 
 (set! *warn-on-reflection* true)
 
-;; What ran, in order. A check may not close over a local, so the log is a var.
+;; What ran, in order.
 (def ^:private ran (atom []))
 
 (defn- log! [x] (swap! ran conj x) true)

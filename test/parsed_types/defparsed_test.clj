@@ -134,11 +134,12 @@
         (let [[data message] (load-error form)]
           (is (= ::pt/bad-declaration (:type data)))
           (is (re-find re (str message)))))))
-  (testing "a pure check that closes over a local: defparsed inside a let, which compiles once the type exists"
+  (testing "a pure check may close over a local: defparsed inside a let, which compiles once the type exists"
     (eval-here '(pt/defparsed Guarded [a]))
-    (let [[data message] (load-error '(let [x 1] (pt/defparsed Guarded [a] (pure ::c "d" [a] (= a x)))))]
-      (is (= ::pt/bad-declaration (:type data)))
-      (is (re-find #"the pure check :parsed-types.defparsed-test/c closes over locals \[x\]" (str message))))))
+    (eval-here '(let [x 1] (pt/defparsed Guarded [a] (pure ::c "d" [a] (= a x)))))
+    (is (some? (pt/parse (@(ns-resolve 'parsed-types.defparsed-test '->GuardedDraft) 1))))
+    (is (= #{::c} (set (keys (:failures (try (pt/parse (@(ns-resolve 'parsed-types.defparsed-test '->GuardedDraft) 2)) nil
+                                             (catch clojure.lang.ExceptionInfo e (ex-data e))))))))))
 
 (deftest match-compile-errors-test
   (doseq [[label form re]
