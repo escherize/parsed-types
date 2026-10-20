@@ -17,16 +17,13 @@ The idea is the smart constructor, or
 already parsed.
 
 ```mermaid
-flowchart LR
-  code([any code]) -->|"pt/draft, naming every field"| D["OrderDraft<br/>(draft)"]
-  L(["OrderLine values from pt/parse-all"]) -->|"in the :lines field"| D
-  D -->|assoc| D
-  D -->|"pt/parse: every check passes"| P["Order<br/>(parsed, holds the proof)"]
-  D -->|"pt/parse: a check fails"| F(["throws ::invalid, with every failure"])
+flowchart TD
+  D["OrderDraft<br/>anyone builds one"] -->|pt/parse| C{every check<br/>passes?}
+  C -->|yes| P["Order<br/>carries the proof"]
+  C -->|no| F["throws ::invalid<br/>with every failure"]
+  P -->|pt/parsed or match| S["sink<br/>place-order!"]
   P -->|pt/draft-of| D
-  P -->|"pt/parsed, match"| S([sinks, such as place-order!])
-  P -.->|"assoc, dissoc, empty"| T(["throws ::cannot-change"])
-  H(["(Order. ...) by hand"]) -.->|no proof| N(["sinks throw ::not-parsed"])
+  D -->|assoc| D
 ```
 
 ## A shop declares its checks once, and `place-order!` accepts only a parsed order
