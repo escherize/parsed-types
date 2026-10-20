@@ -49,7 +49,8 @@
 (set! *warn-on-reflection* true)
 
 (definterface ParsedValue
-  (parseProof []))
+  ;; Whether the value's proof is `t`. The proof goes in and only a boolean comes out, so nothing hands the proof out.
+  (issuedWith [t]))
 
 ;; The proof that [[parse]] issued a value: a parsed value is parsed exactly when its hidden `parse-proof` field holds
 ;; this object. Only `parse` builds a value with it. `defonce`, so reloading this namespace keeps the values already
@@ -234,14 +235,16 @@
   expands: it is private, so a parsed type cannot be defined apart from its draft and its checks.
 
   The type has one more field, `parse-proof`, which is not a key: it is not in the map's keys, seq, count, equality,
-  hash or printed form. [[parse]] sets it to the proof; any other constructor call leaves it something else. The
-  positional factory `->Name` is removed, so code outside this library has no plain function that builds one."
+  hash or printed form. [[parse]] sets it to the proof; any other constructor call leaves it something else. The field
+  is `volatile-mutable`, which Clojure compiles to a field that is not public, so interop cannot read it, and nothing
+  sets it after the constructor: code outside the type can only ask `issuedWith` whether it holds a given object. The positional factory `->Name` is removed, so
+  code outside this library has no plain function that builds one."
   [name fields]
-  (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
+  (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v"), t (gensym "t")]
     `(do
-       (deftype ~name [~@fields ~'parse-proof]
+       (deftype ~name [~@fields ~(with-meta 'parse-proof {:volatile-mutable true})]
          parsed_types.core.ParsedValue
-         (~'parseProof [~this] ~'parse-proof)
+         (~'issuedWith [~this ~t] (clojure.core/identical? ~t ~'parse-proof))
          ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!))
        (ns-unmap *ns* '~(symbol (str "->" name)))
        ~(print-method-form name))))
@@ -935,13 +938,18 @@
     (issue-tree nodes)))
 
 (defn- issued?
-  "Whether `x` is a parsed value that holds the proof: one [[parse]] built."
+  "Whether `x` is a parsed value that holds the proof: one [[parse]] built. Its class must be one [[defparsed]]
+  registered, by identity, before `x` is asked about the proof: a class written by hand, even with the same name,
+  never sees the token."
   [x]
-  (and (instance? ParsedValue x) (identical? parse-token (.parseProof ^ParsedValue x))))
+  (and (instance? ParsedValue x)
+       (identical? (class x) (:parses-to (.get registry (class x))))
+       (true? (.issuedWith ^ParsedValue x parse-token))))
 
 (defn parsed?
   "Whether `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`: a value of
-  the type whose hidden proof field holds the proof only `parse` sets."
+  a class [[defparsed]] defined, whose hidden proof field holds the proof only `parse` sets. Which type `x` counts as
+  is decided by class name, so a value of a class a REPL re-evaluated counts as the type."
   [parsed-type x]
   (and (some? x)
        (member? parsed-type (class x))

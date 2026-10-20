@@ -180,6 +180,29 @@
       (is (= (pr-str real) (pr-str (RenameCard. 1 1 "New" nil))))
       (is (not (re-find #"proof" (pr-str real)))))))
 
+;; Asks to see the proof, and keeps what it is shown.
+(def ^:private stolen (atom nil))
+
+(deftype Thief []
+  parsed_types.core.ParsedValue
+  (issuedWith [_ t] (reset! stolen t) true))
+
+(deftest the-proof-never-leaves-the-value-test
+  (let [real (pt/parse (->RenameCardDraft 1 1 "New"))]
+    (testing "the proof field is not public, so interop cannot read it, and no public method returns it"
+      (is (not (java.lang.reflect.Modifier/isPublic (.getModifiers (.getDeclaredField RenameCard "parse_proof")))))
+      (is (thrown? IllegalArgumentException (clojure.lang.Reflector/getInstanceField real "parse_proof")))
+      (is (not-any? #(and (zero? (.getParameterCount ^java.lang.reflect.Method %))
+                          (= Object (.getReturnType ^java.lang.reflect.Method %))
+                          ;; IFn's call and invoke with no arguments throw an arity error
+                          (not (#{"call" "invoke"} (.getName ^java.lang.reflect.Method %))))
+                    (.getMethods RenameCard))))
+    (testing "a hand-written ParsedValue is refused without being shown the proof"
+      (reset! stolen nil)
+      (is (false? (pt/parsed? RenameCard (->Thief))))
+      (is (= ::pt/not-parsed (:type (thrown-data #(pt/draft-of (->Thief))))))
+      (is (nil? @stolen)))))
+
 (deftest the-positional-factory-is-removed-test
   (testing "->Name of a parsed type does not exist, here or anywhere; ->NameDraft does"
     (is (nil? (ns-resolve 'parsed-types.core-test '->RenameCard)))

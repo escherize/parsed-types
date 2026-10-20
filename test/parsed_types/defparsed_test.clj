@@ -244,6 +244,20 @@
     (testing "a match compiled after the reload, against the old defsum, compiles"
       (is (nil? (compile-error '(fn [x] (pt/match Members x Member m (:n m) NonMember o (:n o)))))))))
 
+(deftest a-hand-written-class-with-the-same-name-is-refused-test
+  (eval-here '(pt/defparsed Genuine [n]))
+  (let [genuine (ns-resolve 'parsed-types.defparsed-test 'Genuine)
+        real    (pt/parse ((resolve-here '->GenuineDraft) 1))]
+    (eval-here '(deftype Genuine [n] parsed_types.core.ParsedValue (issuedWith [_ _] true)))
+    (let [fake (eval-here '(Genuine. 1))]
+      (is (= (.getName ^Class genuine) (.getName (class fake))) "same fully qualified name")
+      (testing "parsed? asks the registry for the class itself, so the fake is refused"
+        (is (false? (pt/parsed? genuine fake)))
+        (is (= ::pt/not-parsed (:type (try (pt/parsed genuine fake) nil
+                                           (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
+      (testing "while membership is still by name: the real value counts as the type"
+        (is (pt/parsed? genuine real))))))
+
 ;;; Field names
 
 (pt/defparsed Awkward [count map set str seq into contains? or when keys]
