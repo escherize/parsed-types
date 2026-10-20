@@ -33,6 +33,7 @@ The README covers how to use the library; this page covers what it promises and 
 | A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others. A pure check that closes over a local is refused when it loads | `compile-errors-test`, `declaration-errors-at-load-test` |
+| Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
 | After a REPL re-evaluates a type, code defined before it accepts the new class | Parsed types compare by class name, in `pt/parsed`, `parsed?`, sums, a child field's shape check and `match` | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
 
 ## Accepted limits
@@ -56,15 +57,27 @@ Reading the token from a real value is no longer possible without reflection.
 
 ## Errors
 
-Every error the library throws is an `ex-info` whose ex-data has a `:type`, a keyword in `parsed-types.core`. Its
-message says what went wrong and how to fix it.
+Every error the library throws is an `ex-info` whose ex-data has a `:type`, a keyword in `parsed-types.core`, and a
+`:rule`, a keyword in `parsed-types.rule` that names the rule it broke, such as `:parsed-types.rule/got-draft`. Its
+message says, in this order, what happened with the concrete values (the type, the field or key, the path, the class
+it got), the rule in one clause, and the fix, as code where it can:
+
+```
+Expected a parsed Debit, got a DebitDraft, which is not checked yet. A sink takes only a value pt/parse issued. Call
+pt/parse on it first, as in (pt/parse draft), and pass the result.
+```
+
+The ex-data holds the same facts as data, so no information is in the prose alone. When a key is not a field, the
+message suggests the nearest field within a couple of edits, as in `Did you mean :account-id?`, and `:suggestion`
+holds it. `errors-test` has one example of every rule, and fails when `core.clj` has a rule with no example or an
+`ex-info` without a `:rule`.
 
 | `:type` | Thrown when | Other ex-data |
 |---|---|---|
-| `::invalid` | `parse` or `parse-all` ran the checks and some failed | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
-| `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
+| `::invalid` | `parse` or `parse-all` ran the checks and some failed. The message names the first five failed checks with their docs | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
+| `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue. The rule says which: nil, a plain map, a draft of the type, an unchecked value of the type, or a value of another type | `:expected`, `:got` |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, or `empty` on either | `:parsed` or `:draft`, `:op` |
-| `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields` |
+| `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
 | `::bad-input` | `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
@@ -216,12 +229,14 @@ would throw a `ClassCastException`. Read fields by keyword.
 - `core-test`: each behavior, the proof, mutable values, and the ways to forge or change a value we know of;
 - `defparsed-test`: compile errors, load errors, unknown keys, field names, REPL reloads;
 - `properties-test`: `test.check` properties over random drafts and trees, against a model written by hand;
+- `errors-test`: one example of every error rule, with the values and the fix its message must hold;
 - `tree-properties-test`: `test.check` properties over random trees with `:one` and `:many` children, malformed
   children and edits to child fields, against a model of the whole failure map.
 
 Each of these deliberately broken copies of this version fails at least one test: the proof field public; a method
 handing the token out; the registry not consulted before asking a value for its proof; equality ignoring the proof;
-the immutability walk shallow, skipping map keys, or accepting seqs; `pt/parsed` ignoring the proof; the
+the immutability walk shallow, skipping map keys, or accepting seqs; no did-you-mean, or one that suggests any field;
+an `ex-info` without a `:rule`; a rule with no example; a message that drops its fix; `pt/parsed` ignoring the proof; the
 `->Name` factory kept; the proof in a value's `seq`; a field named `parse-proof` allowed; `defparsed-type` or
 `defdraft-type` public; no checks when a `defparsed` loads; parent checks seeing children built with the token; the
 issued root holding children built without it; types compared by identity; `match` testing with `instance?`; `empty`
