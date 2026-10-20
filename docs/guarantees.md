@@ -90,7 +90,7 @@ without a `:rule`, or a `throw` of anything but an `ex-info`.
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed`. The rule says which, and the message what to re-evaluate (see "REPL reloads") | `:class`, and `:ns`, `:field` or `:parent` where they apply |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
 | `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
-| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
+| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got anything but a literal map that names every field and only fields (found when it compiles), `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
@@ -120,7 +120,8 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
 - a pure check written before a pure check that reads a proper subset of its fields. Pure checks run in the order
   written, and a failed one holds every later one that shares a field, so the smaller check goes first.
 
-`pt/draft` refuses a literal map that names a key that isn't a field, or leaves a field out. `match` refuses a missing
+`pt/draft` refuses anything but a literal map, and a literal map that names a key that isn't a field, or leaves a
+field out. `match` refuses a missing
 member, a type that isn't a member, and a member handled twice. A call to `pt/defparsed-type`, `pt/defdraft-type` or
 a parsed type's `->Name` doesn't compile.
 
@@ -166,8 +167,8 @@ two are not equal. A parent's pure checks run
   parse, by identity, so shared structure costs its size, not the number of paths to it.
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
-- **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field throws
-  `::bad-input`.
+- **`pt/draft` takes only a literal map.** It checks the keys when it compiles, so a map built at run time is a
+  compile error. Name each field in place, as in `{:amount (:amount body)}`, or call `->DebitDraft`.
 - **Failed kinds in a tree.** One tree never holds both: its external checks run only when every pure check in it
   passed. `parse-all` can report both, from different drafts.
 - **Exceptions.** An exception thrown by a check or fetch propagates out of `parse` and stops `parse-all` at that

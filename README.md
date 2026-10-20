@@ -29,7 +29,7 @@ flowchart LR
 
 | | `DebitDraft` | `Debit` |
 |---|---|---|
-| Build one | `(->DebitDraft ...)`, `(pt/draft Debit m)` | only `pt/parse` |
+| Build one | `(->DebitDraft ...)`, `(pt/draft Debit {...})` | only `pt/parse` |
 | Read a field | `(:amount x)`, destructuring; a key that isn't a field throws | the same |
 | Change it | `assoc` returns a new draft | throws; use `pt/draft-of`, `assoc`, then `pt/parse` |
 | A sink accepts it | no | yes |
@@ -201,7 +201,7 @@ A person, or an agent, can apply the fix from the message alone.
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after; the message says what to reload |
 | `::cannot-change` | code called `assoc`, `dissoc` or `empty` on a parsed value |
 | `::no-field` | code read a key that isn't a field |
-| `::bad-input` | `pt/draft` got a non-map or unknown keys, a field holds a mutable value, or a tree is too big |
+| `::bad-input` | `pt/draft` got no literal map or unknown keys, a field holds a mutable value, or a tree is too big |
 | `::bad-declaration` | a `defparsed` or `match` has an error, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no entry for a tuple |
 
@@ -238,7 +238,7 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
 | Name | Does |
 |---|---|
 | `defparsed` | defines `Name`, `NameDraft` with `->NameDraft`, and the checks between them |
-| `draft` | builds a draft from a map; a literal map must name every field, and only fields |
+| `draft` | builds a draft from a literal map that names every field, and only fields |
 | `parse`, `parse-all` | checks drafts and returns parsed values, or throws with every failure |
 | `parsed`, `parsed?` | returns or tests a value `parse` made |
 | `draft-of` | turns a parsed value back into a draft |

@@ -178,11 +178,11 @@
   (testing "a literal map with a key that is not a field does not compile"
     (is (re-find #"Point has no fields \[:z\]\. A literal map names only fields; its fields are \[:x :y\]"
                  (str (compile-error '(pt/draft Point {:x 1, :z 2}))))))
-  (testing "a map built at run time: a key that is not a field is bad input"
-    (let [m {:x 1, :z 2}]
-      (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/draft-unknown-keys, :unknown-fields [:z], :fields [:x :y]}
-             (try (pt/draft Point m) (catch clojure.lang.ExceptionInfo e (ex-data e)))))
-      (is (= (->PointDraft 1 2) (pt/draft Point (dissoc (assoc m :y 2) :z))))))
+  (testing "anything but a literal map does not compile, and the message names the fields to write"
+    (is (re-find #"pt/draft: m is not a literal map\..*\(pt/draft Point \{:x \.\.\., :y \.\.\.\}\), or call \(->PointDraft \.\.\.\)"
+                 (str (compile-error '(fn [m] (pt/draft Point m))))))
+    (is (re-find #"is not a literal map" (str (compile-error '(pt/draft Point (hash-map :x 1 :y 2))))))
+    (is (nil? (resolve 'parsed-types.core/draft-from-map)) "there is no run-time path"))
   (testing "a type without a draft does not compile"
     (is (re-find #"not a type defined with defparsed" (str (compile-error '(pt/draft String {})))))))
 

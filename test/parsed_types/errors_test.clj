@@ -165,7 +165,7 @@
    ;; parsing
    [:parse-all-not-a-vector #(pt/parse-all draft) "pt/parse-all got a DebitDraft" "(pt/parse-all [draft])"
     "(pt/parse draft)"]
-   [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit m))"]
+   [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit {:user-id u, ...}))"]
    [:mutable-value #(pt/parse (->DebitDraft 1 2 (atom 1))) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
    [:tree-too-deep #(pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 1000)))
@@ -184,7 +184,7 @@
    [:got-draft #(pt/parsed Debit draft) "got a DebitDraft" "(pt/parse draft)"]
    [:got-unissued #(pt/parsed Debit (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue"
     "Write (pt/parse (->DebitDraft ...)) and pass the result"]
-   [:got-plain-map #(pt/parsed Debit {:amount 1}) "got a plain map" "(pt/parse (pt/draft Debit m))"]
+   [:got-plain-map #(pt/parsed Debit {:amount 1}) "got a plain map" "(pt/parse (->DebitDraft ...))"]
    [:got-other-type #(pt/parsed Debit (pt/parse (->CreditDraft 1))) "got a Credit" "(pt/parse (->DebitDraft ...))"]
    [:draft-of-a-draft #(pt/draft-of draft) "got a DebitDraft, which is already a draft" "Use the draft as it is"]
    [:draft-of-unissued #(pt/draft-of (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue" "(->DebitDraft ...)"]
@@ -232,11 +232,8 @@
     "errs.roles.FooDraft is already the parsed type of (defparsed FooDraft ...) in errs.roles"
     "Rename one of the types, as in (defparsed Foo2 ...)"]
    ;; pt/draft
-   [:not-a-draft-type #(pt/draft-from-map String {}) "pt/draft-from-map got java.lang.String"
-    "(pt/draft-from-map DebitDraft m)" "(pt/draft Debit m)"]
-   [:draft-from-non-map #(pt/draft Debit (identity 5)) "pt/draft got a Long to build a DebitDraft" "{:user-id ...}"]
-   [:draft-unknown-keys #(pt/draft Debit (identity {:amont 1})) "DebitDraft has no fields [:amont]"
-    "Did you mean :amount?" "[:user-id :account-id :amount]"]
+   [:draft-not-a-literal-map (compiling '(fn [m] (pt/draft Debit m))) "pt/draft: m is not a literal map"
+    "(pt/draft Debit {:user-id ..., :account-id ..., :amount ...})" "(->DebitDraft ...)"]
    [:draft-not-a-parsed-type (compiling '(pt/draft String {})) "String is not a type defined with defparsed"
     "(pt/draft Debit {...})"]
    [:draft-literal-unknown-keys (compiling '(pt/draft Debit {:user-id 1, :account-id 2, :amont 3}))
@@ -327,7 +324,8 @@
 
 (deftest suggestions-are-data-too-test
   (is (= :amount (:suggestion (ex-data (try (:amont real) (catch clojure.lang.ExceptionInfo e e))))))
-  (is (= :amount (:suggestion (ex-data (try (pt/draft Debit (identity {:amont 1})) (catch clojure.lang.ExceptionInfo e e))))))
+  (is (= :amount (:suggestion (ex-data (try ((compiling '(pt/draft Debit {:user-id 1, :account-id 2, :amont 3}))) nil
+                                             (catch Exception e (ex-cause e)))))))
   (testing "no suggestion when nothing is close, or the key is short"
     (is (not (contains? (ex-data (try (:zzzzzz real) (catch clojure.lang.ExceptionInfo e e))) :suggestion)))
     (is (not (contains? (ex-data (try (:x real) (catch clojure.lang.ExceptionInfo e e))) :suggestion)))))

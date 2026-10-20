@@ -235,30 +235,30 @@
       (~'count [~this] ~(count fields))
       ;; like APersistentMap.cons: nil, a map entry, a pair, or a seq of entries
       (~'cons [~this ~o]
-       (clojure.core/cond
-         (clojure.core/nil? ~o)                   ~this
-         (clojure.core/instance? java.util.Map$Entry ~o)
-         (clojure.core/assoc ~this (.getKey ~(with-meta o {:tag 'java.util.Map$Entry}))
-                             (.getValue ~(with-meta o {:tag 'java.util.Map$Entry})))
-         (clojure.core/vector? ~o)
-         (if (clojure.core/= 2 (clojure.core/count ~o))
-           (clojure.core/assoc ~this (clojure.core/nth ~o 0) (clojure.core/nth ~o 1))
+              (clojure.core/cond
+                (clojure.core/nil? ~o)                   ~this
+                (clojure.core/instance? java.util.Map$Entry ~o)
+                (clojure.core/assoc ~this (.getKey ~(with-meta o {:tag 'java.util.Map$Entry}))
+                                    (.getValue ~(with-meta o {:tag 'java.util.Map$Entry})))
+                (clojure.core/vector? ~o)
+                (if (clojure.core/= 2 (clojure.core/count ~o))
+                  (clojure.core/assoc ~this (clojure.core/nth ~o 0) (clojure.core/nth ~o 1))
            ;; through `var`, because it is private
-           ((var not-a-pair!) ~this ~o))
-         :else
-         (clojure.core/reduce (fn [m# e#] (clojure.core/assoc m# (.getKey ^java.util.Map$Entry e#)
-                                                             (.getValue ^java.util.Map$Entry e#)))
-                              ~this
-                              (clojure.core/seq ~o))))
+                  ((var not-a-pair!) ~this ~o))
+                :else
+                (clojure.core/reduce (fn [m# e#] (clojure.core/assoc m# (.getKey ^java.util.Map$Entry e#)
+                                                                     (.getValue ^java.util.Map$Entry e#)))
+                                     ~this
+                                     (clojure.core/seq ~o))))
       ;; no empty version, so code that rebuilds a map through `empty`, such as clojure.walk, throws instead of
       ;; dropping the type and the proof
       (~'empty [~this] (~final-name ~this "empty" nil))
       ;; like defrecord: the same class, and each field `=`, so 1.0M equals 1.00M and an Integer equals a Long
       (~'equiv [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
-                                             ~@(when same-proof [(same-proof o)])
-                                             ~@(map (fn [fld] `(clojure.core/= ~fld (.valAt ~(with-meta o {:tag 'clojure.lang.ILookup})
-                                                                                                ~(keyword fld))))
-                                                    fields)))
+                                            ~@(when same-proof [(same-proof o)])
+                                            ~@(map (fn [fld] `(clojure.core/= ~fld (.valAt ~(with-meta o {:tag 'clojure.lang.ILookup})
+                                                                                           ~(keyword fld))))
+                                                   fields)))
       (~'seq [~this] (clojure.core/seq ~entries))
       (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
       (~'valAt [~this ~k] ~(lookup `(no-field! ~this ~k "read")))
@@ -266,7 +266,7 @@
 
       clojure.lang.IKVReduce
       (~'kvreduce [~this ~f ~init]
-       (clojure.core/reduce (fn [acc# [k# v#]] (~f acc# k# v#)) ~init (clojure.core/seq ~entries)))
+                  (clojure.core/reduce (fn [acc# [k# v#]] (~f acc# k# v#)) ~init (clojure.core/seq ~entries)))
 
       clojure.lang.IHashEq
       (~'hasheq [~this] (clojure.lang.APersistentMap/mapHasheq ~this))
@@ -297,8 +297,8 @@
       Object
       (~'hashCode [~this] (clojure.lang.APersistentMap/mapHash ~this))
       (~'equals [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
-                                              ~@(when same-proof [(same-proof o)])
-                                              (clojure.lang.APersistentMap/mapEquals ~this ~o)))
+                                             ~@(when same-proof [(same-proof o)])
+                                             (clojure.lang.APersistentMap/mapEquals ~this ~o)))
       (~'toString [~this] (clojure.core/str (clojure.core/into {} ~this)))]))
 
 (defn- syntax-error!
@@ -814,8 +814,8 @@
        ~(defdraft-type draft-name fields)
        ;; through `var`, because `register!` is private: only this expansion may record a plan
        ((var register!) ~parsed-name ~draft-name
-        {:checks ~checks, :fetches ~fetches, :children ~children}
-        ~(builders parsed-name draft-name fields))
+                        {:checks ~checks, :fetches ~fetches, :children ~children}
+                        ~(builders parsed-name draft-name fields))
        ~parsed-name)))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
@@ -968,7 +968,8 @@
                            " It is already parsed: pass it as it is, or call (pt/draft-of x) to get its draft."
 
                            (map? draft)
-                           " Build a draft from the map with (pt/draft Name m), as in (pt/parse (pt/draft Debit m))."
+                           (str " Build a draft from its fields, naming every field, as in (pt/parse (pt/draft Debit"
+                                " {:user-id u, ...})), or with (pt/parse (->DebitDraft ...)).")
 
                            :else
                            " Build one with its constructor, as in (pt/parse (->DebitDraft ...)), or with pt/draft."))
@@ -1481,10 +1482,8 @@
                                    (and (map? x) (not (instance? ParsedValue x)) (not (instance? DraftValue x)))
                                    {:rule    ::rule/got-plain-map
                                     :message (str "Expected a parsed " t ", got a plain map. A sink takes only a"
-                                                  " value pt/parse issued. Build a draft from the map and parse it,"
-                                                  " as in (pt/parse (pt/draft "
-                                                  (if (sum? parsed-type) (type-name (first (sum-members parsed-type))) t)
-                                                  " m)), and pass the result.")}
+                                                  " value pt/parse issued. Build a draft from its fields and parse"
+                                                  " it, as in " (parse-hint parsed-type) ", and pass the result.")}
 
                                    :else
                                    {:rule    ::rule/got-other-type
@@ -1541,7 +1540,7 @@
                         (str "pt/draft-of got " (describe parsed)
                              (when (instance? ParsedValue parsed) " that pt/parse did not issue")
                              ". draft-of takes only a value pt/parse issued. Build a draft with its constructor"
-                             " instead, as in (->DebitDraft ...), or with (pt/draft Debit m)."))
+                             " instead, as in (->DebitDraft ...), or with (pt/draft Debit {...})."))
                       {:type ::not-parsed
                        :rule (if (instance? DraftValue parsed) ::rule/draft-of-a-draft ::rule/draft-of-unissued)
                        :got  (some-> parsed class .getName)})))
@@ -1553,43 +1552,12 @@
 
 ;;; ------------------------------------------------ Building and reading ------------------------------------------------
 
-(defn draft-from-map
-  "A draft of `draft-type` with the fields in `m`, nil for each one `m` leaves out. A non-map, or a key that is not a
-  field, throws `::bad-input`. Called by [[draft]]."
-  [draft-type m]
-  (let [{:keys [fields make-draft], :as plan} (when (class? draft-type) (.get registry draft-type))]
-    (when-not (and plan (identical? draft-type (:draft-class plan)))
-      (throw (ex-info (str "pt/draft-from-map got " (pr-str draft-type) ", which is not a draft type defparsed"
-                           " defined. Its first argument is the draft class. Pass one, as in (pt/draft-from-map"
-                           " DebitDraft m), or write (pt/draft Debit m).")
-                      {:type ::bad-input, :rule ::rule/not-a-draft-type, :got (pr-str draft-type)})))
-    (when-not (map? m)
-      (throw (ex-info (str "pt/draft got " (describe m) " to build a " (.getSimpleName ^Class draft-type) ". A draft"
-                           " is built from a map of its fields. "
-                           (if (seq fields)
-                             (str "Pass a map with some of its fields " fields ", as in {" (first fields) " ...}.")
-                             "It has no fields, so pass {}."))
-                      {:type ::bad-input, :rule ::rule/draft-from-non-map, :got (some-> m class .getName)})))
-    (when-let [unknown (seq (remove (set fields) (keys m)))]
-      (throw (ex-info (str (.getSimpleName ^Class draft-type) " has no fields " (vec unknown) "."
-                           (did-you-mean (first unknown) fields) " A draft holds only its fields, so a misspelled"
-                           " key is never dropped. "
-                           (if (seq fields)
-                             (str "Remove them, or use its fields " fields ".")
-                             "It has no fields, so remove them all."))
-                      (cond-> {:type           ::bad-input
-                               :rule           ::rule/draft-unknown-keys
-                               :unknown-fields (vec unknown)
-                               :fields         fields}
-                        (nearest (first unknown) fields) (assoc :suggestion (nearest (first unknown) fields))))))
-    (make-draft m)))
-
 (defmacro draft
   "A draft of the parsed type `parsed-type`, defined with [[defparsed]], with the fields in `m`.
 
-  When `m` is a literal map, it must name every field, and only fields: anything else is a compile error, so write
-  `nil` for a field you mean to leave empty. A map built at run time, usually a request, may leave fields out, which
-  are nil; a key that is not a field throws `::bad-input`.
+  `m` is a literal map that names every field, and only fields: anything else is a compile error, so write `nil` for
+  a field you mean to leave empty. For values read at run time, name each field, as in `{:amount (:amount body)}`,
+  or call `->NameDraft`.
 
     (pt/draft Debit {:user-id u, :account-id 1, :amount 30M})"
   [parsed-type m]
@@ -1604,21 +1572,27 @@
                            {:got (str parsed-type)}))
         dsym    (symbol (.getName ^Class dcls))
         flds    (:fields (.get registry cls))]
-    (if (map? m)
-      (do (when-let [unknown (seq (remove (set flds) (keys m)))]
-            (refuse! ::rule/draft-literal-unknown-keys
-                     (str "pt/draft: " parsed-type " has no fields " (vec unknown) "."
-                          (did-you-mean (first unknown) flds) " A literal map names only fields; its fields are "
-                          flds ". Remove the others.")
-                     {:unknown-fields (vec unknown), :fields flds}))
-          (when-let [missing (seq (remove (set (keys m)) flds))]
-            (refuse! ::rule/draft-literal-missing-fields
-                     (str "pt/draft: " parsed-type " needs every field; missing " (vec missing) ". A literal map names"
-                          " every field, so none is left out by mistake. Write nil for a field you mean to leave"
-                          " empty, as in " (first missing) " nil.")
-                     {:missing (vec missing), :fields flds}))
-          ;; bind in the order written, so the values are evaluated as they read
-          (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
-            `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
-               (new ~dsym ~@(map syms flds)))))
-      `(draft-from-map ~dsym ~m))))
+    (when-not (map? m)
+      (refuse! ::rule/draft-not-a-literal-map
+               (str "pt/draft: " (pr-str m) " is not a literal map. pt/draft checks the keys when it compiles, so it"
+                    " takes a map written in place that names every field, and only fields. Write one, as in (pt/draft "
+                    parsed-type " {" (clojure.string/join ", " (map #(str % " ...") flds)) "}), or call (->"
+                    (.getSimpleName ^Class dcls) " ...).")
+               {:got (pr-str m), :fields flds}))
+    (when-let [unknown (seq (remove (set flds) (keys m)))]
+      (refuse! ::rule/draft-literal-unknown-keys
+               (str "pt/draft: " parsed-type " has no fields " (vec unknown) "."
+                    (did-you-mean (first unknown) flds) " A literal map names only fields; its fields are "
+                    flds ". Remove the others.")
+               (cond-> {:unknown-fields (vec unknown), :fields flds}
+                 (nearest (first unknown) flds) (assoc :suggestion (nearest (first unknown) flds)))))
+    (when-let [missing (seq (remove (set (keys m)) flds))]
+      (refuse! ::rule/draft-literal-missing-fields
+               (str "pt/draft: " parsed-type " needs every field; missing " (vec missing) ". A literal map names"
+                    " every field, so none is left out by mistake. Write nil for a field you mean to leave"
+                    " empty, as in " (first missing) " nil.")
+               {:missing (vec missing), :fields flds}))
+    ;; bind in the order written, so the values are evaluated as they read
+    (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
+      `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
+         (new ~dsym ~@(map syms flds))))))
