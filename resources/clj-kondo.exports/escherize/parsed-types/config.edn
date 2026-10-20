@@ -43,6 +43,7 @@
                                  parsed-types.core/max-value-depth     {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/member-names        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/member?             {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/missing-argument!   {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/named-member        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/nearest             {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/no-field!           {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}

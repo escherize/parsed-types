@@ -4,6 +4,7 @@
   (:require
    [clojure.edn]
    [clojure.java.io :as io]
+   [clojure.set :as set]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [parsed-types.core :as pt]))
@@ -161,6 +162,8 @@
                            ((in-ns-named 'errs.my_app '(pt/defparsed Owned [x]))))
     "errs.my_app.Owned is already defined by a defparsed in the namespace errs.my-app" "the namespace errs.my_app"
     "Rename one of the namespaces"]
+   [:missing-argument (compiling '(pt/defparsed C1)) "(defparsed C1) has no field vector" "(defparsed C1 [amount])"
+    "(defparsed C1 [])"]
    ;; parsing
    [:parse-all-not-a-vector #(pt/parse-all draft) "pt/parse-all got a DebitDraft" "(pt/parse-all [draft])"
     "(pt/parse draft)"]
@@ -432,6 +435,16 @@
         (is (some? fix) message)
         (is (not (str/includes? message "->")) message)
         (is (pt/parsed? Debit (pt/parse ((compiling (read-string (str/replace (str fix) "..." "1"))))))))))
+  (testing "a macro called with one argument says what is missing, and the call it names compiles"
+    (doseq [[form fix-re wrap] [['(pt/defparsed C1) #"\(defparsed C1 \[\]\)" #(cons 'pt/defparsed (rest %))]
+                                ['(pt/defsum S1) #"\(defsum S1 \[Debit Credit\]\)" #(cons 'pt/defsum (rest %))]
+                                ['(pt/draft Debit) #"\(pt/draft Debit \{[^}]*\}\)" identity]
+                                ['(pt/match Txn) #"\(pt/match Txn x .*\)\)" #(list 'fn '[x f g] %)]]]
+      (let [{:keys [rule message]} (error (compiling form))
+            fix                    (re-find fix-re (str message))]
+        (is (= :parsed-types.rule/missing-argument rule) (pr-str form))
+        (is (some? fix) message)
+        (is (some? ((compiling (wrap (read-string (str/replace (str fix) "..." "1")))))) fix))))
   (testing "parse of a value parse issued says it is already parsed"
     (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
 
@@ -446,7 +459,8 @@
           flagged (set (keys (get-in config [:linters :discouraged-var])))
           private (set (map #(symbol "parsed-types.core" (name %))
                             (remove (set (keys (ns-publics 'parsed-types.core))) (keys (ns-interns 'parsed-types.core)))))]
-      (is (= private flagged)))))
+      (is (= #{} (set/difference private flagged)) "private vars the config does not flag")
+      (is (= #{} (set/difference flagged private)) "vars the config flags that are not private vars"))))
 
 (deftest suggestions-are-data-too-test
   (is (= :amount (:suggestion (ex-data (try (:amont real) (catch clojure.lang.ExceptionInfo e e))))))

@@ -671,17 +671,27 @@
                      :members (if (sequential? members) (mapv pr-str members) (pr-str members))})))
   (Sum. name (vec members)))
 
+(defn- missing-argument!
+  "Throws `type` for `form`, a call of a library macro that leaves out an argument, with `message`, which says what is
+  missing and the call to write."
+  [form type message]
+  (throw (ex-info message {:type type, :rule ::rule/missing-argument, :form (pr-str form)})))
+
 (defmacro defsum
   "Define `name`, a closed set of parsed types. [[match]] on it must handle every member.
 
     (defsum Transaction [Debit Credit])"
-  [name members]
-  (when-not (simple-symbol? name)
-    (throw (ex-info (str "defsum: the name " (pr-str name) " is not a symbol. A sum is a var, named by a symbol. Write"
-                         " (defsum Transaction [Debit Credit]), with a symbol for the name.")
-                    {:type ::bad-declaration, :rule ::rule/sum-name-not-symbol, :name (pr-str name)})))
-  ;; through `var`, because it is private
-  `(def ~name ((var sum) '~name ~members)))
+  ([name]
+   (missing-argument! &form ::bad-declaration
+                      (str "(defsum " (pr-str name) ") lists no members. A sum names the parsed types it holds. List them"
+                           " in a vector, as in (defsum " (pr-str name) " [Debit Credit]).")))
+  ([name members]
+   (when-not (simple-symbol? name)
+     (throw (ex-info (str "defsum: the name " (pr-str name) " is not a symbol. A sum is a var, named by a symbol. Write"
+                          " (defsum Transaction [Debit Credit]), with a symbol for the name.")
+                     {:type ::bad-declaration, :rule ::rule/sum-name-not-symbol, :name (pr-str name)})))
+   ;; through `var`, because it is private
+   `(def ~name ((var sum) '~name ~members))))
 
 (defmacro match
   "Branch on which member of the sum `sum-name` the parsed value `x` is. Each clause is a member type, a binding, and
@@ -695,95 +705,100 @@
   a value [[parse]] issued, of its type's class. A value of a class with the type's name, from before or after a REPL
   re-evaluated its `defparsed`, throws `::stale-type`, naming the namespace to re-evaluate. Any other `x` throws
   `::not-parsed`."
-  [sum-name x & clauses]
-  (let [refuse! (fn [rule message data]
-                  (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (pr-str sum-name)))))
-        _       (when-not (symbol? sum-name)
-                  (refuse! ::rule/match-sum-not-a-symbol
-                           (str "match: the sum " (pr-str sum-name) " is not a symbol. match names a sum by its"
-                                " symbol. Write "
-                                (if (or (string? sum-name) (keyword? sum-name))
-                                  (pr-str (list* 'pt/match (symbol (name sum-name)) x clauses))
-                                  "(pt/match Transaction x Debit d (f d) Credit c (g c))")
-                                ".")
-                           {}))
-        sum-var (resolve sum-name)
-        s       (when (var? sum-var) @sum-var)
-        _       (when-not (sum? s)
-                  (refuse! ::rule/match-not-a-sum
-                           (str "match: " sum-name " is not a sum defined with defsum. match branches on the members"
-                                " of a sum. Name a sum, or define one, as in (pt/defsum Transaction [Debit Credit]).")
-                           {}))
-        _       (when-not (zero? (mod (count clauses) 3))
-                  (refuse! ::rule/match-clause-shape
-                           (str "match on " sum-name ": " (count clauses) " clause forms, not a multiple of 3. Each"
-                                " clause is a type, a binding, and an expression. Write clauses like Debit d (f d).")
-                           {:clauses clauses}))
-        triples (partition 3 clauses)
-        members (mapv #(symbol (.getSimpleName ^Class %)) (sum-members s))
-        types   (map (fn [[t]] (let [_ (when-not (symbol? t)
-                                         (refuse! ::rule/match-not-a-type
-                                                  (str "match on " sum-name ": the clause " (pr-str t) " is not a symbol."
-                                                       " Each clause starts with a member type, by its symbol. Write "
-                                                       (if (or (string? t) (keyword? t)) (symbol (name t)) (first members))
-                                                       " for " (pr-str t) ", naming one of " members ".")
-                                                  {:clause (pr-str t)}))
-                                     c (resolve t)]
-                                 (when (class? c) (not-loaded! (str "match on " sum-name) c))
-                                 (when-not (class? c)
-                                   (refuse! ::rule/match-not-a-type
-                                            (str "match on " sum-name ": " t " is not a type. Each clause starts"
-                                                 " with a member type. Name one of "
-                                                 (mapv #(symbol (.getSimpleName ^Class %)) (sum-members s)) ".")
-                                            {:clause (str t)}))
-                                 c))
-                     triples)
-        name-of (fn [^Class c] (.getName c))
-        simple  (fn [^Class c] (symbol (.getSimpleName c)))
-        missing (remove (fn [m] (some #(identical? m %) types)) (sum-members s))
-        extra   (remove (fn [t] (some #(identical? t %) (sum-members s))) types)]
-    (when-let [[t] (seq (filter (fn [t] (some #(= (name-of t) (name-of %)) missing)) extra))]
-      (let [sum-ns (ns-name (.ns ^clojure.lang.Var sum-var))
-            nss    [sum-ns (ns-name *ns*)]]
-        (throw (ex-info (str "match on " sum-name ": the clause " (simple t) " names " (name-of t) ", but the sum holds"
-                             " another class of that name: one of the two is from before " (defined-in t) " was"
-                             " re-evaluated. Types compare by class, like records. "
-                             (if (apply = (class-ns t) nss)
-                               (str "Re-evaluate the defsum " sum-name " after the defparsed " (simple t) ", then this"
-                                    " match, or reload the namespace, as in " (reload-command nss) ".")
-                               (str "Reload the namespace of the defsum " sum-name ", then this match's, in that order,"
-                                    " as in " (reload-command nss) ".")))
-                        {:type ::stale-type, :rule ::rule/stale-sum, :sum (str sum-name), :class (name-of t)
-                         :sum-ns sum-ns}))))
-    (when (seq missing)
-      (let [simple (mapv simple missing)]
-        (refuse! ::rule/match-missing-member
-                 (str "match on " sum-name " does not handle " simple ". A match handles every member, so adding"
-                      " one to the sum breaks every match that misses it. Add a clause for each, as in "
-                      (first simple) " x (f x).")
-                 {:missing missing})))
-    (when (seq extra)
-      (refuse! ::rule/match-not-a-member
-               (str "match on " sum-name ": not members: " (mapv #(symbol (.getSimpleName ^Class %)) extra) ". A"
-                    " clause handles a member of the sum. Remove those clauses, or add the types to the defsum.")
-               {:extra (mapv name-of extra)}))
-    ;; distinct by name: two classes of one name are the type before and after a REPL re-evaluated it
-    (when-not (apply distinct? (map name-of types))
-      (refuse! ::rule/match-member-twice
-               (str "match on " sum-name " handles a type twice: "
-                    (vec (for [[t c] (frequencies (map #(symbol (.getSimpleName ^Class %)) types)) :when (< 1 c)] t))
-                    ". One clause runs per member. Keep one clause per type.")
-               {}))
-    (let [v (gensym "v")]
-      `(let [~v ~x]
-         (cond
-           ;; the private fns through `var`
-           ~@(mapcat (fn [[t b e]]
-                       [`((var issued-as?) ~t ~v) `(let [~b ~v] ~e)])
-                     triples)
-           ;; `v` is no member this match handles, so this throws
-           :else ((var match-fell-through!) ~sum-name ~(vec (map first triples)) '~(ns-name *ns*)
-                  '~(ns-name (.ns ^clojure.lang.Var sum-var)) ~v))))))
+  ([sum-name]
+   (missing-argument! &form ::bad-declaration
+                      (str "(pt/match " (pr-str sum-name) ") has no value to match. match takes the sum, the value,"
+                           " then a clause per member. Write (pt/match " (pr-str sum-name)
+                           " x Debit d (f d) Credit c (g c)), with a clause for each member.")))
+  ([sum-name x & clauses]
+   (let [refuse! (fn [rule message data]
+                   (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (pr-str sum-name)))))
+         _       (when-not (symbol? sum-name)
+                   (refuse! ::rule/match-sum-not-a-symbol
+                            (str "match: the sum " (pr-str sum-name) " is not a symbol. match names a sum by its"
+                                 " symbol. Write "
+                                 (if (or (string? sum-name) (keyword? sum-name))
+                                   (pr-str (list* 'pt/match (symbol (name sum-name)) x clauses))
+                                   "(pt/match Transaction x Debit d (f d) Credit c (g c))")
+                                 ".")
+                            {}))
+         sum-var (resolve sum-name)
+         s       (when (var? sum-var) @sum-var)
+         _       (when-not (sum? s)
+                   (refuse! ::rule/match-not-a-sum
+                            (str "match: " sum-name " is not a sum defined with defsum. match branches on the members"
+                                 " of a sum. Name a sum, or define one, as in (pt/defsum Transaction [Debit Credit]).")
+                            {}))
+         _       (when-not (zero? (mod (count clauses) 3))
+                   (refuse! ::rule/match-clause-shape
+                            (str "match on " sum-name ": " (count clauses) " clause forms, not a multiple of 3. Each"
+                                 " clause is a type, a binding, and an expression. Write clauses like Debit d (f d).")
+                            {:clauses clauses}))
+         triples (partition 3 clauses)
+         members (mapv #(symbol (.getSimpleName ^Class %)) (sum-members s))
+         types   (map (fn [[t]] (let [_ (when-not (symbol? t)
+                                          (refuse! ::rule/match-not-a-type
+                                                   (str "match on " sum-name ": the clause " (pr-str t) " is not a symbol."
+                                                        " Each clause starts with a member type, by its symbol. Write "
+                                                        (if (or (string? t) (keyword? t)) (symbol (name t)) (first members))
+                                                        " for " (pr-str t) ", naming one of " members ".")
+                                                   {:clause (pr-str t)}))
+                                      c (resolve t)]
+                                  (when (class? c) (not-loaded! (str "match on " sum-name) c))
+                                  (when-not (class? c)
+                                    (refuse! ::rule/match-not-a-type
+                                             (str "match on " sum-name ": " t " is not a type. Each clause starts"
+                                                  " with a member type. Name one of "
+                                                  (mapv #(symbol (.getSimpleName ^Class %)) (sum-members s)) ".")
+                                             {:clause (str t)}))
+                                  c))
+                      triples)
+         name-of (fn [^Class c] (.getName c))
+         simple  (fn [^Class c] (symbol (.getSimpleName c)))
+         missing (remove (fn [m] (some #(identical? m %) types)) (sum-members s))
+         extra   (remove (fn [t] (some #(identical? t %) (sum-members s))) types)]
+     (when-let [[t] (seq (filter (fn [t] (some #(= (name-of t) (name-of %)) missing)) extra))]
+       (let [sum-ns (ns-name (.ns ^clojure.lang.Var sum-var))
+             nss    [sum-ns (ns-name *ns*)]]
+         (throw (ex-info (str "match on " sum-name ": the clause " (simple t) " names " (name-of t) ", but the sum holds"
+                              " another class of that name: one of the two is from before " (defined-in t) " was"
+                              " re-evaluated. Types compare by class, like records. "
+                              (if (apply = (class-ns t) nss)
+                                (str "Re-evaluate the defsum " sum-name " after the defparsed " (simple t) ", then this"
+                                     " match, or reload the namespace, as in " (reload-command nss) ".")
+                                (str "Reload the namespace of the defsum " sum-name ", then this match's, in that order,"
+                                     " as in " (reload-command nss) ".")))
+                         {:type ::stale-type, :rule ::rule/stale-sum, :sum (str sum-name), :class (name-of t)
+                          :sum-ns sum-ns}))))
+     (when (seq missing)
+       (let [simple (mapv simple missing)]
+         (refuse! ::rule/match-missing-member
+                  (str "match on " sum-name " does not handle " simple ". A match handles every member, so adding"
+                       " one to the sum breaks every match that misses it. Add a clause for each, as in "
+                       (first simple) " x (f x).")
+                  {:missing missing})))
+     (when (seq extra)
+       (refuse! ::rule/match-not-a-member
+                (str "match on " sum-name ": not members: " (mapv #(symbol (.getSimpleName ^Class %)) extra) ". A"
+                     " clause handles a member of the sum. Remove those clauses, or add the types to the defsum.")
+                {:extra (mapv name-of extra)}))
+     ;; distinct by name: two classes of one name are the type before and after a REPL re-evaluated it
+     (when-not (apply distinct? (map name-of types))
+       (refuse! ::rule/match-member-twice
+                (str "match on " sum-name " handles a type twice: "
+                     (vec (for [[t c] (frequencies (map #(symbol (.getSimpleName ^Class %)) types)) :when (< 1 c)] t))
+                     ". One clause runs per member. Keep one clause per type.")
+                {}))
+     (let [v (gensym "v")]
+       `(let [~v ~x]
+          (cond
+            ;; the private fns through `var`
+            ~@(mapcat (fn [[t b e]]
+                        [`((var issued-as?) ~t ~v) `(let [~b ~v] ~e)])
+                      triples)
+            ;; `v` is no member this match handles, so this throws
+            :else ((var match-fell-through!) ~sum-name ~(vec (map first triples)) '~(ns-name *ns*)
+                   '~(ns-name (.ns ^clojure.lang.Var sum-var)) ~v)))))))
 
 ;;; ------------------------------------------------ defparsed ------------------------------------------------
 
@@ -957,75 +972,80 @@
 
   Neither type has a positional factory: only [[draft]] builds a draft, naming every field, and only [[parse]]
   builds a value that [[parsed]] accepts."
-  [parsed-name fields & clauses]
-  ;; Inside another form, the whole form compiles before any of it runs, so the classes would be defined before the
-  ;; checks below them run, and their names would not resolve. `&env` holds the locals, and `Compiler/METHOD` is bound
-  ;; while a fn body compiles, which a `when` at the top level is.
-  (when (or (seq &env) (some? (.deref clojure.lang.Compiler/METHOD)))
-    (syntax-error! &form ::rule/defparsed-not-top-level
-                   (str "(defparsed " (pr-str parsed-name) " ...) is inside another form. defparsed defines classes,"
-                        " then checks and registers them, one step at a time, which works only at the top level of a"
-                        " namespace. Write defparsed at the top level of a namespace, and move a local a check or"
-                        " fetch uses into a def, as in (def limit 10).")))
-  (when (and (simple-symbol? parsed-name) (clojure.string/includes? (name parsed-name) "."))
-    (syntax-error! &form ::rule/name-with-dot
-                   (str "the name " parsed-name " has a dot. A parsed type is a class in this namespace's package, and"
-                        " a dot would put it in another package, which Clojure cannot load it from. Name it without"
-                        " one, as in " (clojure.string/replace (name parsed-name) "." "") ".")))
-  (when-not (simple-symbol? parsed-name)
-    (syntax-error! &form ::rule/name-not-symbol
-                   (str "the name " (pr-str parsed-name) " is not a symbol. A parsed type is a class, named by a"
-                        " symbol. Write (defparsed Name [fields] clauses ...), with a symbol for Name.")))
-  (check-field-names! &form fields)
-  (doseq [c clauses]
-    (when-not (and (seq? c) (symbol? (first c)) ('#{pure external fetch} (symbol (name (first c)))))
-      (syntax-error! c ::rule/unknown-clause
-                     (str (pr-str (if (seq? c) (first c) c)) " does not start a clause. A clause is (pure ...),"
-                          " (external ...) or (fetch ...). Use one of those."))))
-  (let [clauses     (map #(cons (symbol (name (first %))) (rest %)) clauses)
-        fetches     (mapv #(parse-fetch-clause fields %) (filter (comp #{'fetch} first) clauses))
-        fetch-names (set (map :name fetches))
-        checks      (mapv #(parse-check-clause parsed-name fields fetch-names %)
-                          (filter (comp '#{pure external} first) clauses))
-        names       (concat (map :name checks) (map :name fetches))
-        draft-name  (symbol (str parsed-name "Draft"))
-        parsed-class-name (str (namespace-munge *ns*) "." parsed-name)
-        claims      {parsed-class-name                          :parsed
-                     (str (namespace-munge *ns*) "." draft-name) :draft}]
-    (when-not (apply distinct? ::sentinel names)
-      (syntax-error! &form ::rule/name-used-twice
-                     (str "a check or fetch name is used twice: "
-                          (vec (for [[x c] (frequencies names) :when (< 1 c)] x))
-                          ". A failure is reported under its name. Give each its own name.")))
-    (when-let [[big small] (first (for [[i big] (map-indexed vector (filter #(= :pure (:kind %)) checks))
-                                        small (drop (inc i) (filter #(= :pure (:kind %)) checks))
-                                        :let  [b (set (:reads big)), sm (set (:reads small))]
-                                        ;; a check that reads no field shares none, so it holds nothing
-                                        :when (and (seq sm) (set/subset? sm b) (not= sm b))]
-                                    [big small]))]
-      (syntax-error! &form ::rule/pure-check-order
-                     (str "the pure check " (:name big) " reads " (mapv symbol (:reads big)) ", and is written before "
-                          (:name small) ", which reads only " (mapv symbol (:reads small)) ". Pure checks run in the"
-                          " order written, and a check that fails holds every later one that shares a field with it, so a check"
-                          " on fewer fields goes first. Move " (:name small) " before " (:name big) ".")))
-    ;; when it expands, so that a refused defparsed never reaches its deftypes, which would redefine the classes
-    (claim-class-names! (ns-name *ns*) parsed-name claims false)
-    ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
-    ;; every class as it was. The private fns through `var`.
-    `(do
-       ;; the fetch fns, evaluated once and checked before any class is defined
-       ((var stage!) ~parsed-class-name ~(str (namespace-munge *ns*) "." draft-name)
-                     '~(mapv #(select-keys % [:name :reads]) fetches) [~@(map :f fetches)])
-       ;; before the deftypes, which is what records the claim
-       ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
-       ~(defparsed-type parsed-name fields)
-       ~(defdraft-type draft-name fields)
-       ;; only this expansion may record a plan
-       ((var register!) ~parsed-name ~draft-name
-                        {:checks  ~checks
-                         :fetches '~(mapv #(select-keys % [:name :reads]) fetches)}
-                        ~(builders parsed-name draft-name fields))
-       ~parsed-name)))
+  ([parsed-name]
+   (missing-argument! &form ::bad-declaration
+                      (str "(defparsed " (pr-str parsed-name) ") has no field vector. A defparsed names its type,"
+                           " then its fields, then its clauses. Write (defparsed " (pr-str parsed-name) " [amount]),"
+                           " or (defparsed " (pr-str parsed-name) " []) for a type with no fields.")))
+  ([parsed-name fields & clauses]
+   ;; Inside another form, the whole form compiles before any of it runs, so the classes would be defined before the
+   ;; checks below them run, and their names would not resolve. `&env` holds the locals, and `Compiler/METHOD` is bound
+   ;; while a fn body compiles, which a `when` at the top level is.
+   (when (or (seq &env) (some? (.deref clojure.lang.Compiler/METHOD)))
+     (syntax-error! &form ::rule/defparsed-not-top-level
+                    (str "(defparsed " (pr-str parsed-name) " ...) is inside another form. defparsed defines classes,"
+                         " then checks and registers them, one step at a time, which works only at the top level of a"
+                         " namespace. Write defparsed at the top level of a namespace, and move a local a check or"
+                         " fetch uses into a def, as in (def limit 10).")))
+   (when (and (simple-symbol? parsed-name) (clojure.string/includes? (name parsed-name) "."))
+     (syntax-error! &form ::rule/name-with-dot
+                    (str "the name " parsed-name " has a dot. A parsed type is a class in this namespace's package, and"
+                         " a dot would put it in another package, which Clojure cannot load it from. Name it without"
+                         " one, as in " (clojure.string/replace (name parsed-name) "." "") ".")))
+   (when-not (simple-symbol? parsed-name)
+     (syntax-error! &form ::rule/name-not-symbol
+                    (str "the name " (pr-str parsed-name) " is not a symbol. A parsed type is a class, named by a"
+                         " symbol. Write (defparsed Name [fields] clauses ...), with a symbol for Name.")))
+   (check-field-names! &form fields)
+   (doseq [c clauses]
+     (when-not (and (seq? c) (symbol? (first c)) ('#{pure external fetch} (symbol (name (first c)))))
+       (syntax-error! c ::rule/unknown-clause
+                      (str (pr-str (if (seq? c) (first c) c)) " does not start a clause. A clause is (pure ...),"
+                           " (external ...) or (fetch ...). Use one of those."))))
+   (let [clauses     (map #(cons (symbol (name (first %))) (rest %)) clauses)
+         fetches     (mapv #(parse-fetch-clause fields %) (filter (comp #{'fetch} first) clauses))
+         fetch-names (set (map :name fetches))
+         checks      (mapv #(parse-check-clause parsed-name fields fetch-names %)
+                           (filter (comp '#{pure external} first) clauses))
+         names       (concat (map :name checks) (map :name fetches))
+         draft-name  (symbol (str parsed-name "Draft"))
+         parsed-class-name (str (namespace-munge *ns*) "." parsed-name)
+         claims      {parsed-class-name                          :parsed
+                      (str (namespace-munge *ns*) "." draft-name) :draft}]
+     (when-not (apply distinct? ::sentinel names)
+       (syntax-error! &form ::rule/name-used-twice
+                      (str "a check or fetch name is used twice: "
+                           (vec (for [[x c] (frequencies names) :when (< 1 c)] x))
+                           ". A failure is reported under its name. Give each its own name.")))
+     (when-let [[big small] (first (for [[i big] (map-indexed vector (filter #(= :pure (:kind %)) checks))
+                                         small (drop (inc i) (filter #(= :pure (:kind %)) checks))
+                                         :let  [b (set (:reads big)), sm (set (:reads small))]
+                                         ;; a check that reads no field shares none, so it holds nothing
+                                         :when (and (seq sm) (set/subset? sm b) (not= sm b))]
+                                     [big small]))]
+       (syntax-error! &form ::rule/pure-check-order
+                      (str "the pure check " (:name big) " reads " (mapv symbol (:reads big)) ", and is written before "
+                           (:name small) ", which reads only " (mapv symbol (:reads small)) ". Pure checks run in the"
+                           " order written, and a check that fails holds every later one that shares a field with it, so a check"
+                           " on fewer fields goes first. Move " (:name small) " before " (:name big) ".")))
+     ;; when it expands, so that a refused defparsed never reaches its deftypes, which would redefine the classes
+     (claim-class-names! (ns-name *ns*) parsed-name claims false)
+     ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
+     ;; every class as it was. The private fns through `var`.
+     `(do
+        ;; the fetch fns, evaluated once and checked before any class is defined
+        ((var stage!) ~parsed-class-name ~(str (namespace-munge *ns*) "." draft-name)
+                      '~(mapv #(select-keys % [:name :reads]) fetches) [~@(map :f fetches)])
+        ;; before the deftypes, which is what records the claim
+        ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
+        ~(defparsed-type parsed-name fields)
+        ~(defdraft-type draft-name fields)
+        ;; only this expansion may record a plan
+        ((var register!) ~parsed-name ~draft-name
+                         {:checks  ~checks
+                          :fetches '~(mapv #(select-keys % [:name :reads]) fetches)}
+                         ~(builders parsed-name draft-name fields))
+        ~parsed-name))))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
 
@@ -1655,49 +1675,56 @@
 
   The values are evaluated in the order Clojure evaluates the same map literal: as written for up to 8 keys, and in
   no order the source shows beyond that."
-  [parsed-type m]
-  (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
-        _       (when-not (symbol? parsed-type)
-                  (refuse! ::rule/draft-type-not-a-symbol
-                           (str "pt/draft: the type " (pr-str parsed-type) " is not a symbol. pt/draft names a parsed"
-                                " type by its symbol. Write "
-                                (if (or (string? parsed-type) (keyword? parsed-type))
-                                  (pr-str (list 'pt/draft (symbol (name parsed-type)) m))
-                                  "(pt/draft Debit {...})")
-                                ".")
-                           {:got (pr-str parsed-type)}))
-        cls     (resolve parsed-type)
-        _       (when (class? cls) (not-loaded! "pt/draft" cls))
-        dcls    (when (and (parsed-type? cls) (.get registry cls)) (:draft-class (.get registry cls)))
-        _       (when-not dcls
-                  (refuse! ::rule/draft-not-a-parsed-type
-                           (str "pt/draft: " parsed-type " is not a type defined with defparsed. pt/draft builds the"
-                                " draft of a parsed type. Name a parsed type, not a sum or a draft, as in (pt/draft"
-                                " Debit {...}).")
-                           {:got (str parsed-type)}))
-        dsym    (symbol (.getName ^Class dcls))
-        flds    (:fields (.get registry cls))]
-    (when-not (map? m)
-      (refuse! ::rule/draft-not-a-literal-map
-               (str "pt/draft: " (pr-str m) " is not a literal map. pt/draft checks the keys when it compiles, so it"
-                    " takes a map written in place that names every field, and only fields. Write one, as in (pt/draft "
-                    parsed-type " {" (clojure.string/join ", " (map #(str % " ...") flds)) "}).")
-               {:got (pr-str m), :fields flds}))
-    (when-let [unknown (seq (remove (set flds) (keys m)))]
-      (refuse! ::rule/draft-literal-unknown-keys
-               (str "pt/draft: " parsed-type " has no fields " (vec unknown) "."
-                    (did-you-mean (first unknown) flds) " A literal map names only fields; its fields are "
-                    flds ". Remove the others.")
-               (cond-> {:unknown-fields (vec unknown), :fields flds}
-                 (nearest (first unknown) flds) (assoc :suggestion (nearest (first unknown) flds)))))
-    (when-let [missing (seq (remove (set (keys m)) flds))]
-      (refuse! ::rule/draft-literal-missing-fields
-               (str "pt/draft: " parsed-type " needs every field; missing " (vec missing) ". A literal map names"
-                    " every field, so none is left out by mistake. Write nil for a field you mean to leave"
-                    " empty, as in " (first missing) " nil.")
-               {:missing (vec missing), :fields flds}))
-    ;; bind in the map's own order, the order Clojure evaluates the same map literal in: as written for up to 8 keys,
-    ;; and the reader's hash order beyond, which the source no longer holds
-    (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
-      `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
-         (new ~dsym ~@(map syms flds))))))
+  ([parsed-type]
+   (missing-argument! &form ::bad-input
+                      (str "(pt/draft " (pr-str parsed-type) ") has no map of fields. pt/draft takes the type, then a"
+                           " literal map that names every field. Write "
+                           (let [c (when (symbol? parsed-type) (resolve parsed-type))]
+                             (if (parsed-type? c) (draft-hint c) "(pt/draft Debit {:user-id ..., :amount ...})"))
+                           ".")))
+  ([parsed-type m]
+   (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
+         _       (when-not (symbol? parsed-type)
+                   (refuse! ::rule/draft-type-not-a-symbol
+                            (str "pt/draft: the type " (pr-str parsed-type) " is not a symbol. pt/draft names a parsed"
+                                 " type by its symbol. Write "
+                                 (if (or (string? parsed-type) (keyword? parsed-type))
+                                   (pr-str (list 'pt/draft (symbol (name parsed-type)) m))
+                                   "(pt/draft Debit {...})")
+                                 ".")
+                            {:got (pr-str parsed-type)}))
+         cls     (resolve parsed-type)
+         _       (when (class? cls) (not-loaded! "pt/draft" cls))
+         dcls    (when (and (parsed-type? cls) (.get registry cls)) (:draft-class (.get registry cls)))
+         _       (when-not dcls
+                   (refuse! ::rule/draft-not-a-parsed-type
+                            (str "pt/draft: " parsed-type " is not a type defined with defparsed. pt/draft builds the"
+                                 " draft of a parsed type. Name a parsed type, not a sum or a draft, as in (pt/draft"
+                                 " Debit {...}).")
+                            {:got (str parsed-type)}))
+         dsym    (symbol (.getName ^Class dcls))
+         flds    (:fields (.get registry cls))]
+     (when-not (map? m)
+       (refuse! ::rule/draft-not-a-literal-map
+                (str "pt/draft: " (pr-str m) " is not a literal map. pt/draft checks the keys when it compiles, so it"
+                     " takes a map written in place that names every field, and only fields. Write one, as in (pt/draft "
+                     parsed-type " {" (clojure.string/join ", " (map #(str % " ...") flds)) "}).")
+                {:got (pr-str m), :fields flds}))
+     (when-let [unknown (seq (remove (set flds) (keys m)))]
+       (refuse! ::rule/draft-literal-unknown-keys
+                (str "pt/draft: " parsed-type " has no fields " (vec unknown) "."
+                     (did-you-mean (first unknown) flds) " A literal map names only fields; its fields are "
+                     flds ". Remove the others.")
+                (cond-> {:unknown-fields (vec unknown), :fields flds}
+                  (nearest (first unknown) flds) (assoc :suggestion (nearest (first unknown) flds)))))
+     (when-let [missing (seq (remove (set (keys m)) flds))]
+       (refuse! ::rule/draft-literal-missing-fields
+                (str "pt/draft: " parsed-type " needs every field; missing " (vec missing) ". A literal map names"
+                     " every field, so none is left out by mistake. Write nil for a field you mean to leave"
+                     " empty, as in " (first missing) " nil.")
+                {:missing (vec missing), :fields flds}))
+     ;; bind in the map's own order, the order Clojure evaluates the same map literal in: as written for up to 8 keys,
+     ;; and the reader's hash order beyond, which the source no longer holds
+     (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
+       `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
+          (new ~dsym ~@(map syms flds)))))))
