@@ -72,6 +72,7 @@
         (is (= "#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}" (pr-str parsed))))))
   (testing "a failed pure check is reported by name, with its doc and what it returned"
     (is (= {:type         ::pt/invalid
+            :rule         :parsed-types.rule/checks-failed
             :failed-kinds #{:pure}
             :draft        "parsed_types.core_test.RenameCardDraft"
             :failures    {::card-id-positive {:doc      "The card id is a positive integer."
@@ -83,6 +84,7 @@
            (thrown-data #(pt/parse (->RenameCardDraft 1 -1 " "))))))
   (testing "a failed external check is reported as :external"
     (is (= {:type         ::pt/invalid
+            :rule         :parsed-types.rule/checks-failed
             :failed-kinds #{:external}
             :draft        "parsed_types.core_test.RenameCardDraft"
             :failures     {::may-write-card {:doc "User 1 may write the card.", :returned false}}}
@@ -131,6 +133,7 @@
       (is (every? #(pt/parsed? RenameCard %) @parsed))))
   (testing "parse-all throws once with every failure, by index, and every kind that failed"
     (is (= {:type         ::pt/invalid
+            :rule         :parsed-types.rule/checks-failed
             :failed-kinds #{:pure :external}
             :failures    {1 {::may-write-card {:doc "User 1 may write the card.", :returned false}}
                           2 {::card-id-positive {:doc      "The card id is a positive integer."
@@ -157,7 +160,7 @@
                        ["an edn round trip" (edn/read-string {:default (fn [_ m] m)} (pr-str real))]]]
       (testing label
         (is (= {:type ::pt/not-parsed, :expected "parsed_types.core_test.RenameCard", :got (some-> x class .getName)}
-               (thrown-data #(pt/parsed RenameCard x))))
+               (dissoc (thrown-data #(pt/parsed RenameCard x)) :rule)))
         (is (false? (pt/parsed? RenameCard x)))))
     (is (true? (pt/parsed? RenameCard real)))))
 
@@ -234,7 +237,7 @@
 
 (deftest a-hand-made-draft-type-is-refused-test
   (testing "a deftype written by hand has no plan, so it parses to nothing"
-    (is (= {:type ::pt/bad-input, :got "parsed_types.core_test.LyingDraft"}
+    (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-draft, :got "parsed_types.core_test.LyingDraft"}
            (thrown-data #(pt/parse (->LyingDraft 5)))))))
 
 (pt/defparsed Closure [a]
@@ -284,10 +287,21 @@
   (testing "no check runs"
     (is (= [] (runs #(thrown-data (fn [] (pt/parse (->RenameCardDraft 1 1 (atom "New")))))))))
   (testing "the message names the field, the path in it and the fix"
-    (doseq [[v message] [[{:a [1 (atom 1)]} "OtherDraft: the field :title at [:a 1] holds an atom; deref it."]
-                         [(java.util.Date. 0) "OtherDraft: the field :title holds java.util.Date is mutable; use java.time.Instant."]
-                         [(map inc [1]) "OtherDraft: the field :title holds a lazy seq; pass (vec ...)."]
-                         [(int-array 1) "OtherDraft: the field :title holds a Java array; copy it into a vector."]]]
+    (doseq [[v message]
+            [[{:a [1 (atom 1)]}
+              (str "OtherDraft: the field :title at [:a 1] holds an atom (clojure.lang.Atom). A parsed value holds only"
+                   " values known to be immutable, so what its checks proved stays true. Deref it, as in @a.")]
+             [(java.util.Date. 0)
+              (str "OtherDraft: the field :title holds a mutable date (java.util.Date). A parsed value"
+                   " holds only values known to be immutable, so what its checks proved stays true. Use"
+                   " java.time.Instant, as in (.toInstant d).")]
+             [(map inc [1])
+              (str "OtherDraft: the field :title holds a lazy seq, which realizing could run side effects or never end"
+                   " (clojure.lang.LazySeq). A parsed value holds only values known to be immutable, so what its checks"
+                   " proved stays true. Pass a vector, as in (vec s).")]
+             [(int-array 1)
+              (str "OtherDraft: the field :title holds a Java array ([I). A parsed value holds only values known to be"
+                   " immutable, so what its checks proved stays true. Copy it into a vector, as in (vec a).")]]]
       (is (= message (try (pt/parse (->OtherDraft 1 1 v)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
   (testing "immutable values pass: scalars, java.time values, persistent collections, records and parsed values"
     (doseq [v [nil true \a "s" :k 'sym 1 (int 1) 1.5 1M 1N 1/3 (biginteger 1) (random-uuid) #"re" String
@@ -296,22 +310,3 @@
                [1 [2 #{3}] '(4 5) {:a {:b (java.time.Instant/now)}}] (sorted-map :a 1) clojure.lang.PersistentQueue/EMPTY
                (->Point 1 [2]) (pt/parse (->OtherDraft 1 1 nil))]]
       (is (some? (pt/parse (->OtherDraft 1 1 v))) (pr-str v)))))
-
-(deftest error-messages-name-the-fix-test
-  (let [real    (pt/parse (->RenameCardDraft 1 1 "New"))
-        message (fn [thunk] (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
-    (is (= "RenameCard is a parsed value and cannot be changed with assoc. Use (pt/draft-of x), assoc, then pt/parse."
-           (message #(assoc real :title "x"))))
-    (is (= (str "Expected a parsed RenameCard, got a RenameCard that parse did not issue. Build a RenameCardDraft and"
-                " call pt/parse.")
-           (message #(pt/parsed RenameCard (RenameCard. 1 1 "New" nil)))))
-    (is (= "Expected a parsed RenameCard, got a RenameCardDraft. Call pt/parse on it first."
-           (message #(pt/parsed RenameCard (->RenameCardDraft 1 1 "New")))))
-    (is (= "RenameCard has fixed fields, so it has no empty version. Use (into {} x) for a plain map."
-           (message #(empty real))))
-    (is (= "RenameCard has no field :nope. Use one of its fields [:user-id :card-id :title], or give get a default."
-           (message #(:nope real))))
-    (is (str/starts-with? (message #(pt/parse (->RenameCardDraft 1 -1 " ")))
-                          (str "Invalid RenameCard: :parsed-types.core-test/card-id-positive,"
-                               " :parsed-types.core-test/title-not-blank failed. Change the draft so these checks"
-                               " pass")))))

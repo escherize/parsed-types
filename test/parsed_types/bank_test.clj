@@ -337,8 +337,9 @@
 (deftest a-fetch-must-answer-every-tuple-test
   (testing "a missing tuple throws, never a nil row a check could pass on"
     (is (= ::pt/bad-fetch (:type (thrown-data #(pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)])))))
-    (is (= (str "Fetch :parsed-types.bank-test/row returned no entry for [[1]]. Return a key for every tuple, with nil"
-                " for not found.")
+    (is (= (str "Fetch :parsed-types.bank-test/row returned no entry for [[1]]. A fetch answers every tuple it is given,"
+                " so no check reads a nil it did not mean. Return a key for every tuple, with nil for not found, as in"
+                " (into {} (map (fn [t] [t (lookup t)])) tuples).")
            (try (pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)]) nil
                 (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
 

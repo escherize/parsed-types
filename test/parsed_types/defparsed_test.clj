@@ -17,7 +17,7 @@
   (doseq [[label form re]
           [["a name that is not a symbol"
             '(pt/defparsed "A" [a])
-            #"write \(defparsed Name \[fields\]"]
+            #"Write \(defparsed Name \[fields\]"]
            ["a check that reads a field the draft does not have"
             '(pt/defparsed A [a] (pure ::c "d" [b] true))
             #"reads fields the draft does not have: \[b\]"]
@@ -71,7 +71,7 @@
             #"checks take no options"]
            ["an unknown clause"
             '(pt/defparsed A [a] (check ::c "d" [a] true))
-            #"a clause is \(pure"]]]
+            #"A clause is \(pure"]]]
     (testing label
       (is (re-find re (str (compile-error form))))))
   (testing "a compile error is a ::pt/bad-declaration"
@@ -144,10 +144,10 @@
   (doseq [[label form re]
           [["a member left out"
             '(pt/match Shape x Point p 1)
-            #"does not handle \[\"Other\"\]"]
+            #"does not handle \[Other\]"]
            ["a type that is not a member"
             '(pt/match Shape x Point p 1 Other o 2 String s 3)
-            #"not members: \[\"String\"\]"]
+            #"not members: \[String\]"]
            ["a member handled twice"
             '(pt/match Shape x Point p 1 Other o 2 Point q 3)
             #"handles a type twice"]
@@ -164,8 +164,8 @@
 
 (deftest defsum-errors-test
   (testing "members must be distinct parsed types"
-    (is (re-find #"members must be distinct" (str (compile-error '(pt/defsum Bad [Point Point])))))
-    (is (re-find #"members must be distinct" (str (compile-error '(pt/defsum Bad [Point String])))))))
+    (is (re-find #"members are distinct types" (str (compile-error '(pt/defsum Bad [Point Point])))))
+    (is (re-find #"members are distinct types" (str (compile-error '(pt/defsum Bad [Point String])))))))
 
 ;;; pt/draft
 
@@ -175,11 +175,11 @@
   (testing "a literal map that leaves a field out does not compile"
     (is (re-find #"Point needs every field; missing \[:y\]" (str (compile-error '(pt/draft Point {:x 1}))))))
   (testing "a literal map with a key that is not a field does not compile"
-    (is (re-find #"Point has no fields \[:z\]; its fields are \[:x :y\]"
+    (is (re-find #"Point has no fields \[:z\]\. A literal map names only fields; its fields are \[:x :y\]"
                  (str (compile-error '(pt/draft Point {:x 1, :z 2}))))))
   (testing "a map built at run time: a key that is not a field is bad input"
     (let [m {:x 1, :z 2}]
-      (is (= {:type ::pt/bad-input, :unknown-fields [:z], :fields [:x :y]}
+      (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/draft-unknown-keys, :unknown-fields [:z], :fields [:x :y]}
              (try (pt/draft Point m) (catch clojure.lang.ExceptionInfo e (ex-data e)))))
       (is (= (->PointDraft 1 2) (pt/draft Point (dissoc (assoc m :y 2) :z))))))
   (testing "a type without a draft does not compile"

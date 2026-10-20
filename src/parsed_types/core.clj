@@ -36,10 +36,12 @@
   accepts values of the new one, the way a `#'var` follows its latest definition.
 
   Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (checks
-  failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or `::bad-fetch`. Its
-  message says what went wrong and how to fix it."
+  failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or `::bad-fetch`, and
+  a `:rule` in `parsed-types.rule` that names the rule it broke. Its message says what happened, with the values, the
+  rule, and the fix."
   (:require
    [clojure.set :as set]
+   [parsed-types.rule :as-alias rule]
    [clojure.string])
   (:import
    (com.google.common.collect MapMaker)
@@ -59,46 +61,96 @@
 
 (definterface DraftValue)
 
+(defn- edit-distance
+  "The Levenshtein distance between the strings `a` and `b`."
+  [a b]
+  (peek (reduce (fn [prev [i ca]]
+                  (reduce (fn [row [j cb]]
+                            (conj row (min (inc (peek row))
+                                           (inc (nth prev (inc j)))
+                                           (+ (nth prev j) (if (= ca cb) 0 1)))))
+                          [(inc i)]
+                          (map-indexed vector b)))
+                (vec (range (inc (count b))))
+                (map-indexed vector a))))
+
+(defn- nearest
+  "The first of `candidates`, keywords or symbols, within a few edits of `k`, or nil: up to 2, and fewer for a short
+  name, so that a one-letter key suggests nothing."
+  [k candidates]
+  (when (or (keyword? k) (symbol? k))
+    (let [n      (name k)
+          within (min 2 (quot (count n) 2))
+          close  (filter #(<= (edit-distance n (name %)) within) candidates)]
+      (first (sort-by #(edit-distance n (name %)) close)))))
+
+(defn- did-you-mean
+  "` Did you mean :x?` for the nearest of `candidates` to `k`, or an empty string."
+  [k candidates]
+  (if-let [m (nearest k candidates)] (str " Did you mean " (pr-str m) "?") ""))
+
 (defn final!
-  "Throws `::cannot-change`: a parsed value cannot be changed. Called by the parsed types [[defparsed]] defines."
-  [parsed op]
-  (let [n (.getSimpleName (class parsed))]
-    (throw (ex-info (case op
-                      "with-meta" (str n " is a parsed value and cannot carry metadata. Keep the metadata beside it,"
-                                       " not on it.")
-                      "empty"     (str n " has fixed fields, so it has no empty version. Use (into {} x) for a plain"
-                                       " map.")
-                      (str n " is a parsed value and cannot be changed with " op ". Use (pt/draft-of x), assoc, then"
-                           " pt/parse."))
-                    {:type ::cannot-change, :parsed (.getName (class parsed)), :op op}))))
+  "Throws `::cannot-change`: a parsed value cannot be changed. `k` is the key `op` was given, or nil. Called by the
+  parsed types [[defparsed]] defines."
+  [parsed op k]
+  (let [n                      (.getSimpleName (class parsed))
+        {:keys [rule message]} (case op
+                                 "with-meta"
+                                 {:rule    ::rule/parsed-no-metadata
+                                  :message (str "with-meta on a " n ": a parsed value carries no metadata, so it never"
+                                                " changes. Keep the metadata beside it, as in {:value x, :meta m}.")}
+                                 "empty"
+                                 {:rule    ::rule/parsed-no-empty
+                                  :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
+                                                " a plain map.")}
+                                 {:rule    ::rule/parsed-value-is-final
+                                  :message (str op " " (pr-str k) " on a " n ": a parsed value never changes, so its"
+                                                " checks stay true. Use (pt/parse (assoc (pt/draft-of x) " (pr-str k)
+                                                (if (= "dissoc" op) " nil" " v") ")) for a changed copy.")})]
+    (throw (ex-info message {:type ::cannot-change, :rule rule, :parsed (.getName (class parsed)), :op op, :key k}))))
 
 (defn fixed!
-  "Throws `::cannot-change`: a draft's fields are fixed. Called by the draft types [[defparsed]] defines."
-  [draft op]
-  (let [n (.getSimpleName (class draft))]
-    (throw (ex-info (case op
-                      "dissoc"    (str n " has fixed fields and cannot be changed with dissoc. Use assoc to set the"
-                                       " field to nil.")
-                      "with-meta" (str n " is a draft and cannot carry metadata. Keep the metadata beside it, not on"
-                                       " it.")
-                      "empty"     (str n " has fixed fields, so it has no empty version. Use (into {} x) for a plain"
-                                       " map.")
-                      (str n " has fixed fields and cannot be changed with " op ". Use assoc."))
-                    {:type ::cannot-change, :draft (.getName (class draft)), :op op}))))
+  "Throws `::cannot-change`: a draft's fields are fixed. `k` is the key `op` was given, or nil. Called by the draft
+  types [[defparsed]] defines."
+  [draft op k]
+  (let [n                      (.getSimpleName (class draft))
+        {:keys [rule message]} (case op
+                                 "with-meta"
+                                 {:rule    ::rule/draft-no-metadata
+                                  :message (str "with-meta on a " n ": a draft carries no metadata, so it holds only"
+                                                " what parse checks. Keep the metadata beside it, as in {:value x,"
+                                                " :meta m}.")}
+                                 "empty"
+                                 {:rule    ::rule/draft-no-empty
+                                  :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
+                                                " a plain map.")}
+                                 {:rule    ::rule/draft-fields-are-fixed
+                                  :message (str op " " (pr-str k) " on a " n ": a draft has fixed fields, set with"
+                                                " assoc. Use (assoc d " (pr-str k) (if (= "dissoc" op) " nil" " v")
+                                                ").")})]
+    (throw (ex-info message {:type ::cannot-change, :rule rule, :draft (.getName (class draft)), :op op, :key k}))))
 
 (defn no-field!
-  "Throws `::no-field`: `x` has no field `k`. Called by the types [[defparsed]] defines, when a key that is not a
-  field is read without a default, or set on a draft."
-  [x k]
-  (let [fields (vec (keys x))]
-    (throw (ex-info (str (.getSimpleName (class x)) " has no field " (pr-str k) ". Use one of its fields " fields
-                         ", or give get a default.")
-                    {:type                                        ::no-field
-                     (if (instance? DraftValue x) :draft :parsed) (.getName (class x))
-                     :key                                         k
-                     :fields                                      fields}))))
-
-(declare assoc-draft)
+  "Throws `::no-field`: `x` has no field `k`. `op` is `\"read\"` when a key that is not a field is read without a
+  default, or `\"assoc\"` when one is set on a draft. Called by the types [[defparsed]] defines."
+  [x k op]
+  (let [fields  (vec (keys x))
+        n       (.getSimpleName (class x))
+        nearest (nearest k fields)]
+    (throw (ex-info (if (= "read" op)
+                      (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A key that is not a field"
+                           " throws, never reads nil. Read one of its fields " fields ", or read with a default, as"
+                           " in (get x " (pr-str k) " default).")
+                      (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A draft has fixed fields. Set"
+                           " one of " fields ", as in (assoc d " (pr-str (or nearest (first fields))) " v)."))
+                    (cond-> {:type                                        ::no-field
+                             :rule                                        (if (= "read" op)
+                                                                            ::rule/no-such-field-read
+                                                                            ::rule/no-such-field-assoc)
+                             (if (instance? DraftValue x) :draft :parsed) (.getName (class x))
+                             :key                                         k
+                             :fields                                      fields}
+                      nearest (assoc :suggestion nearest))))))
 
 (defn- map-type-methods
   "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws unless a default
@@ -118,8 +170,8 @@
     ;; the fields, which equal values share.
     `[clojure.lang.IPersistentMap
       (~'assoc [~this ~k ~v] ~assoc-form)
-      (~'assocEx [~this ~k ~v] (~final-name ~this "assocEx"))
-      (~'without [~this ~k] (~final-name ~this "dissoc"))
+      (~'assocEx [~this ~k ~v] (~final-name ~this "assocEx" ~k))
+      (~'without [~this ~k] (~final-name ~this "dissoc" ~k))
       (~'containsKey [~this ~k] (clojure.core/contains? ~(set kws) ~k))
       (~'entryAt [~this ~k] (if (clojure.core/contains? ~(set kws) ~k)
                               (clojure.lang.MapEntry/create ~k (.valAt ~this ~k))
@@ -143,7 +195,7 @@
                               (clojure.core/seq ~o))))
       ;; no empty version, so code that rebuilds a map through `empty`, such as clojure.walk, throws instead of
       ;; dropping the type and the proof
-      (~'empty [~this] (~final-name ~this "empty"))
+      (~'empty [~this] (~final-name ~this "empty" nil))
       ;; like defrecord: the same class, and each field `=`, so 1.0M equals 1.00M and an Integer equals a Long
       (~'equiv [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
                                              ~@(when same-proof [(same-proof o)])
@@ -152,7 +204,7 @@
                                                     fields)))
       (~'seq [~this] (clojure.core/seq ~entries))
       (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
-      (~'valAt [~this ~k] ~(lookup `(no-field! ~this ~k)))
+      (~'valAt [~this ~k] ~(lookup `(no-field! ~this ~k "read")))
       (~'valAt [~this ~k ~nf] ~(lookup nf))
 
       clojure.lang.IKVReduce
@@ -169,7 +221,7 @@
 
       clojure.lang.IObj
       (~'meta [~this] nil)
-      (~'withMeta [~this ~k] (~final-name ~this "with-meta"))
+      (~'withMeta [~this ~k] (~final-name ~this "with-meta" nil))
 
       java.util.Map
       (~'get [~this ~k] (.valAt ~this ~k nil))
@@ -191,26 +243,44 @@
                                               (clojure.lang.APersistentMap/mapEquals ~this ~o)))
       (~'toString [~this] (clojure.core/str (clojure.core/into {} ~this)))]))
 
+(defn- syntax-error!
+  "Throws `::bad-declaration` for `form`, a `defparsed` form or one of its clauses, that broke `rule`. The message ends
+  with the form."
+  [form rule message]
+  (throw (ex-info (str "defparsed: " message " In: " (pr-str form)) {:type ::bad-declaration, :rule rule, :form form})))
+
 (defn- check-field-names!
   "Refuse fields that cannot be a type's fields: anything but simple symbols, a name twice, or a special form, which
   a field cannot shadow."
   [form fields]
-  (let [refuse! (fn [message] (throw (ex-info message {:type ::bad-declaration, :form form})))]
-    (when-not (and (vector? fields) (every? simple-symbol? fields))
-      (refuse! (str "fields must be a vector of simple symbols. Write them like [user-id amount]: " (pr-str form))))
-    (when-not (apply distinct? ::sentinel fields)
-      (refuse! (str "a field is named twice. Name each field once: " (pr-str form))))
-    (when-let [special (seq (filter #(or (special-symbol? %) (= '& %)) fields))]
-      (refuse! (str "a field cannot be named like a special form: " (vec special) ". Rename it.")))
-    (when-let [dotted (seq (filter #(clojure.string/includes? (name %) ".") fields))]
-      (refuse! (str "a field name cannot contain a dot: " (vec dotted) ". Use a dash instead.")))
-    (when-let [clash (seq (for [[_ fs] (group-by #(munge (name %)) fields) :when (< 1 (count fs))] fs))]
-      (refuse! (str "these fields compile to the same Java name: " (vec (first clash)) ". Rename one of them.")))
-    (when-let [reserved (seq (filter '#{__meta __extmap __hash __hasheq} fields))]
-      (refuse! (str "deftype reserves these field names: " (vec reserved) ". Rename them.")))
-    (when-let [reserved (seq (filter #(= "parse_proof" (munge (name %))) fields))]
-      (refuse! (str "parsed-types reserves the field name parse-proof for the proof a parsed value carries: "
-                    (vec reserved) ". Rename it.")))))
+  (when-not (and (vector? fields) (every? simple-symbol? fields))
+    (syntax-error! form ::rule/fields-not-symbols
+                   (str "the fields " (pr-str fields) " are not a vector of simple symbols. Each field becomes a Java"
+                        " field and a keyword key. Write them like [user-id amount].")))
+  (when-let [twice (seq (for [[f c] (frequencies fields) :when (< 1 c)] f))]
+    (syntax-error! form ::rule/field-named-twice
+                   (str "a field is named twice: " (vec twice) ". Each field is one key. Name each field once.")))
+  (when-let [special (seq (filter #(or (special-symbol? %) (= '& %)) fields))]
+    (syntax-error! form ::rule/field-special-form
+                   (str "a field cannot be named like a special form: " (vec special) ". A field is a local in the"
+                        " type's methods, and a special form cannot be shadowed. Rename it, as in "
+                        (first special) "-value.")))
+  (when-let [dotted (seq (filter #(clojure.string/includes? (name %) ".") fields))]
+    (syntax-error! form ::rule/field-with-dot
+                   (str "a field name cannot contain a dot: " (vec dotted) ". A dot is not allowed in a Java field."
+                        " Use a dash instead, as in " (clojure.string/replace (name (first dotted)) "." "-") ".")))
+  (when-let [clash (seq (for [[_ fs] (group-by #(munge (name %)) fields) :when (< 1 (count fs))] fs))]
+    (syntax-error! form ::rule/fields-same-java-name
+                   (str "these fields compile to the same Java name: " (vec (first clash)) ". Each field needs its"
+                        " own Java field. Rename one of them.")))
+  (when-let [reserved (seq (filter '#{__meta __extmap __hash __hasheq} fields))]
+    (syntax-error! form ::rule/field-reserved-by-deftype
+                   (str "deftype reserves these field names: " (vec reserved) ". Rename them, as in "
+                        (subs (name (first reserved)) 2) ".")))
+  (when-let [reserved (seq (filter #(= "parse_proof" (munge (name %))) fields))]
+    (syntax-error! form ::rule/field-reserved-for-proof
+                   (str "parsed-types reserves the field name parse-proof for the proof a parsed value carries: "
+                        (vec reserved) ". Rename it, as in proof."))))
 
 (defn- print-method-form [name]
   ;; `#ns.Type{...}`, like a record, so a value is told apart from a plain map at the REPL. The reader cannot build one
@@ -251,7 +321,7 @@
          parsed_types.core.ParsedValue
          (~'issuedWith [~this ~t] (clojure.core/identical? ~t ~'parse-proof))
          ;; the other value is of this class, so it is this generated type, and the proof goes only into it
-         ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!
+         ~@(map-type-methods fields this k v `(final! ~this "assoc" ~k) `final!
                              (fn [o]
                                `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
        (ns-unmap *ns* '~(symbol (str "->" name)))
@@ -296,9 +366,13 @@
   "A sum of parsed types, named `name`. Use [[defsum]]."
   [name members]
   (when-not (and (seq members) (every? parsed-type? members) (apply distinct? (map #(.getName ^Class %) members)))
-    (throw (ex-info (str "defsum " name ": members must be distinct types defined with defparsed. List each parsed"
-                         " type once, such as (defsum Transaction [Debit Credit]).")
-                    {:type ::bad-declaration, :name name, :members (mapv pr-str members)})))
+    (throw (ex-info (str "defsum " name " got " (mapv #(if (class? %) (symbol (.getSimpleName ^Class %)) %) members)
+                         ". A sum's members are distinct types defined with defparsed. List each parsed type once, as"
+                         " in (defsum " name " [Debit Credit]).")
+                    {:type    ::bad-declaration
+                     :rule    ::rule/bad-sum-members
+                     :name    name
+                     :members (mapv pr-str members)})))
   (->Sum name (vec members)))
 
 (defmacro defsum
@@ -322,21 +396,27 @@
   other `x` throws `::not-parsed`. A binding is not type-hinted: after such a reload the hint would name the old
   class. Read fields by keyword."
   [sum-name x & clauses]
-  (let [refuse! (fn [message data] (throw (ex-info message (assoc data :type ::bad-declaration))))
+  (let [refuse! (fn [rule message data]
+                  (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (str sum-name)))))
         s       (let [v (resolve sum-name)] (when (var? v) @v))
         _       (when-not (sum? s)
-                  (refuse! (str "match: " sum-name " is not a sum defined with defsum. Name a sum, or define one with"
-                                " defsum.")
+                  (refuse! ::rule/match-not-a-sum
+                           (str "match: " sum-name " is not a sum defined with defsum. match branches on the members"
+                                " of a sum. Name one, or define it, as in (pt/defsum " sum-name " [Debit Credit]).")
                            {}))
         _       (when-not (zero? (mod (count clauses) 3))
-                  (refuse! (str "match: each clause is a type, a binding, and an expression. Write clauses like"
-                                " Debit d (f d).")
+                  (refuse! ::rule/match-clause-shape
+                           (str "match on " sum-name ": " (count clauses) " clause forms, not a multiple of 3. Each"
+                                " clause is a type, a binding, and an expression. Write clauses like Debit d (f d).")
                            {:clauses clauses}))
         triples (partition 3 clauses)
         types   (map (fn [[t]] (let [c (resolve t)]
-                                 (when-not (class? c) (refuse! (str "match: " t " is not a type. Name a member of "
-                                                                    sum-name ".")
-                                                               {}))
+                                 (when-not (class? c)
+                                   (refuse! ::rule/match-not-a-type
+                                            (str "match on " sum-name ": " t " is not a type. Each clause starts"
+                                                 " with a member type. Name one of "
+                                                 (mapv #(symbol (.getSimpleName ^Class %)) (:members s)) ".")
+                                            {:clause (str t)}))
                                  c))
                      triples)
         name-of (fn [^Class c] (.getName c))
@@ -344,15 +424,23 @@
         missing (remove (set (map name-of types)) (map name-of (:members s)))
         extra   (remove (comp members name-of) types)]
     (when (seq missing)
-      (refuse! (str "match on " sum-name " does not handle " (mapv #(peek (clojure.string/split % #"\.")) missing)
-                    ". Add a clause for each.")
-               {}))
+      (let [simple (mapv #(symbol (peek (clojure.string/split % #"\."))) missing)]
+        (refuse! ::rule/match-missing-member
+                 (str "match on " sum-name " does not handle " simple ". A match handles every member, so adding"
+                      " one to the sum breaks every match that misses it. Add a clause for each, as in "
+                      (first simple) " x (f x).")
+                 {:missing missing})))
     (when (seq extra)
-      (refuse! (str "match on " sum-name ": not members: " (mapv #(.getSimpleName ^Class %) extra)
-                    ". Remove those clauses, or add the types to the defsum.")
-               {}))
+      (refuse! ::rule/match-not-a-member
+               (str "match on " sum-name ": not members: " (mapv #(symbol (.getSimpleName ^Class %)) extra) ". A"
+                    " clause handles a member of the sum. Remove those clauses, or add the types to the defsum.")
+               {:extra (mapv name-of extra)}))
     (when-not (apply distinct? (map name-of types))
-      (refuse! (str "match on " sum-name " handles a type twice. Keep one clause per type.") {}))
+      (refuse! ::rule/match-member-twice
+               (str "match on " sum-name " handles a type twice: "
+                    (vec (for [[t c] (frequencies (map #(symbol (.getSimpleName ^Class %)) types)) :when (< 1 c)] t))
+                    ". One clause runs per member. Keep one clause per type.")
+               {}))
     (let [v (gensym "v")]
       `(let [~v ~x]
          (cond
@@ -364,50 +452,75 @@
 
 ;;; ------------------------------------------------ defparsed ------------------------------------------------
 
-(defn- syntax-error! [form message]
-  (throw (ex-info (str "defparsed: " message " In: " (pr-str form)) {:type ::bad-declaration, :form form})))
-
 (defn- parse-check-clause
   "`(pure name doc [field ...] body ...)` or `(external name doc [field ...] [local fetch ...]? body ...)`"
   [fields fetch-names [head n doc & more :as form]]
   (let [external?      (= 'external head)
+        what           (str "the check " (pr-str n))
         _              (when (map? (first more))
-                         (syntax-error! form (str "checks take no options. Remove " (pr-str (first more)) ".")))
+                         (syntax-error! form ::rule/check-options
+                                        (str what " has options " (pr-str (first more)) ", but checks take no options:"
+                                             " what a check reads is its argument vector. Remove "
+                                             (pr-str (first more)) ".")))
         [args & more]  more
         _              (when (and external? (vector? (first more)) (nil? (next more))
                                   (seq (first more)) (every? keyword? (take-nth 2 (rest (first more)))))
-                         (syntax-error! form "a check needs a body after its fetch bindings. Write the body next."))
+                         (syntax-error! form ::rule/check-no-body-after-fetches
+                                        (str what " ends after its fetch bindings " (pr-str (first more)) ". A check"
+                                             " needs a body after its fetch bindings, which returns true to pass."
+                                             " Write the body next, as in " (pr-str (first more)) " (some? "
+                                             (first (first more)) ").")))
         [binds body]   (if (and external? (vector? (first more)) (next more))
                          [(first more) (rest more)]
                          [[] more])
         pairs          (partition-all 2 binds)]
     (when-not (qualified-keyword? n)
-      (syntax-error! form "a check's name must be a qualified keyword. Write it like ::amount-positive."))
+      (syntax-error! form ::rule/check-name-not-qualified
+                     (str what ": a check's name must be a qualified keyword, so failures from two namespaces never"
+                          " collide. Write it like ::" (if (or (keyword? n) (symbol? n)) (name n) "amount-positive")
+                          ".")))
     (when-not (string? doc)
-      (syntax-error! form "a check needs a doc string after its name. Say what the check checks, in a sentence."))
+      (syntax-error! form ::rule/check-no-doc
+                     (str what " needs a doc string after its name: a failure reports it. Write a sentence, as in ("
+                          head " " (pr-str n) " \"The amount is positive.\" [amount] ...).")))
     (when (and (not external?) (vector? (first more)) (next more))
-      (syntax-error! form "a pure check cannot fetch. Make it external, or remove the fetch bindings."))
+      (syntax-error! form ::rule/pure-check-fetches
+                     (str what " binds fetches " (pr-str (first more)) ", but a pure check cannot fetch: it reads only"
+                          " its fields. Make it (external ...), or remove the fetch bindings.")))
     (when-not (and (vector? args) (every? symbol? args))
-      (syntax-error! form (str "a check needs a vector of the fields it reads. Write it after the doc string, like"
-                               " [amount].")))
+      (syntax-error! form ::rule/check-no-field-vector
+                     (str what " has " (pr-str args) " where a check needs a vector of the fields it reads. Write it"
+                          " after the doc string, like [" (first fields) "].")))
     (when-let [unknown (seq (remove (set fields) args))]
-      (syntax-error! form (str "a check reads fields the draft does not have: " (vec unknown) ". Use only its fields "
-                               fields ".")))
-    (when-not (apply distinct? ::sentinel args)
-      (syntax-error! form "a check reads a field twice. Name each field once."))
+      (syntax-error! form ::rule/check-reads-unknown-field
+                     (str what " reads fields the draft does not have: " (vec unknown) "."
+                          (did-you-mean (first unknown) fields) " Use only its fields " fields ".")))
+    (when-let [twice (seq (for [[f c] (frequencies args) :when (< 1 c)] f))]
+      (syntax-error! form ::rule/check-reads-field-twice
+                     (str what " reads a field twice: " (vec twice) ". Name each field once.")))
     (when-not (every? #(and (= 2 (count %)) (symbol? (first %)) (contains? fetch-names (second %))) pairs)
-      (syntax-error! form (str "a check's fetches are pairs of a local and a fetch declared in this defparsed. Write"
-                               " them like [account ::account], naming one of " (vec (sort fetch-names)) ".")))
-    (when-not (apply distinct? ::sentinel (map first pairs))
-      (syntax-error! form "a check binds two fetches to one local. Give each fetch its own local."))
+      (syntax-error! form ::rule/check-bad-fetch-binding
+                     (str what " binds " (pr-str binds) ". A check's fetches are pairs of a local and a fetch declared"
+                          " in this defparsed. Write them like [account ::account], naming one of "
+                          (vec (sort fetch-names)) ".")))
+    (when-let [twice (seq (for [[l c] (frequencies (map first pairs)) :when (< 1 c)] l))]
+      (syntax-error! form ::rule/check-two-fetches-one-local
+                     (str what " binds two fetches to one local: " (vec twice) ". Give each fetch its own local.")))
     (when-let [clash (seq (filter (set fields) (map first pairs)))]
-      (syntax-error! form (str "a fetch is bound to a field's name: " (vec clash) ". Pick another local.")))
-    (when (empty? body) (syntax-error! form "a check needs a body. Write an expression that returns true to pass."))
+      (syntax-error! form ::rule/fetch-bound-to-field
+                     (str what ": a fetch is bound to a field's name: " (vec clash) ". The local would hide the"
+                          " field. Pick another local, as in " (first clash) "-row.")))
+    (when (empty? body)
+      (syntax-error! form ::rule/check-no-body
+                     (str what " needs a body. Write an expression that returns true to pass, as in (some? "
+                          (or (first args) "x") ").")))
     ;; An unnamed field is usually an unresolved symbol, but a field named like a clojure.core fn (`name`, `count`)
     ;; would resolve to that fn instead, so look for every field by name.
     (when-let [unnamed (seq (filter (set (remove (set args) fields)) (filter symbol? (tree-seq coll? seq body))))]
-      (syntax-error! form (str "a check uses fields its argument vector does not name: " (vec (distinct unnamed))
-                               ". Add them to the argument vector.")))
+      (syntax-error! form ::rule/check-uses-unnamed-field
+                     (str what " uses fields its argument vector does not name: " (vec (distinct unnamed)) ". A check"
+                          " reads only what it names. Add them to the argument vector: "
+                          (vec (concat args (distinct unnamed))) ".")))
     (merge {:name    n
             :doc     doc
             :kind    (if external? :external :pure)
@@ -417,10 +530,18 @@
 
 (defn- parse-fetch-clause [fields [_ n reads f :as form]]
   (when-not (qualified-keyword? n)
-    (syntax-error! form "a fetch's name must be a qualified keyword. Write it like ::account."))
+    (syntax-error! form ::rule/fetch-name-not-qualified
+                   (str "the fetch " (pr-str n) ": a fetch's name must be a qualified keyword. Write it like ::"
+                        (if (or (keyword? n) (symbol? n)) (name n) "account") ".")))
   (when-not (and (vector? reads) (every? (set fields) reads))
-    (syntax-error! form (str "a fetch needs a vector of fields of the draft. Name some of " fields ".")))
-  (when-not f (syntax-error! form "a fetch needs a function of the tuples it fetches. Write it after the fields."))
+    (syntax-error! form ::rule/fetch-bad-fields
+                   (str "the fetch " (pr-str n) " reads " (pr-str reads) ". A fetch needs a vector of fields of the"
+                        " draft." (if (vector? reads) (did-you-mean (first (remove (set fields) reads)) fields) "")
+                        " Name some of " fields ".")))
+  (when-not f
+    (syntax-error! form ::rule/fetch-no-fn
+                   (str "the fetch " (pr-str n) " has no function. A fetch needs a function of the tuples it fetches."
+                        " Write it after the fields, as in (fetch " (pr-str n) " " (pr-str reads) " rows-by-id).")))
   {:name n, :reads (mapv keyword reads), :f f})
 
 (defmacro defparsed
@@ -456,12 +577,15 @@
   The parsed type has no `->Name` factory: only [[parse]] builds a value of it that [[parsed]] accepts."
   [parsed-name fields & clauses]
   (when-not (simple-symbol? parsed-name)
-    (syntax-error! &form "write (defparsed Name [fields] clauses ...), with a symbol for Name."))
+    (syntax-error! &form ::rule/name-not-symbol
+                   (str "the name " (pr-str parsed-name) " is not a symbol. A parsed type is a class, named by a"
+                        " symbol. Write (defparsed Name [fields] clauses ...), with a symbol for Name.")))
   (check-field-names! &form fields)
   (doseq [c clauses]
     (when-not (and (seq? c) (symbol? (first c)) ('#{pure external fetch child children} (symbol (name (first c)))))
-      (syntax-error! c (str "a clause is (pure ...), (external ...), (fetch ...), (child ...) or (children ...). Use"
-                            " one of those."))))
+      (syntax-error! c ::rule/unknown-clause
+                     (str (pr-str (if (seq? c) (first c) c)) " does not start a clause. A clause is (pure ...),"
+                          " (external ...), (fetch ...), (child ...) or (children ...). Use one of those."))))
   (let [clauses     (map #(cons (symbol (name (first %))) (rest %)) clauses)
         by-head     (group-by first clauses)
         fetches     (mapv #(parse-fetch-clause fields %) (get by-head 'fetch))
@@ -471,20 +595,27 @@
         children    (into {}
                           (for [[head field type :as c] (concat (get by-head 'child) (get by-head 'children))]
                             (do (when-not (contains? (set fields) field)
-                                  (syntax-error! c (str "a child field must be a field of the draft. Name one of "
-                                                        fields ".")))
+                                  (syntax-error! c ::rule/child-not-a-field
+                                                 (str (pr-str field) ": a child field must be a field of the draft."
+                                                      (did-you-mean field fields) " Name one of " fields ".")))
                                 [(keyword field) {:kind (if (= 'child head) :one :many), :type type}])))
         child-heads (map second (concat (get by-head 'child) (get by-head 'children)))
         _           (when-not (apply distinct? ::sentinel child-heads)
-                      (syntax-error! &form (str "a field is declared as a child twice. Declare it once, with child or"
-                                                " children.")))
+                      (syntax-error! &form ::rule/child-declared-twice
+                                     (str "a field is declared as a child twice: "
+                                          (vec (for [[f c] (frequencies child-heads) :when (< 1 c)] f))
+                                          ". Declare it once, with child or children.")))
         names       (concat (map :name checks) (map :name fetches))
         draft-name  (symbol (str parsed-name "Draft"))]
     (when-not (apply distinct? ::sentinel names)
-      (syntax-error! &form "a check or fetch name is used twice. Give each its own name."))
+      (syntax-error! &form ::rule/name-used-twice
+                     (str "a check or fetch name is used twice: "
+                          (vec (for [[x c] (frequencies names) :when (< 1 c)] x))
+                          ". A failure is reported under its name. Give each its own name.")))
     (when-let [reserved (seq (filter #(= "parsed-types.child" (namespace %)) names))]
-      (syntax-error! &form (str "names in parsed-types.child are reserved for child-field checks: " (vec reserved)
-                                ". Name them in your own namespace.")))
+      (syntax-error! &form ::rule/reserved-name
+                     (str "names in parsed-types.child are reserved for child-field checks: " (vec reserved)
+                          ". Name them in your own namespace, as in ::" (name (first reserved)) ".")))
     `(do
        ~(defparsed-type parsed-name fields)
        ~(defdraft-type draft-name fields)
@@ -504,9 +635,11 @@
 
 (declare plan-for)
 
-(defn- bad-declaration! [draft-class message data]
+(defn- bad-declaration!
+  "Throws `::bad-declaration` for the declaration of `draft-class`, which broke `rule`, when its `defparsed` loads."
+  [draft-class rule message data]
   (throw (ex-info (str (.getSimpleName ^Class draft-class) ": " message)
-                  (merge {:type ::bad-declaration, :draft (.getName ^Class draft-class)} data))))
+                  (merge {:type ::bad-declaration, :rule rule, :draft (.getName ^Class draft-class)} data))))
 
 (defn- closed-over-locals
   "The locals `f` closes over. A check must close over none, or what it reads would not be what it declares."
@@ -525,21 +658,27 @@
   "Throw `::bad-declaration` for what `defparsed` cannot see when it expands, only when it loads: a child type that is
   not a parsed type or a sum, a fetch that is not a fn, and a pure check that closes over a local."
   [draft-class {:keys [checks fetches children]}]
-  (doseq [[field {:keys [type]}] children]
+  (doseq [[field {:keys [kind type]}] children]
     (when-not (or (parsed-type? type) (sum? type))
-      (bad-declaration! draft-class (str "the child field " field " holds " (pr-str type) ", which is not a type"
-                                         " defined with defparsed or a sum defined with defsum. Name one of those.")
-                        {:field field})))
-  (doseq [{n :name, :keys [f]} fetches]
+      (bad-declaration! draft-class ::rule/child-type-not-parsed
+                        (str "the child field " field " holds " (pr-str type) ", which is not a type defined with"
+                             " defparsed or a sum defined with defsum, in (" (if (= :one kind) "child" "children") " "
+                             (name field) " " (pr-str type) "). A child field holds drafts the parent parses. Name"
+                             " one of those.")
+                        {:field field, :got (pr-str type)})))
+  (doseq [{n :name, :keys [f reads]} fetches]
     (when-not (fn? f)
-      (bad-declaration! draft-class (str "the fetch " n " is " (pr-str f) ", not a fn. Write a fn of the tuples it"
-                                         " fetches.")
-                        {:name n})))
-  (doseq [{n :name, :keys [kind f]} checks]
+      (bad-declaration! draft-class ::rule/fetch-not-fn
+                        (str "the fetch " n " is " (pr-str f) ", not a fn, in (fetch " n " " (mapv symbol reads) " "
+                             (pr-str f) "). A fetch is called with the tuples it fetches. Write a fn of the tuples"
+                             " it fetches, as in (fetch " n " " (mapv symbol reads) " rows-by-id).")
+                        {:name n, :got (some-> f class .getName)})))
+  (doseq [{n :name, :keys [kind f reads]} checks]
     (when-let [locals (and (= :pure kind) (seq (closed-over-locals f)))]
-      (bad-declaration! draft-class (str "the pure check " n " closes over locals " (mapv symbol locals) ". A pure"
-                                         " check reads only the fields it names. Read the value from a field, or make"
-                                         " the check external.")
+      (bad-declaration! draft-class ::rule/pure-check-closes-over-locals
+                        (str "the pure check " n " closes over locals " (mapv symbol locals) ", in (pure " n " ... "
+                             (mapv symbol reads) " ...). A pure check reads only the fields it names. Read the value"
+                             " from a field, or make the check external.")
                         {:name n, :locals locals}))))
 
 (defn- children-of-type?
@@ -625,11 +764,17 @@
 
 (defn- plan-for [draft]
   (when-not (draft-value? draft)
-    (throw (ex-info (str "Expected a draft defined with defparsed, got " (describe draft) "."
-                         (if (instance? ParsedValue draft)
-                           " It is already parsed: call (pt/draft-of x) to get its draft."
-                           " Build one with its ->NameDraft constructor or pt/draft."))
-                    {:type ::bad-input, :got (some-> draft class .getName)})))
+    (throw (ex-info (str "pt/parse got " (describe draft) ". It parses only drafts of types defparsed defined."
+                         (cond
+                           (instance? ParsedValue draft)
+                           " It is already parsed: pass it as it is, or call (pt/draft-of x) to get its draft."
+
+                           (map? draft)
+                           " Build a draft from the map with (pt/draft Name m), as in (pt/parse (pt/draft Debit m))."
+
+                           :else
+                           " Build one with its constructor, as in (pt/parse (->DebitDraft ...)), or with pt/draft."))
+                    {:type ::bad-input, :rule ::rule/not-a-draft, :got (some-> draft class .getName)})))
   (.get registry (class draft)))
 
 (defn declaration
@@ -659,17 +804,17 @@
   (and (= "java.time" (.getPackageName c)) (Modifier/isFinal (.getModifiers c))))
 
 (defn- not-immutable
-  "nil when `v` is known to be immutable all the way down, else `[path what class-name]`: where inside the field the
-  first value that is not is, what it is with the fix, and its class. Accepts nil, the values of
+  "nil when `v` is known to be immutable all the way down, else `[path what fix class-name]`: where inside the field
+  the first value that is not is, what it is, the fix, and its class. Accepts nil, the values of
   [[immutable-classes]], classes, `java.time` values, values [[parse]] issued, and persistent vectors, maps (records
-  and drafts included), sets, lists and queues whose contents pass, map keys included. Refuses everything else, lazy and other seqs too: realizing one could run
-  side effects or never end."
+  and drafts included), sets, lists and queues whose contents pass, map keys included. Refuses everything else, lazy
+  and other seqs too: realizing one could run side effects or never end."
   [v path]
   (let [c       (class v)
-        refuse  (fn [what] [path what (.getName ^Class c)])]
+        refuse  (fn [what fix] [path what fix (.getName ^Class c)])]
     (cond
-      (< max-value-depth (count path))           (refuse (str "nested deeper than " max-value-depth " levels;"
-                                                              " flatten it"))
+      (< max-value-depth (count path))           (refuse (str "a value nested deeper than " max-value-depth " levels")
+                                                         "Flatten it.")
       (nil? v)                                   nil
       (contains? immutable-classes c)            nil
       (class? v)                                 nil
@@ -682,17 +827,24 @@
           (instance? clojure.lang.PersistentQueue v)) (some (fn [[i x]] (not-immutable x (conj path i)))
                                                             (map-indexed vector v))
       (instance? clojure.lang.IPersistentSet v)  (some #(not-immutable % (conj path '<element>)) v)
-      (.isArray c)                               (refuse "a Java array; copy it into a vector")
-      (instance? clojure.lang.IAtom v)           (refuse "an atom; deref it")
-      (instance? clojure.lang.IRef v)            (refuse "a reference type; deref it")
-      (instance? clojure.lang.Volatile v)        (refuse "a volatile; deref it")
-      (instance? java.util.Date v)               (refuse (str (.getName c) " is mutable; use java.time.Instant"))
-      (instance? clojure.lang.LazySeq v)         (refuse "a lazy seq; pass (vec ...)")
-      (instance? clojure.lang.ISeq v)            (refuse "a seq, which may be lazy; pass (vec ...)")
+      (.isArray c)                               (refuse "a Java array" "Copy it into a vector, as in (vec a).")
+      (instance? clojure.lang.IAtom v)           (refuse "an atom" "Deref it, as in @a.")
+      (instance? clojure.lang.IRef v)            (refuse "a reference type" "Deref it, as in @r.")
+      (instance? clojure.lang.Volatile v)        (refuse "a volatile" "Deref it, as in @v.")
+      (instance? java.util.Date v)               (refuse "a mutable date"
+                                                         "Use java.time.Instant, as in (.toInstant d).")
+      (instance? clojure.lang.LazySeq v)         (refuse (str "a lazy seq, which realizing could run side effects"
+                                                              " or never end")
+                                                         "Pass a vector, as in (vec s).")
+      (instance? clojure.lang.ISeq v)            (refuse "a seq, which may be lazy" "Pass a vector, as in (vec s).")
       (or (instance? java.util.Collection v)
-          (instance? java.util.Map v))           (refuse "a mutable Java collection; copy it into a vector, map or set")
-      :else                                      (refuse (str (.getName c) " is not known to be immutable; convert it"
-                                                              " to an immutable value")))))
+          (instance? java.util.Map v))           (refuse "a mutable Java collection"
+                                                         (str "Copy it into a Clojure collection, as in (vec c)"
+                                                              " or (into {} m)."))
+      :else                                      (refuse "a value not known to be immutable"
+                                                         (str "Convert it to an immutable value, such as a"
+                                                              " string, a number, a java.time value or a"
+                                                              " persistent collection.")))))
 
 (defn- refuse-mutable!
   "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable:
@@ -701,11 +853,13 @@
   [draft {:keys [children]} values]
   (doseq [[field v] values
           :when       (not (contains? children field))
-          :let        [[path what got] (not-immutable v [])]
+          :let        [[path what fix got] (not-immutable v [])]
           :when       what]
     (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field (when (seq path) (str " at " path))
-                         " holds " what ".")
-                    {:type ::bad-input, :draft (.getName (class draft)), :field field, :path path, :got got}))))
+                         " holds " what " (" got "). A parsed value holds only values known to be immutable, so what"
+                         " its checks proved stays true. " fix)
+                    {:type ::bad-input, :rule ::rule/mutable-value, :draft (.getName (class draft)), :field field
+                     :path path, :got got}))))
 
 (defn- start [draft]
   (let [plan   (plan-for draft)
@@ -731,8 +885,8 @@
   "The most drafts one tree may hold, counting a draft each time it appears."
   100000)
 
-(defn- too-big! [message]
-  (throw (ex-info message {:type ::bad-input, :max-depth max-depth, :max-nodes max-nodes})))
+(defn- too-big! [rule message data]
+  (throw (ex-info message (merge {:type ::bad-input, :rule rule, :max-depth max-depth, :max-nodes max-nodes} data))))
 
 (defn- flatten-tree
   "The drafts of the tree under `root`, children before parents, each with its `:path` from the root."
@@ -740,11 +894,17 @@
   (loop [stack (list [root [] 1]), pre []]
     (if-let [[draft path depth] (first stack)]
       (let [_    (when (< max-depth depth)
-                   (too-big! (str "The tree is deeper than " max-depth " levels, counting the root. Parse a shallower"
-                                  " tree.")))
+                   (too-big! ::rule/tree-too-deep
+                             (str "The tree under a " (.getSimpleName (class root)) " is deeper than " max-depth
+                                  " levels, at " path ", counting the root. A tree is walked with a bounded stack."
+                                  " Parse a shallower tree, or split it and parse the parts.")
+                             {:path path}))
             _    (when (<= max-nodes (count pre))
-                   (too-big! (str "The tree holds more than " max-nodes " drafts, counting a draft each time it"
-                                  " appears. Parse it in smaller parts.")))
+                   (too-big! ::rule/tree-too-big
+                             (str "The tree under a " (.getSimpleName (class root)) " holds more than " max-nodes
+                                  " drafts, counting a draft each time it appears. A parse is bounded in size. Parse"
+                                  " it in smaller parts, as with (pt/parse-all parts).")
+                             {}))
             st   (assoc (start draft) :tree tree :path path)
             kids (for [[field {:keys [kind type]}] (get-in st [:plan :children])
                        :let  [v (get-in st [:values field])]
@@ -855,11 +1015,17 @@
              result   ((:f fd) tuples)]
          (when-let [missing (seq (remove #(and (map? result) (contains? result %)) tuples))]
            (throw (ex-info (if (map? result)
-                             (str "Fetch " (:name fd) " returned no entry for " (vec missing) ". Return a key for"
-                                  " every tuple, with nil for not found.")
-                             (str "Fetch " (:name fd) " returned " (describe result) ", not a map. Return a map with a"
-                                  " key for every tuple, with nil for not found."))
-                           {:type ::bad-fetch, :fetch (:name fd), :missing (vec missing)})))
+                             (str "Fetch " (:name fd) " returned no entry for " (vec missing) ". A fetch answers every"
+                                  " tuple it is given, so no check reads a nil it did not mean. Return a key for every"
+                                  " tuple, with nil for not found, as in (into {} (map (fn [t] [t (lookup t)]))"
+                                  " tuples).")
+                             (str "Fetch " (:name fd) " returned " (describe result) ", not a map. A fetch returns a"
+                                  " map from each tuple to what it fetched. Return a map with a key for every tuple,"
+                                  " with nil for not found, as in (into {} (map (fn [t] [t (lookup t)])) tuples)."))
+                           {:type    ::bad-fetch
+                            :rule    (if (map? result) ::rule/fetch-missing-tuples ::rule/fetch-not-a-map)
+                            :fetch   (:name fd)
+                            :missing (vec missing)})))
          (reduce (fn [sts w]
                    (assoc-in sts [(:i w) :fetched (:name fd)] (get result (tuple w))))
                  sts ws)))
@@ -903,12 +1069,13 @@
           (:kind ((:checks-by-name plan) n)))))
 
 (defn- failed-names
-  "Each check that returned a failure in `nodes`, in the order they ran, with its path when it is under the root."
+  "Each check that returned a failure in `nodes`, in the order they ran, as `[label doc]`, the label naming its path
+  when it is under the root."
   [nodes]
   (for [{:keys [path failed order]} nodes
         n                           order
         :when                       (contains? (failed n) :returned)]
-    (str n (when (seq path) (str " at " path)))))
+    [(str n (when (seq path) (str " at " path))) (:doc (failed n))]))
 
 (defn- build-parsed
   "A value of the parsed type of `plan` with the fields in `values`, holding `proof`."
@@ -925,10 +1092,18 @@
                        nodes)]
     (get issued [])))
 
-(defn- invalid! [what names nodes data]
-  (throw (ex-info (str "Invalid " what ": " (clojure.string/join ", " names) " failed. Change the draft so these checks"
-                       " pass and parse again; (:failures (ex-data e)) has each one's doc and what it returned.")
-                  (merge {:type ::invalid, :failed-kinds (failed-kinds nodes)} data))))
+(defn- invalid!
+  "Throws `::invalid` for `what`, naming each failed check of `named`, `[label doc]` pairs, and its doc: the first
+  five, then how many more."
+  [what named nodes data]
+  (let [shown (take 5 named)
+        more  (- (count named) (count shown))]
+    (throw (ex-info (str "Invalid " what ": " (count named) (if (= 1 (count named)) " check" " checks") " failed: "
+                         (clojure.string/join ", " (map (fn [[label doc]] (str label " (" doc ")")) shown))
+                         (when (pos? more) (str ", and " more " more"))
+                         ". A draft parses only when every check returns exactly true. Change the draft so they pass"
+                         " and parse again; (:failures (ex-data e)) has what each returned.")
+                    (merge {:type ::invalid, :rule ::rule/checks-failed, :failed-kinds (failed-kinds nodes)} data)))))
 
 ;;; ------------------------------------------------ API ------------------------------------------------
 
@@ -937,7 +1112,7 @@
   [draft field v]
   (let [{:keys [fields make-draft read-draft]} (plan-for draft)]
     (when-not (some #{field} fields)
-      (no-field! draft field))
+      (no-field! draft field "assoc"))
     (make-draft (assoc (read-draft draft) field v))))
 
 (defn parse-all
@@ -951,7 +1126,7 @@
     (when (seq failures)
       (let [failing (map #(nth trees %) (keys failures))]
         (invalid! (str "drafts at indexes " (vec (keys failures)))
-                  (for [i (keys failures), n (failed-names (nth trees i))] (str n " in draft " i))
+                  (for [i (keys failures), [label doc] (failed-names (nth trees i))] [(str label " in draft " i) doc])
                   (apply concat failing)
                   {:failures failures})))
     (mapv issue-tree trees)))
@@ -992,19 +1167,16 @@
        (member? parsed-type (class x))
        (issued? x)))
 
-(defn- build-hint
-  "How to get a parsed value of `type`, for an error message."
+(defn- parse-hint
+  "The code that makes a parsed value of `type`, for an error message."
   [type]
-  (cond
-    (sum? type)
-    (str "Build a draft of a member (" (clojure.string/join " or " (map type-name (:members type)))
-         ") and call pt/parse.")
-
-    (.get registry type)
-    (str "Build a " (.getSimpleName ^Class (:draft-class (.get registry type))) " and call pt/parse.")
-
-    :else
-    (str "Build a draft that parses to " (type-name type) " and call pt/parse.")))
+  (let [one (fn [^Class c] (str "(pt/parse (->" (if-let [plan (.get registry c)]
+                                                  (.getSimpleName ^Class (:draft-class plan))
+                                                  (str (.getSimpleName c) "Draft"))
+                                " ...))"))]
+    (if (sum? type)
+      (clojure.string/join " or " (map one (:members type)))
+      (one type))))
 
 (defn parsed
   "`x`, which must be a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`. Throws
@@ -1012,19 +1184,46 @@
   `::no-field`."
   [parsed-type x]
   (when-not (parsed? parsed-type x)
-    (throw (ex-info (str "Expected a parsed " (type-name parsed-type) ", got " (describe x)
-                         (cond
-                           (and (draft-value? x) (member? parsed-type (:parses-to (plan-for x))))
-                           ". Call pt/parse on it first."
+    (let [t                      (type-name parsed-type)
+          {:keys [rule message]} (cond
+                                   (nil? x)
+                                   {:rule    ::rule/got-nil
+                                    :message (str "Expected a parsed " t ", got nil. A sink takes only a value"
+                                                  " pt/parse issued. Write " (parse-hint parsed-type)
+                                                  " and pass the result.")}
 
-                           (member? parsed-type (class x))
-                           (str " that parse did not issue. " (build-hint parsed-type))
+                                   (and (draft-value? x) (member? parsed-type (:parses-to (plan-for x))))
+                                   {:rule    ::rule/got-draft
+                                    :message (str "Expected a parsed " t ", got " (describe x) ", which is not"
+                                                  " checked yet. A sink takes only a value pt/parse issued. Call"
+                                                  " pt/parse on it first, as in (pt/parse draft), and pass the"
+                                                  " result.")}
 
-                           :else
-                           (str ". " (build-hint parsed-type))))
-                    {:type     ::not-parsed
-                     :expected (if (sum? parsed-type) (str (:name parsed-type)) (.getName ^Class parsed-type))
-                     :got      (some-> x class .getName)})))
+                                   (member? parsed-type (class x))
+                                   {:rule    ::rule/got-unissued
+                                    :message (str "Expected a parsed " t ", got " (describe x) " that pt/parse did"
+                                                  " not issue. A value built with its constructor or by hand"
+                                                  " carries no proof. Write " (parse-hint parsed-type)
+                                                  " and pass the result.")}
+
+                                   (and (map? x) (not (instance? ParsedValue x)) (not (instance? DraftValue x)))
+                                   {:rule    ::rule/got-plain-map
+                                    :message (str "Expected a parsed " t ", got a plain map. A sink takes only a"
+                                                  " value pt/parse issued. Build a draft from the map and parse it,"
+                                                  " as in (pt/parse (pt/draft "
+                                                  (if (sum? parsed-type) (type-name (first (:members parsed-type))) t)
+                                                  " m)), and pass the result.")}
+
+                                   :else
+                                   {:rule    ::rule/got-other-type
+                                    :message (str "Expected a parsed " t ", got " (describe x) ". A sink takes only"
+                                                  " a value of its type. Pass a " t " instead: "
+                                                  (parse-hint parsed-type) ".")})]
+      (throw (ex-info message
+                      {:type     ::not-parsed
+                       :rule     rule
+                       :expected (if (sum? parsed-type) (str (:name parsed-type)) (.getName ^Class parsed-type))
+                       :got      (some-> x class .getName)}))))
   x)
 
 (defn draft-of
@@ -1034,12 +1233,15 @@
   (let [plan (when (issued? parsed) (.get registry (class parsed)))]
     (when-not plan
       (throw (ex-info (if (instance? DraftValue parsed)
-                        (str "pt/draft-of takes a value pt/parse issued, got " (describe parsed) ", which is already a"
-                             " draft. Use it as it is.")
-                        (str "pt/draft-of takes a value pt/parse issued, got " (describe parsed)
-                             (when (instance? ParsedValue parsed) " that parse did not issue")
-                             ". Build a draft with its ->NameDraft constructor or pt/draft instead."))
-                      {:type ::not-parsed, :got (some-> parsed class .getName)})))
+                        (str "pt/draft-of got " (describe parsed) ", which is already a draft. draft-of turns a value"
+                             " pt/parse issued back into a draft. Use the draft as it is.")
+                        (str "pt/draft-of got " (describe parsed)
+                             (when (instance? ParsedValue parsed) " that pt/parse did not issue")
+                             ". draft-of takes only a value pt/parse issued. Build a draft with its constructor"
+                             " instead, as in (->DebitDraft ...), or with (pt/draft Debit m)."))
+                      {:type ::not-parsed
+                       :rule (if (instance? DraftValue parsed) ::rule/draft-of-a-draft ::rule/draft-of-unissued)
+                       :got  (some-> parsed class .getName)})))
     (let [values (reduce-kv (fn [vs field {:keys [kind]}]
                               (update vs field #(if (= :one kind) (some-> % draft-of) (mapv draft-of %))))
                             (into {} (map (fn [f] [f (get parsed f)])) (:fields plan))
@@ -1054,13 +1256,19 @@
   [^Class draft-type m]
   (let [{:keys [fields make-draft]} (.get registry draft-type)]
     (when-not (map? m)
-      (throw (ex-info (str "Expected a map to build a " (.getSimpleName draft-type) ", got " (describe m)
-                           ". Pass a map with some of its fields " fields ".")
-                      {:type ::bad-input, :got (some-> m class .getName)})))
+      (throw (ex-info (str "pt/draft got " (describe m) " to build a " (.getSimpleName draft-type) ". A draft is"
+                           " built from a map of its fields. Pass a map with some of its fields " fields ", as in {"
+                           (first fields) " ...}.")
+                      {:type ::bad-input, :rule ::rule/draft-from-non-map, :got (some-> m class .getName)})))
     (when-let [unknown (seq (remove (set fields) (keys m)))]
-      (throw (ex-info (str (.getSimpleName draft-type) " has no fields " (vec unknown) ". Remove them, or use its"
-                           " fields " fields ".")
-                      {:type ::bad-input, :unknown-fields (vec unknown), :fields fields})))
+      (throw (ex-info (str (.getSimpleName draft-type) " has no fields " (vec unknown) "."
+                           (did-you-mean (first unknown) fields) " A draft holds only its fields, so a misspelled"
+                           " key is never dropped. Remove them, or use its fields " fields ".")
+                      (cond-> {:type           ::bad-input
+                               :rule           ::rule/draft-unknown-keys
+                               :unknown-fields (vec unknown)
+                               :fields         fields}
+                        (nearest (first unknown) fields) (assoc :suggestion (nearest (first unknown) fields))))))
     (make-draft m)))
 
 (defmacro draft
@@ -1072,21 +1280,30 @@
 
     (pt/draft Debit {:user-id u, :account-id 1, :amount 30M})"
   [parsed-type m]
-  (let [refuse! (fn [message] (throw (ex-info message {:type ::bad-input})))
+  (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
         cls     (resolve parsed-type)
         dcls    (when (and (parsed-type? cls) (.get registry cls)) (:draft-class (.get registry cls)))
         _       (when-not dcls
-                  (refuse! (str "draft: " parsed-type " is not a type defined with defparsed. Name a parsed type that"
-                                " defparsed defined, not a sum or a draft.")))
+                  (refuse! ::rule/draft-not-a-parsed-type
+                           (str "pt/draft: " parsed-type " is not a type defined with defparsed. pt/draft builds the"
+                                " draft of a parsed type. Name a parsed type, not a sum or a draft, as in (pt/draft"
+                                " Debit {...}).")
+                           {:got (str parsed-type)}))
         dsym    (symbol (.getName ^Class dcls))
         flds    (:fields (.get registry cls))]
     (if (map? m)
       (do (when-let [unknown (seq (remove (set flds) (keys m)))]
-            (refuse! (str "draft: " parsed-type " has no fields " (vec unknown) "; its fields are " flds
-                          ". Remove the others.")))
+            (refuse! ::rule/draft-literal-unknown-keys
+                     (str "pt/draft: " parsed-type " has no fields " (vec unknown) "."
+                          (did-you-mean (first unknown) flds) " A literal map names only fields; its fields are "
+                          flds ". Remove the others.")
+                     {:unknown-fields (vec unknown), :fields flds}))
           (when-let [missing (seq (remove (set (keys m)) flds))]
-            (refuse! (str "draft: " parsed-type " needs every field; missing " (vec missing)
-                          ". Write nil for a field you mean to leave empty.")))
+            (refuse! ::rule/draft-literal-missing-fields
+                     (str "pt/draft: " parsed-type " needs every field; missing " (vec missing) ". A literal map names"
+                          " every field, so none is left out by mistake. Write nil for a field you mean to leave"
+                          " empty, as in " (first missing) " nil.")
+                     {:missing (vec missing), :fields flds}))
           ;; bind in the order written, so the values are evaluated as they read
           (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
             `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
