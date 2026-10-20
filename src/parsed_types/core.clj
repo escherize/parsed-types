@@ -132,10 +132,26 @@
   [k candidates]
   (if-let [m (nearest k candidates)] (str " Did you mean " (pr-str m) "?") ""))
 
+(defn- library-value!
+  "Throws `::bad-input` unless `x` is a draft or a parsed value. `fn-name` names the fn that got it, which the types
+  [[defparsed]] defines call."
+  [fn-name x]
+  (when-not (or (instance? DraftValue x) (instance? ParsedValue x))
+    (throw (ex-info (str fn-name " got " (pr-str x) ", which is not a draft or parsed value. It reports a change or a"
+                         " missing field of a type defparsed defined, and the types call it. Read a missing key of"
+                         " your own map with (get m k default), and change it with assoc.")
+                    {:type ::bad-input, :rule ::rule/not-a-library-value, :fn fn-name
+                     :got (some-> x class .getName)}))))
+
+(declare no-field!)
+
 (defn final!
-  "Throws `::cannot-change`: a parsed value cannot be changed. `k` is the key `op` was given, or nil. Called by the
-  parsed types [[defparsed]] defines."
+  "Throws `::cannot-change`: a parsed value cannot be changed. `k` is the key `op` was given, or nil. A key that is
+  not a field throws `::no-field` first, as [[no-field!]] says. Called by the parsed types [[defparsed]] defines."
   [parsed op k]
+  (library-value! "pt/final!" parsed)
+  (when (and (some? k) (not (contains? parsed k)))
+    (no-field! parsed k op))
   (let [n                      (.getSimpleName (class parsed))
         {:keys [rule message]} (case op
                                  "with-meta"
@@ -154,9 +170,12 @@
     (throw (ex-info message {:type ::cannot-change, :rule rule, :parsed (.getName (class parsed)), :op op, :key k}))))
 
 (defn fixed!
-  "Throws `::cannot-change`: a draft's fields are fixed. `k` is the key `op` was given, or nil. Called by the draft
-  types [[defparsed]] defines."
+  "Throws `::cannot-change`: a draft's fields are fixed. `k` is the key `op` was given, or nil. A key that is not a
+  field throws `::no-field` first. Called by the draft types [[defparsed]] defines."
   [draft op k]
+  (library-value! "pt/fixed!" draft)
+  (when (and (some? k) (not (contains? draft k)))
+    (no-field! draft k op))
   (let [n                      (.getSimpleName (class draft))
         {:keys [rule message]} (case op
                                  "with-meta"
@@ -177,29 +196,42 @@
 
 (defn no-field!
   "Throws `::no-field`: `x` has no field `k`. `op` is `\"read\"` when a key that is not a field is read without a
-  default, or `\"assoc\"` when one is set on a draft. Called by the types [[defparsed]] defines."
+  default, or the change, such as `\"assoc\"` or `\"dissoc\"`, that named it. Called by the types [[defparsed]]
+  defines."
   [x k op]
-  (when-not (or (instance? DraftValue x) (instance? ParsedValue x))
-    (throw (ex-info (str "pt/no-field! got " (pr-str x) ", which is not a draft or parsed value. It reports a missing"
-                         " field of a type defparsed defined, and the types call it. Read a missing key of your own"
-                         " map with (get m k default) instead.")
-                    {:type ::bad-input, :rule ::rule/no-field-not-a-library-value, :got (some-> x class .getName)})))
+  (library-value! "pt/no-field!" x)
   (let [fields  (vec (keys x))
         n       (.getSimpleName (class x))
-        nearest (nearest k fields)]
-    (throw (ex-info (if (= "read" op)
+        draft?  (instance? DraftValue x)
+        nearest (nearest k fields)
+        field   (pr-str (or nearest (first fields)))]
+    (throw (ex-info (cond
+                      (empty? fields)
+                      (str n " has no field " (pr-str k) ": it has no fields at all, so every key "
+                           (if (= "read" op) "read without a default throws" "throws") ". Add the field to its"
+                           " defparsed, as in (defparsed " (if draft? (subs n 0 (- (count n) 5)) n) " ["
+                           (if (keyword? k) (name k) "field") "]).")
+
+                      (= "read" op)
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A key that is not a field"
-                           " throws, never reads nil. Read one of its fields " fields ", as in ("
-                           (pr-str (or nearest (first fields))) " x).")
+                           " throws, never reads nil. Read one of its fields " fields ", as in (" field " x).")
+
+                      draft?
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A draft has fixed fields. Set"
-                           " one of " fields ", as in (assoc d " (pr-str (or nearest (first fields))) " v)."))
-                    (cond-> {:type                                        ::no-field
-                             :rule                                        (if (= "read" op)
-                                                                            ::rule/no-such-field-read
-                                                                            ::rule/no-such-field-assoc)
-                             (if (instance? DraftValue x) :draft :parsed) (.getName (class x))
-                             :key                                         k
-                             :fields                                      fields}
+                           " one of " fields ", as in (assoc d " field " v).")
+
+                      :else
+                      (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A parsed value has fixed"
+                           " fields, and never changes. Change one of " fields " on a copy, as in (pt/parse (assoc"
+                           " (pt/draft-of x) " field " v))."))
+                    (cond-> {:type                     ::no-field
+                             :rule                     (if (= "read" op)
+                                                         ::rule/no-such-field-read
+                                                         ::rule/no-such-field-assoc)
+                             (if draft? :draft :parsed) (.getName (class x))
+                             :key                      k
+                             :op                       op
+                             :fields                   fields}
                       nearest (assoc :suggestion nearest))))))
 
 (defn- not-a-pair!
@@ -754,6 +786,11 @@
 
   The parsed type has no `->Name` factory: only [[parse]] builds a value of it that [[parsed]] accepts."
   [parsed-name fields & clauses]
+  (when (and (simple-symbol? parsed-name) (clojure.string/includes? (name parsed-name) "."))
+    (syntax-error! &form ::rule/name-with-dot
+                   (str "the name " parsed-name " has a dot. A parsed type is a class in this namespace's package, and"
+                        " a dot would put it in another package, which Clojure cannot load it from. Name it without"
+                        " one, as in " (clojure.string/replace (name parsed-name) "." "") ".")))
   (when-not (simple-symbol? parsed-name)
     (syntax-error! &form ::rule/name-not-symbol
                    (str "the name " (pr-str parsed-name) " is not a symbol. A parsed type is a class, named by a"
@@ -971,12 +1008,19 @@
     (.put registry parsed-type plan)
     (.put latest (.getName ^Class parsed-type) parsed-type)))
 
+(declare issued?)
+
 (defn- plan-for [draft]
   (when-not (draft-value? draft)
     (throw (ex-info (str "pt/parse got " (describe draft) ". It parses only drafts of types defparsed defined."
                          (cond
-                           (instance? ParsedValue draft)
+                           (issued? draft)
                            " It is already parsed: pass it as it is, or call (pt/draft-of x) to get its draft."
+
+                           (instance? ParsedValue draft)
+                           (str " It is a " (.getSimpleName (class draft)) " that pt/parse did not issue: a value"
+                                " with no proof. Build a draft and parse that, as in (pt/parse (->"
+                                (.getSimpleName (class draft)) "Draft ...)).")
 
                            (map? draft)
                            (str " Build a draft from its fields, naming every field, as in (pt/parse (pt/draft Debit"
@@ -994,8 +1038,6 @@
   (:declaration (plan-for draft)))
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
-
-(declare issued?)
 
 (def ^:private immutable-classes
   "Classes whose values never change, by exact class: `BigDecimal` and `BigInteger` can be subclassed, so a subclass is

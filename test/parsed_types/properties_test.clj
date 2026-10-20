@@ -112,12 +112,15 @@
                  k     (gen/one-of [(gen/elements fields) gen/keyword])
                  v     gen-value]
     (let [parsed  (pt/parse draft)
-          refused #(try (%) false
-                        (catch clojure.lang.ExceptionInfo e (= ::pt/cannot-change (:type (ex-data e)))))]
-      (and (refused #(assoc parsed k v))
-           (refused #(dissoc parsed k))
-           (refused #(merge parsed {k v}))
-           (refused #(with-meta parsed {k v}))
+          ;; a key that is not a field is reported as that first
+          as      (if (some #{k} fields) ::pt/cannot-change ::pt/no-field)
+          refused (fn [thunk type]
+                    (try (thunk) false
+                         (catch clojure.lang.ExceptionInfo e (= type (:type (ex-data e))))))]
+      (and (refused #(assoc parsed k v) as)
+           (refused #(dissoc parsed k) as)
+           (refused #(merge parsed {k v}) as)
+           (refused #(with-meta parsed {k v}) ::pt/cannot-change)
            (pt/parsed? Triple parsed)))))
 
 (defspec draft-of-round-trips 200

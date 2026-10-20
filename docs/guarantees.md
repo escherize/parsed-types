@@ -91,7 +91,7 @@ without a `:rule`, or a `throw` of anything but an `ex-info`.
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue. The rule says which: nil, a plain map, a draft of the type, an unchecked value of the type, or a value of another type | `:expected`, `:got` |
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed`. The rule says which, and the message what to re-evaluate (see "REPL reloads") | `:class`, and `:ns`, `:field` or `:parent` where they apply |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
-| `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
+| `::no-field` | reading a key that isn't a field, or changing one on a draft or a parsed value: a key that isn't a field is reported before the change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
 | `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got anything but a literal map that names every field and only fields (found when it compiles), `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
@@ -119,6 +119,7 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
   itself, as in `(external ::check "doc" [lines] ...)`, and fetch by the parent's own fields;
 - a pure check that binds a fetch;
 - an options map: checks take no options;
+- a type name with a dot in it, as in `C.D`;
 - a field named twice, named `/`, like a special form, with a dot in it, starting with `__`, named `parse-proof`, or compiling
   to the same Java name as another field (`a-b` and `a_b`);
 - a field declared as a child twice, or a child field that isn't a field;

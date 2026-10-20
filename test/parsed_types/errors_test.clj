@@ -81,7 +81,7 @@
    [:draft-no-empty #(empty draft) "DebitDraft has fixed fields" "(into {} x)"]
    [:conj-not-a-pair #(conj draft [:amount 1 2]) "conj of [:amount 1 2] on a DebitDraft" "has 3 elements"
     "(conj x [k v]), or (assoc x k v)"]
-   [:no-field-not-a-library-value #(pt/no-field! 5 :k "read") "pt/no-field! got 5" "(get m k default)"]
+   [:not-a-library-value #(pt/no-field! 5 :k "read") "pt/no-field! got 5" "(get m k default)"]
    [:no-such-field-read #(:amont real) "Debit has no field :amont" "Did you mean :amount?"
     "[:user-id :account-id :amount]" "(:amount x)"]
    [:no-such-field-assoc #(assoc draft :acount-id 1) "DebitDraft has no field :acount-id" "Did you mean :account-id?"
@@ -110,6 +110,7 @@
    [:match-member-twice (compiling '(fn [x] (pt/match Txn x Debit d 1 Credit c 2 Debit e 3)))
     "handles a type twice: [Debit]" "Keep one clause per type"]
    ;; defparsed clauses
+   [:name-with-dot (compiling '(pt/defparsed C.D [x])) "the name C.D has a dot" "as in CD."]
    [:name-not-symbol (compiling '(pt/defparsed "E1" [a])) "the name \"E1\"" "(defparsed Name [fields]"]
    [:unknown-clause (compiling '(pt/defparsed E1 [a] (check ::c "d" [a] true))) "check does not start a clause"
     "(pure ...)"]
@@ -326,6 +327,41 @@
       "each failed check with its doc")
   (is (str/includes? (:message (error #(pt/parse (->SevenDraft :a :b :c :d :e :f :g))))
                      "(e is an integer.), and 2 more.")))
+
+(pt/defparsed Unit [])
+
+(deftest library-fns-refuse-what-is-not-a-library-value-test
+  (doseq [[label thunk] [["final! of nil" #(pt/final! nil "assoc" nil)]
+                         ["fixed! of nil" #(pt/fixed! nil "assoc" nil)]
+                         ["final! of a number" #(pt/final! 5 "assoc" :k)]
+                         ["no-field! of nil" #(pt/no-field! nil :k "read")]]]
+    (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-library-value}
+           (select-keys (ex-data (try (thunk) nil (catch clojure.lang.ExceptionInfo e e))) [:type :rule]))
+        label)))
+
+(deftest every-suggested-fix-applies-test
+  (testing "a type with no fields says to add one, rather than naming a field it does not have"
+    (is (= "Unit has no field :x: it has no fields at all, so every key read without a default throws. Add the field to its defparsed, as in (defparsed Unit [x])."
+           (:message (error #(:x (pt/parse (->UnitDraft)))))))
+    (is (str/includes? (:message (error #(assoc (->UnitDraft) :x 1))) "(defparsed Unit [x])")))
+  (testing "a key that is not a field, on a parsed value, is reported first, so the fix names a field"
+    (let [{:keys [type message]} (error #(assoc real :acount-id 1))]
+      (is (= ::pt/no-field type))
+      (is (= (str "Debit has no field :acount-id. Did you mean :account-id? A parsed value has fixed fields, and never"
+                  " changes. Change one of [:user-id :account-id :amount] on a copy, as in (pt/parse (assoc"
+                  " (pt/draft-of x) :account-id v)).")
+             message)))
+    (is (= ::pt/no-field (:type (error #(dissoc real :bogus)))))
+    (is (= ::pt/no-field (:type (error #(dissoc draft :bogus)))))
+    (testing "and the fix it names parses"
+      (is (some? (pt/parse (assoc (pt/draft-of real) :account-id 3))))))
+  (testing "parse of a value built by hand says it has no proof, and to build a draft"
+    (let [{:keys [rule message]} (error #(pt/parse (Debit. 1 2 30M nil)))]
+      (is (= :parsed-types.rule/not-a-draft rule))
+      (is (str/includes? message "It is a Debit that pt/parse did not issue: a value with no proof. Build a draft and parse that, as in (pt/parse (->DebitDraft ...))."))
+      (is (not (str/includes? message "already parsed")))))
+  (testing "parse of a value parse issued says it is already parsed"
+    (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
 
 (deftest suggestions-are-data-too-test
   (is (= :amount (:suggestion (ex-data (try (:amont real) (catch clojure.lang.ExceptionInfo e e))))))
