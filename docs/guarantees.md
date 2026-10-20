@@ -36,6 +36,7 @@ The README covers how to use the library; this page covers what it promises and 
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others. A pure check that closes over a local is refused when it loads | `compile-errors-test`, `declaration-errors-at-load-test` |
 | Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
 | A check can ask a child's type, and the answer survives a reload | `pt/is?` says whether a value or draft is of a parsed type or a member of a sum, by class name, ignoring the proof, for registered classes only. It is not proof: sinks use `pt/parsed`, checks use `pt/is?`. `instance?` in a check would name the class it was compiled against | `is?-answers-the-type-without-the-proof-test` |
+| Reloading the library keeps every type and value defined before | The token is a `defonce`, and `ParsedValue`, `DraftValue` and `Sum` are defined only when they are not loaded yet | `reloading-the-library-keeps-every-type-test` |
 | After a REPL re-evaluates a type, code defined before it accepts the new class | Parsed types compare by class name, in `pt/parsed`, `parsed?`, `pt/is?`, sums, a child field's shape check and `match` | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
 
 ## Accepted limits
@@ -185,8 +186,12 @@ definition stands in for the old one, the way Ring's `#'handler` follows the lat
 
 Two registered classes share a name only when the namespace that defined them defines them again: a REPL reload, or
 code that switches into that namespace with `in-ns`. A `defparsed` in another namespace whose name compiles to the
-same Java name is refused. Reloading
-`parsed-types.core` itself keeps the token, which is a `defonce`, so values already issued stay parsed.
+same Java name is refused.
+
+Reloading `parsed-types.core` itself, with `:reload` or with the `:reload-all` of a namespace that requires it, keeps
+everything defined before working. The token is a `defonce`, and the library defines its interfaces and its sum class
+only when they are not loaded yet. So values parsed before stay parsed, drafts built before still parse, and sums and
+`match`es defined before still take their members.
 
 ## Design decisions
 

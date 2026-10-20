@@ -244,6 +244,37 @@
     (testing "a match compiled after the reload, against the old defsum, compiles"
       (is (nil? (compile-error '(fn [x] (pt/match Members x Member m (:n m) NonMember o (:n o)))))))))
 
+(deftest reloading-the-library-keeps-every-type-test
+  (eval-here '(pt/defparsed RlLine [n] (pure ::rl-n-int "n is an integer." [n] (int? n))))
+  (eval-here '(pt/defparsed RlOther [n]))
+  (eval-here '(pt/defsum RlSum [RlLine RlOther]))
+  (eval-here '(defn- rl-match [x] (pt/match RlSum x RlLine l [:line (:n l)] RlOther o [:other (:n o)])))
+  (let [line-type  (ns-resolve 'parsed-types.defparsed-test 'RlLine)
+        interfaces #(mapv (fn [n] (Class/forName n false (clojure.lang.DynamicClassLoader.)))
+                          ["parsed_types.core.ParsedValue" "parsed_types.core.DraftValue" "parsed_types.core.Sum"])
+        before     (interfaces)
+        parsed     (pt/parse ((resolve-here '->RlLineDraft) 1))
+        good       ((resolve-here '->RlLineDraft) 2)
+        bad        ((resolve-here '->RlLineDraft) :x)]
+    (require 'parsed-types.core :reload)
+    (testing "the library's classes are the ones loaded before"
+      (is (= before (interfaces))))
+    (testing "a value parsed before the reload is still parsed"
+      (is (pt/parsed? line-type parsed))
+      (is (identical? parsed (pt/parsed line-type parsed)))
+      (is (pt/is? line-type parsed)))
+    (testing "a draft built before the reload still parses, and still fails its checks"
+      (is (pt/parsed? line-type (pt/parse good)))
+      (is (= #{::rl-n-int} (set (keys (:failures (try (pt/parse bad) nil
+                                                       (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
+    (testing "a sum and a match defined before the reload still take the value"
+      (is (pt/parsed? (resolve-here 'RlSum) parsed))
+      (is (= [:line 1] ((resolve-here 'rl-match) parsed))))
+    (testing "a type defined after the reload holds children of a type defined before it"
+      (eval-here '(pt/defparsed RlEntry [lines] (children lines RlSum)))
+      (is (= [1] (map :n (:lines (pt/parse ((resolve-here '->RlEntryDraft) [((resolve-here '->RlLineDraft) 1)]))))))
+      (is (pt/parsed? line-type (first (:lines (pt/parse ((resolve-here '->RlEntryDraft) [good])))))))))
+
 (deftest a-hand-written-class-with-the-same-name-is-refused-test
   (eval-here '(pt/defparsed Genuine [n]))
   (let [genuine (ns-resolve 'parsed-types.defparsed-test 'Genuine)

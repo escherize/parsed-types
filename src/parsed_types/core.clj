@@ -50,16 +50,36 @@
 
 (set! *warn-on-reflection* true)
 
-(definterface ParsedValue
-  ;; Whether the value's proof is `t`. The proof goes in and only a boolean comes out, so nothing hands the proof out.
-  (issuedWith [t]))
+(defn- class-loaded?
+  "Whether the class named `class-name` is already loaded."
+  [class-name]
+  (try (Class/forName class-name false (clojure.lang.RT/baseLoader))
+       true
+       (catch ClassNotFoundException _ false)))
+
+(defmacro ^:private defclass-once
+  "`form`, a `definterface` or `defrecord` of this namespace, unless the class it names is already loaded: then only
+  an import of it. Reloading this namespace then keeps its classes, so every value and type defined before still
+  implements them. When compiling to class files, `form` always runs, so the class file is written."
+  [form]
+  (let [class-name (str (namespace-munge *ns*) "." (second form))]
+    (if (and (not *compile-files*) (class-loaded? class-name))
+      `(import ~(symbol class-name))
+      form)))
+
+(defclass-once
+  (definterface ParsedValue
+    ;; Whether the value's proof is `t`. The proof goes in and only a boolean comes out, so nothing hands the proof
+    ;; out.
+    (issuedWith [t])))
 
 ;; The proof that [[parse]] issued a value: a parsed value is parsed exactly when its hidden `parse-proof` field holds
 ;; this object. Only `parse` builds a value with it. `defonce`, so reloading this namespace keeps the values already
 ;; issued parsed.
 (defonce ^:private parse-token (Object.))
 
-(definterface DraftValue)
+(defclass-once
+  (definterface DraftValue))
 
 (defn- edit-distance
   "The Levenshtein distance between the strings `a` and `b`."
@@ -364,7 +384,8 @@
 (defn- parsed-type? [x]
   (and (class? x) (.isAssignableFrom ParsedValue ^Class x)))
 
-(defrecord Sum [name members])
+(defclass-once
+  (defrecord Sum [name members]))
 
 ;; only `sum`, which checks the members, builds one
 (ns-unmap *ns* '->Sum)
