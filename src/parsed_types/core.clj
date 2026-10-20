@@ -582,8 +582,8 @@
             (every? #(= user-id (:user-id %)) lines))
       (pure ::balanced \"The debits and the credits add up to the same amount.\"
             [lines]
-            (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
-               (reduce + 0M (map :amount (filter #(instance? Credit %) lines))))))
+            (= (reduce + 0M (map :amount (filter #(pt/is? Debit %) lines)))
+               (reduce + 0M (map :amount (filter #(pt/is? Credit %) lines))))))
 
   Clauses:
 
@@ -1247,6 +1247,19 @@
                              (str " Pass one, as in (" fn-name " Debit x).")))
                       {:type ::bad-input, :rule ::rule/not-a-parsed-type, :fn fn-name
                        :got  (if (class? t) (.getName ^Class t) (pr-str t))})))))
+
+(defn is?
+  "Whether `x` is a value of `parsed-type`, or of a member of the sum `parsed-type`, or a draft of one, ignoring the
+  proof. This is not proof that the checks passed: a sink takes [[parsed]]. A check takes `is?`, because inside a
+  check a child is a value without the proof, which [[parsed?]] refuses. Compares by class name like the rest of the
+  library, so after a REPL re-evaluates a type, `is?` compiled against the old class still answers true for the new
+  one, where `instance?` would not. Only classes [[defparsed]] registered count. Throws `::bad-input` when
+  `parsed-type` is not a parsed type or a sum."
+  [parsed-type x]
+  (check-type! "pt/is?" parsed-type)
+  (boolean (when (some? x)
+             (when-let [plan (.get registry (class x))]
+               (member? parsed-type (:parses-to plan))))))
 
 (defn parsed?
   "Whether `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`: a value of

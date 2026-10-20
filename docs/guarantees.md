@@ -35,7 +35,8 @@ The README covers how to use the library; this page covers what it promises and 
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others. A pure check that closes over a local is refused when it loads | `compile-errors-test`, `declaration-errors-at-load-test` |
 | Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
-| After a REPL re-evaluates a type, code defined before it accepts the new class | Parsed types compare by class name, in `pt/parsed`, `parsed?`, sums, a child field's shape check and `match` | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
+| A check can ask a child's type, and the answer survives a reload | `pt/is?` says whether a value or draft is of a parsed type or a member of a sum, by class name, ignoring the proof, for registered classes only. It is not proof: sinks use `pt/parsed`, checks use `pt/is?`. `instance?` in a check would name the class it was compiled against | `is?-answers-the-type-without-the-proof-test` |
+| After a REPL re-evaluates a type, code defined before it accepts the new class | Parsed types compare by class name, in `pt/parsed`, `parsed?`, `pt/is?`, sums, a child field's shape check and `match` | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
 
 ## Accepted limits
 
@@ -85,7 +86,7 @@ without a `:rule`, or a `throw` of anything but an `ex-info`.
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue. The rule says which: nil, a plain map, a draft of the type, an unchecked value of the type, or a value of another type | `:expected`, `:got` |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
 | `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
-| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
+| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed`, `pt/parsed?` or `pt/is?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
@@ -140,7 +141,8 @@ The expansion builds and checks the plan when it loads, before any `parse`. It t
 - **No empty version.** `empty` throws, and so does anything built on `(into (empty x) ...)`, such as
   `clojure.walk`. Use `(into {} x)` for a plain map.
 - **What a parent check sees.** Each child is a value of its parsed type that passed its pure checks, built without
-  the token. Inside the check, `pt/parsed` refuses it. When the whole tree passes, `parse` builds each node again with
+  the token. Inside the check, `pt/parsed` refuses it; ask its type with `pt/is?`, as in
+  `(filter #(pt/is? Debit %) lines)`, not with `instance?`, which breaks after the child type is re-evaluated. When the whole tree passes, `parse` builds each node again with
   the token. The issued value has the same fields as the value the checks saw, but that value lacks the proof, so the
 two are not equal. A parent's pure checks run
   before any external check. A parent's external checks run after the children's, and one that reads a child that
@@ -177,6 +179,8 @@ definition stands in for the old one, the way Ring's `#'handler` follows the lat
 - A `defsum` defined before a member was re-evaluated accepts values of the new class, and so does a child field of
   that sum.
 - Compiled sinks, such as `(pt/parsed Debit x)` and `match`, accept values of the new class.
+- A check that asks a child's type with `pt/is?` keeps passing; one that uses `(instance? Debit %)` names the old
+  class and starts failing.
 - A draft of the old class still parses, with the plan it was defined with.
 
 Two registered classes share a name only when the namespace that defined them defines them again: a REPL reload, or
@@ -250,7 +254,8 @@ would throw a `ClassCastException`. Read fields by keyword.
 Each of these deliberately broken copies of this version fails at least one test: the proof field public; a method
 handing the token out; the registry not consulted before asking a value for its proof; equality ignoring the proof;
 the immutability walk shallow, skipping map keys, or accepting seqs; no did-you-mean, or one that suggests any field;
-an `ex-info` without a `:rule`; a rule with no example; a message that drops its fix; `pt/parsed` ignoring the proof; the
+an `ex-info` without a `:rule`; a rule with no example; a message that drops its fix; `pt/is?` comparing by identity,
+requiring the proof, or counting a class `defparsed` didn't register; `pt/parsed` ignoring the proof; the
 `->Name` factory kept; the proof in a value's `seq`; a field named `parse-proof` allowed; `defparsed-type` or
 `defdraft-type` public; no checks when a `defparsed` loads; parent checks seeing children built with the token; the
 issued root holding children built without it; types compared by identity; `match` testing with `instance?`; `empty`

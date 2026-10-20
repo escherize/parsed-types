@@ -303,6 +303,49 @@
            (:rule (try ((resolve-here 'grows-match) ((resolve-here '->MCDraft) 1)) nil
                        (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
+(deftest is?-answers-the-type-without-the-proof-test
+  (eval-here '(pt/defparsed IsLine [amount]))
+  (eval-here '(pt/defparsed IsOther [amount]))
+  (eval-here '(pt/defsum IsSum [IsLine IsOther]))
+  ;; like a JournalEntry whose ::balanced check filters its lines by type
+  (eval-here '(pt/defparsed IsEntry [lines]
+                (children lines IsSum)
+                (pure ::unproven "Inside the check, no line is parsed yet." [lines]
+                      (not-any? #(pt/parsed? IsSum %) lines))
+                (pure ::balanced "The IsLine amounts add up to the IsOther amounts." [lines]
+                      (and (seq (filter #(pt/is? IsLine %) lines))
+                           (= (reduce + (map :amount (filter #(pt/is? IsLine %) lines)))
+                              (reduce + (map :amount (filter #(pt/is? IsOther %) lines))))))))
+  (let [line-draft #((resolve-here '->IsLineDraft) 1)
+        entry      #(pt/parse ((resolve-here '->IsEntryDraft) [(line-draft) ((resolve-here '->IsOtherDraft) 1)]))
+        is-line?   (eval-here '(fn [x] (pt/is? IsLine x)))]
+    (testing "inside a check, on a child view that pt/parsed? refuses"
+      (is (some? (entry))))
+    (testing "on parsed values and drafts, of the type and of a sum"
+      (let [p (pt/parse (line-draft))]
+        (is (true? (is-line? p)))
+        (is (true? (is-line? (line-draft))))
+        (is (true? (pt/is? (resolve-here 'IsSum) p)))))
+    (testing "false for another type, a plain map, nil, and a value built by hand without the proof is still a value of
+              the type: is? is not proof"
+      (is (false? (is-line? (pt/parse ((resolve-here '->IsOtherDraft) 1)))))
+      (is (false? (is-line? {:amount 1})))
+      (is (false? (is-line? nil)))
+      (is (true? (is-line? (eval-here '(IsLine. 1 nil))))))
+    (testing "after IsLine is re-evaluated, the check and code compiled before it still answer true"
+      (eval-here '(pt/defparsed IsLine [amount]))
+      (is (some? (entry)) "the entry's ::balanced, compiled against the old IsLine, passes on the new one")
+      (is (true? (is-line? (line-draft))))
+      (is (false? (eval-here '(instance? (first (:members IsSum)) (pt/parse (->IsLineDraft 1)))))
+          "instance? against the old class, which is what is? replaces, says false"))
+    (testing "a class written by hand with the type's name does not count"
+      (let [fake (eval-here '(do (deftype IsLine [amount] parsed_types.core.ParsedValue (issuedWith [_ _] true))
+                                 (IsLine. 1)))]
+        (is (false? (is-line? fake)))))
+    (testing "a type argument that is not a parsed type or sum throws"
+      (is (= :parsed-types.rule/not-a-parsed-type
+             (try (pt/is? :x 1) (catch clojure.lang.ExceptionInfo e (:rule (ex-data e)))))))))
+
 ;;; Field names
 
 (pt/defparsed Awkward [count map set str seq into contains? or when keys]
