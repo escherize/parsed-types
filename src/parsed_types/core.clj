@@ -366,6 +366,10 @@
 
 (defrecord Sum [name members])
 
+;; only `sum`, which checks the members, builds one
+(ns-unmap *ns* '->Sum)
+(ns-unmap *ns* 'map->Sum)
+
 (defn- sum? [x] (instance? Sum x))
 
 (defn- same-type?
@@ -394,7 +398,7 @@
                      :rule    ::rule/bad-sum-members
                      :name    name
                      :members (mapv pr-str members)})))
-  (->Sum name (vec members)))
+  (Sum. name (vec members)))
 
 (defmacro defsum
   "Define `name`, a closed set of parsed types. [[match]] on it must handle every member, and a child field of a sum
@@ -1183,8 +1187,14 @@
   "Parse each draft and the drafts under it. Returns a vector of parsed values aligned with `drafts`, or throws
   `::invalid` once with every failure: `:failures` maps the index of each draft that failed to its failures, shaped
   like [[parse]]'s, and `:failed-kinds` holds the kinds of check that failed in any of them. Exceptions out of a check
-  or fetch propagate, so an external check that throws stops the call."
+  or fetch propagate, so an external check that throws stops the call. Throws `::bad-input` when `drafts` is a single
+  draft, a map, or not a sequential collection."
   [drafts]
+  (when (or (map? drafts) (not (sequential? drafts)))
+    (throw (ex-info (str "pt/parse-all got " (describe drafts) ". It takes a vector of drafts and returns a vector of"
+                         " parsed values. Pass a vector, as in (pt/parse-all [draft]), or parse one draft with"
+                         " (pt/parse draft).")
+                    {:type ::bad-input, :rule ::rule/parse-all-not-a-vector, :got (some-> drafts class .getName)})))
   (let [trees    (run-all drafts)
         failures (into (sorted-map) (keep-indexed (fn [i nodes] (some->> (tree-failures nodes) (vector i)))) trees)]
     (when (seq failures)

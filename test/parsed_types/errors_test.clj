@@ -163,6 +163,8 @@
          ((compiling '(let [x 1] (pt/defparsed Guarded [a] (pure ::c "d" [a] (= a x)))))))
     "the pure check :parsed-types.errors-test/c closes over locals [x]" "make the check external"]
    ;; parsing
+   [:parse-all-not-a-vector #(pt/parse-all draft) "pt/parse-all got a DebitDraft" "(pt/parse-all [draft])"
+    "(pt/parse draft)"]
    [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit m))"]
    [:mutable-value #(pt/parse (->DebitDraft 1 2 (atom 1))) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
@@ -229,6 +231,17 @@
       (is (seq sites))
       (doseq [site sites]
         (is (some #{:rule} (tree-seq coll? seq (nth site 2))) (pr-str site))))))
+
+(deftest only-sum-builds-a-sum-test
+  (testing "the record's factories are removed, so a Sum with members that are not parsed types is not easy to build"
+    (is (nil? (ns-resolve 'parsed-types.core '->Sum)))
+    (is (nil? (ns-resolve 'parsed-types.core 'map->Sum)))
+    (is (= :parsed-types.rule/bad-sum-members (:rule (error #(pt/sum 'S [String])))))))
+
+(deftest parse-all-takes-a-collection-test
+  (doseq [x [draft {:amount 1} 5]]
+    (is (= :parsed-types.rule/parse-all-not-a-vector (:rule (error #(pt/parse-all x)))) (pr-str x)))
+  (is (= 2 (count (pt/parse-all (list draft draft)))) "a list is fine"))
 
 (deftest no-other-throws-test
   (testing "core.clj throws only ex-info: no Java exception escapes without a :type and a :rule"

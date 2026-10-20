@@ -51,6 +51,10 @@ and these gaps, are accepted:
   closed: `pt/parsed` refuses it.
 - **Mutable values are refused by a walk of known classes.** It trusts a class's interfaces: a type that implements
   `IPersistentVector` mutably passes. There is no opt-out for mutable values yet.
+- **A sum can still be built by hand.** `->Sum` and `map->Sum` are removed, so only `defsum` and `sum`, which check
+  the members, build one in ordinary code. The record's constructor and its reader syntax,
+  `#parsed_types.core.Sum{...}`, still bypass the check; `pt/parsed` and `pt/parsed?` refuse a sum whose members are
+  not parsed types.
 - **`in-ns` can redefine a namespace's types.** Code that switches into a namespace with `in-ns` and runs a
   `defparsed` there redefines its types, with whatever checks it writes, the same way a REPL reload does.
 - **External checks can go stale.** An external check reads the world at the moment of `parse`. A balance that
@@ -81,7 +85,7 @@ without a `:rule`, or a `throw` of anything but an `ex-info`.
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue. The rule says which: nil, a plain map, a draft of the type, an unchecked value of the type, or a value of another type | `:expected`, `:got` |
 | `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator (`put`, `putAll`, `remove`, `clear`) on either. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class | `:parsed` or `:draft`, `:op`, `:key` |
 | `::no-field` | reading a key that isn't a field, or setting one on a draft | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
-| `::bad-input` | `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
+| `::bad-input` | `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `pt/draft-from-map` got a class that is not a draft type, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got a non-map or keys that aren't fields, `parse` got something that isn't a draft of a type `defparsed` defined, a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
 | `::bad-declaration` | a declaration error, when `defparsed` expands or loads | `:draft` when found at load |
 | `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
 
