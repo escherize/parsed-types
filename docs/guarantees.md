@@ -17,6 +17,8 @@ The README covers how to use the library; this page covers what it promises and 
 | A declaration error is found when the `defparsed` loads, at the latest | The macro refuses what it can see when it expands. The expansion builds and checks the plan when it loads, and throws `::bad-declaration` then | `compile-errors-test`, `declaration-errors-at-load-test` |
 | A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
 | A parsed value holds only immutable values | `parse` walks every field of every draft in the tree, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test`, `a-mutable-value-in-a-child-is-refused-test` |
+| A clock is refused, though its class is a final `java.time` class | `java.time.Clock` and `InstantSource` values are refused before the `java.time` rule | `a-clock-is-refused-test` |
+| The immutability walk can't overflow the stack, or skip the depth limit through shared structure | The walk keeps an explicit stack, and records the deepest level it walked each collection at: one reached again deeper is walked again | `the-walk-keeps-its-own-stack-test`, `shared-structure-is-walked-again-when-reached-deeper-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw `::cannot-change` | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `java-map-interface-test` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `java-map-interface-test` |
 | A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `draft-test` |
@@ -161,14 +163,17 @@ two are not equal. A parent's pure checks run
   whose drafts are walked as their own nodes. A child field's vector may carry no metadata: the parsed value holds a
   new vector of the parsed children, empty ones included, so `parse` refuses metadata it would drop. Accepted: nil; `Boolean`, `Character`, `String`, keywords, symbols,
   `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`, `Float`, `BigInt`, `Ratio`, and `BigDecimal` and
-  `BigInteger` by exact class, since they can be subclassed; classes; final classes of the `java.time` package; values
+  `BigInteger` by exact class, since they can be subclassed; classes; final classes of the `java.time` package, but
+  not a `java.time.Clock` or `InstantSource`, which reads the time each time it is asked; values
   `parse` issued; and persistent vectors, maps (records and drafts included), sets, lists and queues whose contents
   pass. Metadata on a value is walked like the value. A sorted map or set must sort with the default comparator: a
   custom comparator can read state that changes. Refused: everything else, including lazy and other seqs, since
   realizing one could run side effects or never end; pass `(vec ...)`. For an array the message names
   `(into [] a)`, since `(vec a)` of an object array of 32 or fewer elements shares the array. Nesting deeper than 1000
-  levels is refused too, and the message shows the first 8 steps of a longer path. Each collection is walked once per
-  parse, by identity, so shared structure costs its size, not the number of paths to it.
+  levels is refused too, and the message shows the first 8 steps of a longer path. The walk keeps its own stack, so a
+  thread with a small stack gets the same answer. Each collection is walked once per parse, by identity, so shared
+  structure costs its size, not the number of paths to it; one reached again deeper than before is walked again, so
+  the depth limit holds on every path.
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` takes only a literal map.** It checks the keys when it compiles, so a map built at run time is a

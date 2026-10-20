@@ -369,6 +369,46 @@
     (let [shared (reduce (fn [x _] [x x]) (atom 1) (range 40))]
       (is (= "clojure.lang.Atom" (:got (refusal shared)))))))
 
+(defn- on-small-stack
+  "What `f` returns on a thread with a 256 KB stack, or the class of what it threw."
+  [f]
+  (let [p (promise)]
+    (doto (Thread. nil #(deliver p (try (f) (catch Throwable t (class t)))) "small-stack" (* 256 1024))
+      (.setDaemon true)
+      (.start))
+    (deref p 10000 ::timed-out)))
+
+(deftest the-walk-keeps-its-own-stack-test
+  (testing "values nested to the limit parse on a small stack, and deeper ones are bad input there too"
+    (doseq [nest [(fn [n] (reduce (fn [x _] [x]) :x (range n)))
+                  (fn [n] (reduce (fn [x _] {:k x}) :x (range n)))
+                  (fn [n] (reduce (fn [x _] #{x}) :x (range n)))
+                  (fn [n] (reduce (fn [x _] {x 1}) :x (range n)))
+                  (fn [n] (reduce (fn [x _] (with-meta [x] {:m [1]})) :x (range n)))]]
+      (is (true? (on-small-stack #(some? (pt/parse (->OtherDraft 1 1 (nest 990)))))))
+      (is (= ::pt/bad-input (on-small-stack #(:type (refusal (nest 1200)))))))))
+
+(deftest shared-structure-is-walked-again-when-reached-deeper-test
+  (testing "a collection already walked near the top is walked again when it is reached deeper, so the limit holds"
+    (let [inner (reduce (fn [x _] [x]) :x (range 900))
+          outer (reduce (fn [x _] [x]) inner (range 300))]
+      (is (= ::pt/bad-input (:type (refusal [inner outer]))))
+      (is (= ::pt/bad-input (:type (refusal [outer inner]))))
+      (is (some? (pt/parse (->OtherDraft 1 1 [inner inner]))))))
+  (testing "and a mutable value it holds is found on either path"
+    (let [inner [(atom 1)]]
+      (is (= [1 0] (:path (refusal [[] inner [inner]])))))))
+
+(deftest a-clock-is-refused-test
+  (testing "a clock reads the time each time it is asked, though its class is a final java.time class"
+    (doseq [clock [(java.time.Clock/systemUTC) (java.time.Clock/fixed java.time.Instant/EPOCH java.time.ZoneOffset/UTC)
+                   (java.time.Clock/offset (java.time.Clock/systemUTC) (java.time.Duration/ofSeconds 1))]]
+      (is (= ::pt/bad-input (:type (refusal clock))) (str (class clock)))
+      (is (re-find #"holds a clock, which reads the time each time it is asked.*Pass the instant it reads, as in \(\.instant clock\)\."
+                   (try (pt/parse (->OtherDraft 1 1 clock)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
+  (testing "the instant it reads is fine"
+    (is (some? (pt/parse (->OtherDraft 1 1 (.instant (java.time.Clock/systemUTC))))))))
+
 (deftest a-deep-path-is-truncated-in-the-message-test
   (let [nested (reduce (fn [x _] [x]) (atom 1) (range 20))
         msg    (try (pt/parse (->OtherDraft 1 1 nested)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]

@@ -132,7 +132,9 @@ Three more rules hold:
 
 ## Parse spends each check once, and touches the world last
 
-1. Pure checks. Malformed input stops here, and never queries the database.
+1. Pure checks. Malformed input stops here: no fetch or external check runs unless every pure check in the tree
+   passed. A pure check should read only its fields. The library refuses field values that can change, such as an
+   atom or a clock, but can't stop a pure check from calling the world.
 2. Fetches. Each fetch runs once per declaration, with each distinct tuple once. `parse-all` batches many drafts the
    same way.
 3. External checks.
