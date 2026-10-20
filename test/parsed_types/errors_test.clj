@@ -97,6 +97,8 @@
    [:field-reserved-for-proof (compiling '(pt/defparsed E1 [parse-proof])) "[parse-proof]" "as in proof"]
    ;; sums and match
    [:bad-sum-members (compiling '(pt/defsum Bad [Debit Debit])) "[Debit Debit]" "(defsum Bad [Debit Credit])"]
+   [:sum-name-not-symbol (compiling '(pt/defsum "Bad" [Debit Credit])) "the name \"Bad\" is not a symbol"
+    "(defsum Transaction [Debit Credit])"]
    [:match-not-a-sum (compiling '(fn [x] (pt/match Debit x Debit d 1))) "Debit is not a sum" "(pt/defsum Transaction [Debit Credit])"]
    [:match-clause-shape (compiling '(fn [x] (pt/match Txn x Debit d))) "2 clause forms" "Debit d (f d)"]
    [:match-not-a-type (compiling '(fn [x] (pt/match Txn x nope d 1 Credit c 2))) "nope is not a type"
@@ -232,11 +234,30 @@
       (doseq [site sites]
         (is (some #{:rule} (tree-seq coll? seq (nth site 2))) (pr-str site))))))
 
+(deftype Fake [amount]
+  parsed_types.core.ParsedValue
+  (issuedWith [_ _] true))
+
 (deftest only-sum-builds-a-sum-test
-  (testing "the record's factories are removed, so a Sum with members that are not parsed types is not easy to build"
+  (testing "the factory is removed, so a Sum with members that are not parsed types is not easy to build"
     (is (nil? (ns-resolve 'parsed-types.core '->Sum)))
     (is (nil? (ns-resolve 'parsed-types.core 'map->Sum)))
-    (is (= :parsed-types.rule/bad-sum-members (:rule (error #(pt/sum 'S [String])))))))
+    (doseq [members [[String] 5 [] [Debit Debit] [Fake]]]
+      (is (= :parsed-types.rule/bad-sum-members (:rule (error #(pt/sum 'S members)))) (pr-str members))))
+  (testing "a sum is not a map, so assoc and merge cannot build one from another"
+    (is (not (map? Txn)))
+    (is (thrown? ClassCastException (assoc Txn :members [Fake]))))
+  (testing "a Sum built with its constructor is checked wherever it is used"
+    (doseq [members [[Fake] 5 nil [Debit Debit]]]
+      (is (= :parsed-types.rule/not-a-parsed-type
+             (:rule (error #(pt/parsed? (parsed_types.core.Sum. 'S members) real))))
+          (pr-str members)))
+    (is (true? (pt/parsed? (parsed_types.core.Sum. 'S [Debit]) real)) "with real members, it is just a sum"))
+  (testing "a sum equals a sum with the same name and members, and prints them"
+    (is (= Txn (pt/sum 'Txn [Debit Credit])))
+    (is (= (hash Txn) (hash (pt/sum 'Txn [Debit Credit]))))
+    (is (not= Txn (pt/sum 'Txn [Credit Debit])))
+    (is (= "#<Sum Txn [parsed_types.errors_test.Debit parsed_types.errors_test.Credit]>" (pr-str Txn)))))
 
 (deftest parse-all-takes-a-collection-test
   (doseq [x [draft {:amount 1} 5]]
@@ -249,7 +270,9 @@
 
 (deftest the-type-argument-is-checked-test
   (doseq [[label thunk] [["nil" #(pt/parsed nil real)] ["a keyword" #(pt/parsed? :x real)]
-                         ["a draft type" #(pt/parsed DebitDraft real)] ["a bare Sum" #(pt/parsed? (pt/sum 'S [Debit]) nil)]]]
+                         ["a draft type" #(pt/parsed DebitDraft real)] ["a bare Sum" #(pt/parsed? (pt/sum 'S [Debit]) nil)]
+                         ["a class that only implements ParsedValue" #(pt/parsed Fake (Fake. 1))]
+                         ["a class that only implements ParsedValue, to is?" #(pt/is? Fake (Fake. 1))]]]
     (testing label
       (is (= (if (= "a bare Sum" label) nil :parsed-types.rule/not-a-parsed-type) (:rule (error thunk))))))
   (is (str/includes? (:message (error #(pt/parsed DebitDraft real))) "pass its parsed type, as in (pt/parsed Debit x)")))

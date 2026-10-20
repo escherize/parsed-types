@@ -81,6 +81,19 @@
 (defclass-once
   (definterface DraftValue))
 
+;;; ------------------------------------------------ State ------------------------------------------------
+
+;; Draft type -> its plan, and parsed type -> the same plan, by identity. Written once per class, when its `defparsed`
+;; loads. Weak, so the classes a REPL replaces can be collected.
+(defonce ^:private ^Map registry
+  (.makeMap (.weakKeys (MapMaker.))))
+
+;; Parsed class name -> the namespace, as written, whose `defparsed` first defined it. Types compare by class name, and
+;; `my-app.bank` and `my_app.bank` compile to the same Java names, so without this a `defparsed` in one could stand in
+;; for the types of the other.
+(defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
+  (java.util.concurrent.ConcurrentHashMap.))
+
 (defn- edit-distance
   "The Levenshtein distance between the strings `a` and `b`."
   [a b]
@@ -381,17 +394,55 @@
 
 ;;; ------------------------------------------------ Sums ------------------------------------------------
 
-(defn- parsed-type? [x]
-  (and (class? x) (.isAssignableFrom ParsedValue ^Class x)))
+(defn- parsed-type?
+  "Whether `x` is a parsed type [[defparsed]] defined: a class it registered, by identity. A class that only
+  implements `ParsedValue` is not."
+  [x]
+  (and (class? x)
+       (.isAssignableFrom ParsedValue ^Class x)
+       (identical? x (:parses-to (.get registry x)))))
 
+(defn- member-names
+  "The class names of `members`, for comparing and printing sums, or `members` itself when it is not a sequence."
+  [members]
+  (if (sequential? members) (mapv #(if (class? %) (.getName ^Class %) %) members) members))
+
+;; Not a record, so `assoc` and `merge` cannot build a sum from another. Its constructor can, so every use checks the
+;; members again, with [[valid-sum?]].
 (defclass-once
-  (defrecord Sum [name members]))
+  (deftype Sum [name members]
+    Object
+    (equals [_ o] (and (instance? Sum o)
+                       (= name (.-name ^Sum o))
+                       (= (member-names members) (member-names (.-members ^Sum o)))))
+    (hashCode [_] (hash [name (member-names members)]))
+    (toString [_] (str "#<Sum " name " " (let [ns (member-names members)] (if (sequential? ns) (mapv symbol ns) ns))
+                       ">"))))
 
 ;; only `sum`, which checks the members, builds one
 (ns-unmap *ns* '->Sum)
-(ns-unmap *ns* 'map->Sum)
+
+(defmethod print-method Sum [x ^java.io.Writer w]
+  (.write w (str x)))
 
 (defn- sum? [x] (instance? Sum x))
+
+(defn- sum-name [^Sum s] (.-name s))
+
+(defn- sum-members [^Sum s] (.-members s))
+
+(defn- valid-members?
+  "Whether `members` can be a sum's members: a sequence of distinct parsed types."
+  [members]
+  (boolean (and (sequential? members)
+                (seq members)
+                (every? parsed-type? members)
+                (apply distinct? (map #(.getName ^Class %) members)))))
+
+(defn- valid-sum?
+  "Whether `x` is a sum whose members are distinct parsed types, as [[sum]] builds one."
+  [x]
+  (and (sum? x) (valid-members? (sum-members x))))
 
 (defn- same-type?
   "Whether the classes `a` and `b` are the same parsed type: they have the same name. Two classes have one name only
@@ -403,22 +454,25 @@
 (defn- member?
   "Whether `cls` is `type`, or one of the members of the sum `type`, by name."
   [type cls]
-  (if (sum? type) (boolean (some #(same-type? % cls) (:members type))) (same-type? type cls)))
+  (if (sum? type) (boolean (some #(same-type? % cls) (sum-members type))) (same-type? type cls)))
 
 (defn- type-name [type]
-  (if (sum? type) (str (:name type)) (.getSimpleName ^Class type)))
+  (if (sum? type) (str (sum-name type)) (.getSimpleName ^Class type)))
 
 (defn sum
   "A sum of parsed types, named `name`. Use [[defsum]]."
   [name members]
-  (when-not (and (seq members) (every? parsed-type? members) (apply distinct? (map #(.getName ^Class %) members)))
-    (throw (ex-info (str "defsum " name " got " (mapv #(if (class? %) (symbol (.getSimpleName ^Class %)) %) members)
+  (when-not (valid-members? members)
+    (throw (ex-info (str "defsum " name " got "
+                         (if (sequential? members)
+                           (mapv #(if (class? %) (symbol (.getSimpleName ^Class %)) %) members)
+                           (pr-str members))
                          ". A sum's members are distinct types defined with defparsed. List each parsed type once, as"
                          " in (defsum " name " [Debit Credit]).")
                     {:type    ::bad-declaration
                      :rule    ::rule/bad-sum-members
                      :name    name
-                     :members (mapv pr-str members)})))
+                     :members (if (sequential? members) (mapv pr-str members) (pr-str members))})))
   (Sum. name (vec members)))
 
 (defmacro defsum
@@ -427,6 +481,10 @@
 
     (defsum Transaction [Debit Credit])"
   [name members]
+  (when-not (simple-symbol? name)
+    (throw (ex-info (str "defsum: the name " (pr-str name) " is not a symbol. A sum is a var, named by a symbol. Write"
+                         " (defsum Transaction [Debit Credit]), with a symbol for the name.")
+                    {:type ::bad-declaration, :rule ::rule/sum-name-not-symbol, :name (pr-str name)})))
   `(def ~name (sum '~name ~members)))
 
 (defmacro match
@@ -461,13 +519,13 @@
                                    (refuse! ::rule/match-not-a-type
                                             (str "match on " sum-name ": " t " is not a type. Each clause starts"
                                                  " with a member type. Name one of "
-                                                 (mapv #(symbol (.getSimpleName ^Class %)) (:members s)) ".")
+                                                 (mapv #(symbol (.getSimpleName ^Class %)) (sum-members s)) ".")
                                             {:clause (str t)}))
                                  c))
                      triples)
         name-of (fn [^Class c] (.getName c))
-        members (set (map name-of (:members s)))
-        missing (remove (set (map name-of types)) (map name-of (:members s)))
+        members (set (map name-of (sum-members s)))
+        missing (remove (set (map name-of types)) (map name-of (sum-members s)))
         extra   (remove (comp members name-of) types)]
     (when (seq missing)
       (let [simple (mapv #(symbol (peek (clojure.string/split % #"\."))) missing)]
@@ -674,19 +732,6 @@
         ~(builders parsed-name draft-name fields))
        ~parsed-name)))
 
-;;; ------------------------------------------------ State ------------------------------------------------
-
-;; Draft type -> its plan, and parsed type -> the same plan, by identity. Written once per class, when its `defparsed`
-;; loads. Weak, so the classes a REPL replaces can be collected.
-(defonce ^:private ^Map registry
-  (.makeMap (.weakKeys (MapMaker.))))
-
-;; Parsed class name -> the namespace, as written, whose `defparsed` first defined it. Types compare by class name, and
-;; `my-app.bank` and `my_app.bank` compile to the same Java names, so without this a `defparsed` in one could stand in
-;; for the types of the other.
-(defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
-  (java.util.concurrent.ConcurrentHashMap.))
-
 ;;; ------------------------------------------------ Plans ------------------------------------------------
 
 (declare plan-for)
@@ -712,10 +757,11 @@
 
 (defn- validate-declaration!
   "Throw `::bad-declaration` for what `defparsed` cannot see when it expands, only when it loads: a child type that is
-  not a parsed type or a sum, a fetch that is not a fn, and a pure check that closes over a local."
-  [draft-class {:keys [checks fetches children]}]
+  not a parsed type or a sum, a fetch that is not a fn, and a pure check that closes over a local. A child field may
+  hold `parses-to`, the type being defined, which is registered only once its plan is."
+  [parses-to draft-class {:keys [checks fetches children]}]
   (doseq [[field {:keys [kind type]}] children]
-    (when-not (or (parsed-type? type) (sum? type))
+    (when-not (or (identical? type parses-to) (parsed-type? type) (valid-sum? type))
       (bad-declaration! draft-class ::rule/child-type-not-parsed
                         (str "the child field " field " holds " (pr-str type) ", which is not a type defined with"
                              " defparsed or a sum defined with defsum, in (" (if (= :one kind) "child" "children") " "
@@ -771,7 +817,7 @@
 
   Pure checks run first, fewest fields first, then fetches, then external checks, each in declaration order."
   [parses-to draft-class fields {:keys [checks fetches children], :as decl}]
-  (validate-declaration! draft-class decl)
+  (validate-declaration! parses-to draft-class decl)
   (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
         external  (filterv #(= :external (:kind %)) checks)
@@ -1257,7 +1303,7 @@
   "Throws `::bad-input` unless `t`, the first argument `fn-name` got, is a type [[defparsed]] defined or a sum
   [[defsum]] defined."
   [fn-name t]
-  (when-not (or (parsed-type? t) (and (sum? t) (seq (:members t)) (every? parsed-type? (:members t))))
+  (when-not (or (parsed-type? t) (valid-sum? t))
     (let [draft-of-type (when (and (class? t) (.isAssignableFrom DraftValue ^Class t))
                           (some-> ^Class (:parses-to (.get registry t)) .getSimpleName symbol))]
       (throw (ex-info (str fn-name " got " (if (class? t) (.getSimpleName ^Class t) (pr-str t)) " as its type. Its"
@@ -1301,7 +1347,7 @@
                                                   (str (.getSimpleName c) "Draft"))
                                 " ...))"))]
     (if (sum? type)
-      (clojure.string/join " or " (map one (:members type)))
+      (clojure.string/join " or " (map one (sum-members type)))
       (one type))))
 
 (defn parsed
@@ -1338,7 +1384,7 @@
                                     :message (str "Expected a parsed " t ", got a plain map. A sink takes only a"
                                                   " value pt/parse issued. Build a draft from the map and parse it,"
                                                   " as in (pt/parse (pt/draft "
-                                                  (if (sum? parsed-type) (type-name (first (:members parsed-type))) t)
+                                                  (if (sum? parsed-type) (type-name (first (sum-members parsed-type))) t)
                                                   " m)), and pass the result.")}
 
                                    :else
@@ -1349,7 +1395,7 @@
       (throw (ex-info message
                       {:type     ::not-parsed
                        :rule     rule
-                       :expected (if (sum? parsed-type) (str (:name parsed-type)) (.getName ^Class parsed-type))
+                       :expected (if (sum? parsed-type) (str (sum-name parsed-type)) (.getName ^Class parsed-type))
                        :got      (some-> x class .getName)}))))
   x)
 
@@ -1359,12 +1405,12 @@
   [sum handled v]
   (when (parsed? sum v)
     (let [got (symbol (.getSimpleName (class v)))]
-      (throw (ex-info (str "match on " (:name sum) " got a parsed " got ", but this match was compiled before " got
+      (throw (ex-info (str "match on " (sum-name sum) " got a parsed " got ", but this match was compiled before " got
                            " joined the sum, and handles only " handled ". A match handles every member of its sum."
                            " Re-evaluate the match, or reload its namespace, so that it must handle " got ".")
                       {:type     ::not-parsed
                        :rule     ::rule/match-compiled-before-member
-                       :expected (str (:name sum))
+                       :expected (str (sum-name sum))
                        :handled  handled
                        :got      (.getName (class v))}))))
   ;; not parsed as any member, so this throws

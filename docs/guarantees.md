@@ -35,6 +35,8 @@ The README covers how to use the library; this page covers what it promises and 
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others. A pure check that closes over a local is refused when it loads | `compile-errors-test`, `declaration-errors-at-load-test` |
 | Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
+| Only types `defparsed` defined count as types | `pt/parsed`, `pt/parsed?`, `pt/is?`, `defsum` and child fields accept a class only when `defparsed` registered it, by identity. A class that only implements `ParsedValue` is refused with `::bad-input` | `the-type-argument-is-checked-test`, `only-sum-builds-a-sum-test` |
+| A sum is built only from distinct parsed types | A sum isn't a map, so `assoc` can't change one. Every use checks its members, so one built with its constructor is checked too. Sums are equal when their names and members are | `only-sum-builds-a-sum-test` |
 | A check can ask a child's type, and the answer survives a reload | `pt/is?` says whether a value or draft is of a parsed type or a member of a sum, by class name, ignoring the proof, for registered classes only. It is not proof: sinks use `pt/parsed`, checks use `pt/is?`. `instance?` in a check would name the class it was compiled against | `is?-answers-the-type-without-the-proof-test` |
 | Reloading the library keeps every type and value defined before | The token is a `defonce`, and `ParsedValue`, `DraftValue` and `Sum` are defined only when they are not loaded yet | `reloading-the-library-keeps-every-type-test` |
 | After a REPL re-evaluates a type, code defined before it accepts the new class | Parsed types compare by class name, in `pt/parsed`, `parsed?`, `pt/is?`, sums, a child field's shape check and `match` | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test` |
@@ -53,10 +55,10 @@ and these gaps, are accepted:
   closed: `pt/parsed` refuses it.
 - **Mutable values are refused by a walk of known classes.** It trusts a class's interfaces: a type that implements
   `IPersistentVector` mutably passes. There is no opt-out for mutable values yet.
-- **A sum can still be built by hand.** `->Sum` and `map->Sum` are removed, so only `defsum` and `sum`, which check
-  the members, build one in ordinary code. The record's constructor and its reader syntax,
-  `#parsed_types.core.Sum{...}`, still bypass the check; `pt/parsed` and `pt/parsed?` refuse a sum whose members are
-  not parsed types.
+- **A sum can be built with its constructor.** A sum is a `deftype`, not a record, so `assoc` and `merge` can't
+  make one from another, and `->Sum` is removed. `(parsed_types.core.Sum. 'S members)` still builds one, so every
+  use checks the members again: `pt/parsed`, `pt/parsed?` and `pt/is?` refuse a sum whose members are not distinct
+  parsed types. A sum built that way with real members is the same as one `defsum` builds.
 - **`in-ns` can redefine a namespace's types.** Code that switches into a namespace with `in-ns` and runs a
   `defparsed` there redefines its types, with whatever checks it writes, the same way a REPL reload does.
 - **External checks can go stale.** An external check reads the world at the moment of `parse`. A balance that

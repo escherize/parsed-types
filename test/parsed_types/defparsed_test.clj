@@ -367,7 +367,7 @@
       (eval-here '(pt/defparsed IsLine [amount]))
       (is (some? (entry)) "the entry's ::balanced, compiled against the old IsLine, passes on the new one")
       (is (true? (is-line? (line-draft))))
-      (is (false? (eval-here '(instance? (first (:members IsSum)) (pt/parse (->IsLineDraft 1)))))
+      (is (false? (eval-here '(instance? (first (.-members ^parsed_types.core.Sum IsSum)) (pt/parse (->IsLineDraft 1)))))
           "instance? against the old class, which is what is? replaces, says false"))
     (testing "a class written by hand with the type's name does not count"
       (let [fake (eval-here '(do (deftype IsLine [amount] parsed_types.core.ParsedValue (issuedWith [_ _] true))
