@@ -112,6 +112,12 @@
                       ""
                       (catch Throwable e (ex-message (ex-cause e))))))))
 
+(deftest a-check-that-reads-no-field-may-go-anywhere-test
+  (testing "it shares no field, so it holds nothing and is not a proper subset to move first"
+    (binding [*ns* (the-ns 'parsed-types.core-test)]
+      (eval '(pt/defparsed Anywhere [a] (pure ::a-int "a is an integer." [a] (int? a)) (pure ::always "Always." [] true))))
+    (is (some? (pt/parse ((resolve 'parsed-types.core-test/->AnywhereDraft) 1))))))
+
 (deftest order-test
   (testing "shape checks first, then checks over several fields, then fetches, then external checks"
     (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]

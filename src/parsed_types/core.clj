@@ -917,7 +917,8 @@
     (when-let [[big small] (first (for [[i big] (map-indexed vector (filter #(= :pure (:kind %)) checks))
                                         small (drop (inc i) (filter #(= :pure (:kind %)) checks))
                                         :let  [b (set (:reads big)), sm (set (:reads small))]
-                                        :when (and (set/subset? sm b) (not= sm b))]
+                                        ;; a check that reads no field shares none, so it holds nothing
+                                        :when (and (seq sm) (set/subset? sm b) (not= sm b))]
                                     [big small]))]
       (syntax-error! &form ::rule/pure-check-order
                      (str "the pure check " (:name big) " reads " (mapv symbol (:reads big)) ", and is written before "

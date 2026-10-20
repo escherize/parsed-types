@@ -138,7 +138,8 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
   to the same Java name as another field (`a-b` and `a_b`);
 - a field declared as a child twice, or a child field that isn't a field;
 - a pure check written before a pure check that reads a proper subset of its fields. Pure checks run in the order
-  written, and a failed one holds every later one that shares a field, so the smaller check goes first.
+  written, and a failed one holds every later one that shares a field, so the smaller check goes first. A check that
+  reads no field shares none, so it may go anywhere.
 
 `pt/draft` refuses anything but a literal map, and a literal map that names a key that isn't a field, or leaves a
 field out. `match` refuses a missing
