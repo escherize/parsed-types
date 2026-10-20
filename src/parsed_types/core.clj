@@ -145,11 +145,11 @@
 
 (declare no-field!)
 
-(defn final!
+(defn- final!
   "Throws `::cannot-change`: a parsed value cannot be changed. `k` is the key `op` was given, or nil. A key that is
   not a field throws `::no-field` first, as [[no-field!]] says. Called by the parsed types [[defparsed]] defines."
   [parsed op k]
-  (library-value! "pt/final!" parsed)
+  (library-value! "parsed-types.core/final!" parsed)
   (when (and (some? k) (not (contains? parsed k)))
     (no-field! parsed k op))
   (let [n                      (.getSimpleName (class parsed))
@@ -169,11 +169,11 @@
                                                 (if (#{"dissoc" "remove"} op) " nil" " v") ")) for a changed copy.")})]
     (throw (ex-info message {:type ::cannot-change, :rule rule, :parsed (.getName (class parsed)), :op op, :key k}))))
 
-(defn fixed!
+(defn- fixed!
   "Throws `::cannot-change`: a draft's fields are fixed. `k` is the key `op` was given, or nil. A key that is not a
   field throws `::no-field` first. Called by the draft types [[defparsed]] defines."
   [draft op k]
-  (library-value! "pt/fixed!" draft)
+  (library-value! "parsed-types.core/fixed!" draft)
   (when (and (some? k) (not (contains? draft k)))
     (no-field! draft k op))
   (let [n                      (.getSimpleName (class draft))
@@ -194,12 +194,12 @@
                                                 (if (#{"dissoc" "remove"} op) " nil" " v") ").")})]
     (throw (ex-info message {:type ::cannot-change, :rule rule, :draft (.getName (class draft)), :op op, :key k}))))
 
-(defn no-field!
+(defn- no-field!
   "Throws `::no-field`: `x` has no field `k`. `op` is `\"read\"` when a key that is not a field is read without a
   default, or the change, such as `\"assoc\"` or `\"dissoc\"`, that named it. Called by the types [[defparsed]]
   defines."
   [x k op]
-  (library-value! "pt/no-field!" x)
+  (library-value! "parsed-types.core/no-field!" x)
   (let [fields  (vec (keys x))
         n       (.getSimpleName (class x))
         draft?  (instance? DraftValue x)
@@ -244,7 +244,8 @@
 
 (defn- map-type-methods
   "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws unless a default
-  is given. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name` throws for any other change.
+  is given. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name`, the form of a fn, throws for
+  any other change.
   `same-proof`, of the other value's symbol, is the form that says whether it holds this value's proof, or nil for a
   type without one. Every function in these bodies is written qualified, so no field name can shadow it."
   [fields this k v assoc-form final-name same-proof]
@@ -295,7 +296,7 @@
                                                    fields)))
       (~'seq [~this] (clojure.core/seq ~entries))
       (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
-      (~'valAt [~this ~k] ~(lookup `(no-field! ~this ~k "read")))
+      (~'valAt [~this ~k] ~(lookup `((var no-field!) ~this ~k "read")))
       (~'valAt [~this ~k ~nf] ~(lookup nf))
 
       clojure.lang.IKVReduce
@@ -417,7 +418,7 @@
          parsed_types.core.ParsedValue
          (~'issuedWith [~this ~t] (clojure.core/identical? ~t ~'parse-proof))
          ;; the other value is of this class, so it is this generated type, and the proof goes only into it
-         ~@(map-type-methods fields this k v `(final! ~this "assoc" ~k) `final!
+         ~@(map-type-methods fields this k v `((var final!) ~this "assoc" ~k) `(var final!)
                              (fn [o]
                                `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
        (ns-unmap *ns* '~(symbol (str "->" name)))
@@ -431,7 +432,7 @@
     `(do
        (deftype ~name [~@fields]
          parsed_types.core.DraftValue
-         ~@(map-type-methods fields this k v `(assoc-draft ~this ~k ~v) `fixed! nil))
+         ~@(map-type-methods fields this k v `((var assoc-draft) ~this ~k ~v) `(var fixed!) nil))
        ~(print-method-form name))))
 
 ;;; ------------------------------------------------ Sums ------------------------------------------------
@@ -521,7 +522,7 @@
 (defn- type-name [type]
   (if (sum? type) (str (sum-name type)) (.getSimpleName ^Class type)))
 
-(defn sum
+(defn- sum
   "A sum of parsed types, named `name`. Use [[defsum]]."
   [name members]
   (when-not (valid-members? members)
@@ -547,7 +548,8 @@
     (throw (ex-info (str "defsum: the name " (pr-str name) " is not a symbol. A sum is a var, named by a symbol. Write"
                          " (defsum Transaction [Debit Credit]), with a symbol for the name.")
                     {:type ::bad-declaration, :rule ::rule/sum-name-not-symbol, :name (pr-str name)})))
-  `(def ~name (sum '~name ~members)))
+  ;; through `var`, because it is private
+  `(def ~name ((var sum) '~name ~members)))
 
 (defmacro match
   "Branch on which member of the sum `sum-name` the parsed value `x` is. Each clause is a member type, a binding, and
@@ -1444,7 +1446,7 @@
 
 ;;; ------------------------------------------------ API ------------------------------------------------
 
-(defn assoc-draft
+(defn- assoc-draft
   "`draft` with `field` set to `v`: a new draft. This is what `assoc` on a draft does; call `assoc`."
   [draft field v]
   (let [{:keys [fields make-draft read-draft]} (plan-for draft)]

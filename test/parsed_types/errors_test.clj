@@ -81,7 +81,7 @@
    [:draft-no-empty #(empty draft) "DebitDraft has fixed fields" "(into {} x)"]
    [:conj-not-a-pair #(conj draft [:amount 1 2]) "conj of [:amount 1 2] on a DebitDraft" "has 3 elements"
     "(conj x [k v]), or (assoc x k v)"]
-   [:not-a-library-value #(pt/no-field! 5 :k "read") "pt/no-field! got 5" "(get m k default)"]
+   [:not-a-library-value #(#'pt/no-field! 5 :k "read") "parsed-types.core/no-field! got 5" "(get m k default)"]
    [:no-such-field-read #(:amont real) "Debit has no field :amont" "Did you mean :amount?"
     "[:user-id :account-id :amount]" "(:amount x)"]
    [:no-such-field-assoc #(assoc draft :acount-id 1) "DebitDraft has no field :acount-id" "Did you mean :account-id?"
@@ -196,7 +196,7 @@
    [:draft-of-unissued #(pt/draft-of (Debit. 1 2 30M nil)) "got a Debit that pt/parse did not issue" "(->DebitDraft ...)"]
    [:match-compiled-before-member
     ;; what a match on Growing compiled when it held only Debit does once Credit joins
-    #((var parsed-types.core/match-fell-through!) (pt/sum 'Growing [Debit Credit]) [Debit] 'parsed-types.errors-test
+    #((var parsed-types.core/match-fell-through!) (#'pt/sum 'Growing [Debit Credit]) [Debit] 'parsed-types.errors-test
       (pt/parse (->CreditDraft 1)))
     "got a parsed Credit, but this match was compiled before Credit joined the sum" "Re-evaluate the match"]
    ;; a REPL re-evaluated a defparsed, and code evaluated before it keeps the old class
@@ -282,7 +282,7 @@
     (is (nil? (ns-resolve 'parsed-types.core '->Sum)))
     (is (nil? (ns-resolve 'parsed-types.core 'map->Sum)))
     (doseq [members [[String] 5 [] [Debit Debit] [Fake]]]
-      (is (= :parsed-types.rule/bad-sum-members (:rule (error #(pt/sum 'S members)))) (pr-str members))))
+      (is (= :parsed-types.rule/bad-sum-members (:rule (error #(#'pt/sum 'S members)))) (pr-str members))))
   (testing "a sum is not a map, so assoc and merge cannot build one from another"
     (is (not (map? Txn)))
     (is (thrown? ClassCastException (assoc Txn :members [Fake]))))
@@ -293,9 +293,9 @@
           (pr-str members)))
     (is (true? (pt/parsed? (parsed_types.core.Sum. 'S [Debit]) real)) "with real members, it is just a sum"))
   (testing "a sum equals a sum with the same name and members, and prints them"
-    (is (= Txn (pt/sum 'Txn [Debit Credit])))
-    (is (= (hash Txn) (hash (pt/sum 'Txn [Debit Credit]))))
-    (is (not= Txn (pt/sum 'Txn [Credit Debit])))
+    (is (= Txn (#'pt/sum 'Txn [Debit Credit])))
+    (is (= (hash Txn) (hash (#'pt/sum 'Txn [Debit Credit]))))
+    (is (not= Txn (#'pt/sum 'Txn [Credit Debit])))
     (is (= "#<Sum Txn [parsed_types.errors_test.Debit parsed_types.errors_test.Credit]>" (pr-str Txn)))))
 
 (deftest parse-all-takes-a-collection-test
@@ -309,7 +309,7 @@
 
 (deftest the-type-argument-is-checked-test
   (doseq [[label thunk] [["nil" #(pt/parsed nil real)] ["a keyword" #(pt/parsed? :x real)]
-                         ["a draft type" #(pt/parsed DebitDraft real)] ["a bare Sum" #(pt/parsed? (pt/sum 'S [Debit]) nil)]
+                         ["a draft type" #(pt/parsed DebitDraft real)] ["a bare Sum" #(pt/parsed? (#'pt/sum 'S [Debit]) nil)]
                          ["a class that only implements ParsedValue" #(pt/parsed Fake (Fake. 1))]]]
     (testing label
       (is (= (if (= "a bare Sum" label) nil :parsed-types.rule/not-a-parsed-type) (:rule (error thunk))))))
@@ -331,10 +331,10 @@
 (pt/defparsed Unit [])
 
 (deftest library-fns-refuse-what-is-not-a-library-value-test
-  (doseq [[label thunk] [["final! of nil" #(pt/final! nil "assoc" nil)]
-                         ["fixed! of nil" #(pt/fixed! nil "assoc" nil)]
-                         ["final! of a number" #(pt/final! 5 "assoc" :k)]
-                         ["no-field! of nil" #(pt/no-field! nil :k "read")]]]
+  (doseq [[label thunk] [["final! of nil" #(#'pt/final! nil "assoc" nil)]
+                         ["fixed! of nil" #(#'pt/fixed! nil "assoc" nil)]
+                         ["final! of a number" #(#'pt/final! 5 "assoc" :k)]
+                         ["no-field! of nil" #(#'pt/no-field! nil :k "read")]]]
     (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-library-value}
            (select-keys (ex-data (try (thunk) nil (catch clojure.lang.ExceptionInfo e e))) [:type :rule]))
         label)))
@@ -362,6 +362,11 @@
       (is (not (str/includes? message "already parsed")))))
   (testing "parse of a value parse issued says it is already parsed"
     (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
+
+(deftest the-public-api-is-what-users-call-test
+  (testing "the fns only generated code calls are private, so the public names are the README's API"
+    (is (= '#{declaration defparsed defsum draft draft-of match parse parse-all parsed parsed?}
+           (set (keys (ns-publics 'parsed-types.core)))))))
 
 (deftest suggestions-are-data-too-test
   (is (= :amount (:suggestion (ex-data (try (:amont real) (catch clojure.lang.ExceptionInfo e e))))))
