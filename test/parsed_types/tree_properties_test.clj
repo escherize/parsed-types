@@ -176,10 +176,18 @@
       (let [ext-failures (for [{:keys [path externals]} nodes
                                [n e status ok?] externals
                                :when (not ok?)]
-                           [path n e status])]
+                           [path n e status])
+            ;; the crate's ::views-seen reads boxes, so it is held when a box, or its item, failed an external check
+            bad-boxes    (filter (fn [bp] (some (fn [[path]] (= bp (take (count bp) path))) ext-failures))
+                                 (map (fn [i] [:boxes i]) (range (count (:boxes crate)))))
+            held         (when (seq bad-boxes)
+                           [[[] ::views-seen] {:doc        "The checks see children as values, not drafts."
+                                               :blocked-by (set bad-boxes)
+                                               :blocked    #{}}])]
         (if (seq ext-failures)
           {:status   (nth (first ext-failures) 3)
-           :failures (into {} (for [[path n e] ext-failures] [[path n] (assoc (entry e) :blocked #{})]))}
+           :failures (into {} (concat (for [[path n e] ext-failures] [[path n] (assoc (entry e) :blocked #{})])
+                                      (when held [held])))}
           :ok)))))
 
 ;;; What parse returned, in the model's shape

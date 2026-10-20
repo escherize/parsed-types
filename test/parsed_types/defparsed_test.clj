@@ -311,6 +311,7 @@
     (is (= (hash (->Money 1.0M (int 2))) (hash (->Money 1.00M 2))))
     (is (= (->Money [1N] 2) (->Money [1] 2))))
   (testing "a value equals only a value of its own type"
+    (is (not= (->Money 1M 2) (->Money 1M 3)) "every field is compared, not only the first")
     (is (not= (->Money 1M 2) (->OtherMoney 1M 2)))
     (is (not= (->Money 1M 2) (->MoneyDraft 1M 2)))
     (is (not= (->Money 1M 2) {:amount 1M, :count 2}))
@@ -335,6 +336,7 @@
   (let [d (->MoneyDraft 1M 2)]
     (is (= 5M (:amount (conj d [:amount 5M]))))
     (is (= 5M (:amount (conj d (clojure.lang.MapEntry/create :amount 5M)))))
+    (is (= 5M (:amount (conj d (java.util.AbstractMap$SimpleEntry. :amount 5M)))) "a Java map entry, which is no vector")
     (is (= 5M (:amount (conj d {:amount 5M}))))
     (is (= 5M (:amount (conj d (java.util.HashMap. {:amount 5M})))))
     (is (identical? d (conj d nil)))
@@ -351,5 +353,5 @@
 (deftest field-name-limits-test
   (doseq [[fields re] [['[a.b] #"cannot contain a dot"]
                        ['[a-b a_b] #"compile to the same Java name"]
-                       ['[__meta] #"cannot start with __"]]]
+                       ['[__meta] #"deftype reserves these field names"]]]
     (is (re-find re (str (compile-error (list 'pt/defparsed 'Limits fields)))))))

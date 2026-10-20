@@ -214,8 +214,8 @@
     (throw (ex-info (str "a field name cannot contain a dot: " (vec dotted)) {:form form})))
   (when-let [clash (seq (for [[_ fs] (group-by #(munge (name %)) fields) :when (< 1 (count fs))] fs))]
     (throw (ex-info (str "these fields compile to the same Java name: " (vec (first clash))) {:form form})))
-  (when-let [reserved (seq (filter #(clojure.string/starts-with? (name %) "__") fields))]
-    (throw (ex-info (str "a field name cannot start with __, which deftype reserves: " (vec reserved)) {:form form}))))
+  (when-let [reserved (seq (filter '#{__meta __extmap __hash __hasheq} fields))]
+    (throw (ex-info (str "deftype reserves these field names: " (vec reserved)) {:form form}))))
 
 (defn- print-method-form [name]
   ;; `#ns.Type{...}`, like a record, so a value is told apart from a plain map at the REPL. The reader cannot build one
@@ -443,8 +443,8 @@
           :checks    ~checks
           :fetches   ~fetches
           :children  ~children})
-       ;; qualified, so a field named like the declaration cannot shadow it
-       (defdraft-type ~draft-name ~fields ~(symbol (str *ns*) (str decl-sym)))
+       ;; through `var`, which ignores locals, so a field named like the declaration cannot shadow it
+       (defdraft-type ~draft-name ~fields (deref (var ~decl-sym)))
        (register-draft! ~parsed-name ~draft-name)
        ~parsed-name)))
 
@@ -749,8 +749,8 @@
         st))))
 
 (defn- failed-children
-  "The paths of the children in the fields `c` reads whose own pure checks did not all pass. A shape check reads only
-  the field's form, so it waits on no child."
+  "The paths of the children in the fields `c` reads that failed, or have a failure under them, in this phase. A shape
+  check reads only the field's form, so it waits on no child."
   [st c bad]
   (when-not (:shape? c)
     (seq (for [field (:reads c)
@@ -758,16 +758,21 @@
                :when (bad [(:tree st) path])]
            path))))
 
-(defn- run-pure [st bad]
+(defn- run-checks
+  "Run `checks` in order. A check that reads a child field whose children failed is held, not run: it would read
+  values that are not proven."
+  [st checks bad]
   (reduce (fn [st {n :name, :keys [doc prereqs], :as c}]
             (if-let [paths (and (not (roots-of st prereqs)) (failed-children st c bad))]
-              ;; held, not run: a check over children that failed would read malformed values
               (-> st
                   (assoc-in [:failed n] {:doc doc, :blocked-by (vec paths)})
                   (update :order conj n))
               (run-check st c)))
           st
-          (filter (comp (:needed st) :name) (get-in st [:plan :pure]))))
+          (filter (comp (:needed st) :name) checks)))
+
+(defn- run-pure [st bad]
+  (run-checks st (get-in st [:plan :pure]) bad))
 
 (declare construct)
 
@@ -789,20 +794,26 @@
                  [[] #{} {}]
                  nodes)))
 
-(defn- run-external [st]
-  (reduce run-check st (filter (comp (:needed st) :name) (get-in st [:plan :external]))))
+(defn- external-phase
+  "Run every node's external checks, children before parents, holding a parent's checks over children that failed
+  theirs. A node in a tree that failed a pure check runs them only to record what its own failures blocked."
+  [nodes]
+  (first (reduce (fn [[out bad] {:keys [tree path child-paths world? failed], :as st}]
+                   (let [st   (if (or world? (seq failed)) (run-checks st (get-in st [:plan :external]) bad) st)
+                         bad? (or (seq (:failed st)) (some #(bad [tree %]) (apply concat (vals child-paths))))]
+                     [(conj out st) (cond-> bad bad? (conj [tree path]))]))
+                 [[] #{}]
+                 nodes)))
 
 (defn- fetch-phase
   "Run every fetch the nodes need, each once per plan across all of them, with each distinct tuple of arguments once."
   [sts]
+  ;; only nodes of trees whose every pure check passed reach the world, so no fetch here waits on a failure
   (let [wanted (for [[i st] (map-indexed vector sts)
                      :when  (:world? st)
                      fd     (get-in st [:plan :fetches])
                      :when  ((:needed st) (:name fd))]
-                 {:i i, :fd fd, :roots (roots-of st (:prereqs fd))})
-        sts    (reduce (fn [sts {:keys [i fd roots]}]
-                         (cond-> sts roots (update i block (:name fd) roots false)))
-                       sts wanted)
+                 {:i i, :fd fd})
         tuple  (fn [{:keys [i fd]}] (mapv #(get (:inputs (nth sts i)) %) (:reads fd)))]
     (reduce
      (fn [sts [_ ws]]
@@ -817,8 +828,7 @@
                  sts ws)))
      sts
      ;; one call per fetch per plan: the same fetch name in two declarations is two fetches
-     (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)])
-               (remove :roots wanted)))))
+     (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)]) wanted))))
 
 (defn- remember! [{:keys [draft plan mask]}]
   (if (zero? mask)
@@ -837,7 +847,7 @@
         ;; nothing in a tree touches the world until every pure check in it has run and passed
         nodes        (mapv #(assoc % :world? (not (unproven (:tree %)))) nodes)
         nodes        (fetch-phase nodes)
-        nodes        (mapv #(if (or (:world? %) (seq (:failed %))) (run-external %) %) nodes)
+        nodes        (external-phase nodes)
         by-tree      (group-by :tree nodes)]
     (run! remember! nodes)
     (mapv #(get by-tree % []) (range (count drafts)))))

@@ -319,3 +319,23 @@
 (deftest a-fetch-must-answer-every-tuple-test
   (testing "a missing tuple is a 500, never a nil row a check could pass on"
     (is (= 500 (:status-code (thrown-data #(pt/parse-all [(->ForgotDraft 1) (->ForgotDraft 2)])))))))
+
+;;; A child's external failure holds the parent's external checks over it
+
+(pt/defparsed Grumpy [transfers]
+  (children transfers Transfer)
+  (external ::boom "Throws whenever it runs." [transfers] (throw (ex-info "boom" {:transfers (count transfers)}))))
+
+(deftest a-child-external-failure-holds-the-parent-test
+  (testing "bob may not draw on account 1: the payroll's check over transfers waits, and is held"
+    (is (= {:status-code 403
+            :failures    {:transfers     {0 {::owns-source {:doc "The user owns the source account.", :returned false}}}
+                          ::covers-total {:doc "The account holds the sum of every transfer.", :blocked-by [[:transfers 0]]}}}
+           (select-keys (thrown-data #(pt/parse (payroll :bob 1  2 10M))) [:status-code :failures]))))
+  (testing "a parent check that would throw never runs, so the child's 403 is what you get"
+    (is (= 403 (:status-code (thrown-data #(pt/parse (->GrumpyDraft [(->TransferDraft :bob 1 2 10M)]))))))))
+
+(deftest node-limit-boundary-test
+  (let [wide (fn [n] (->BudgetDraft "root" 1000000M (vec (repeatedly (dec n) #(->BudgetDraft "p" 0M [])))))]
+    (is (pt/parsed? Budget (pt/parse (wide 100000))) "100,000 drafts parse")
+    (is (= 400 (:status-code (thrown-data #(pt/parse (wide 100001))))) "100,001 do not")))

@@ -135,7 +135,7 @@ an external one, unless the check sets `{:status 404}`.
 - **Children first.** A parent check sees each child as a value of its parsed type that passed its pure checks. The
   value isn't issued yet, so `pt/parsed` refuses it inside the check, and the child's external checks may still fail.
   When a child fails, the failure appears at its path, `{:transfers {3 {...}}}`, and the parent checks that read it
-  don't run.
+  and haven't run yet are held, with `:blocked-by` naming the child.
 - **One query per fetch, not per child.** The 50 transfers' `::source` lookups are one call, with each distinct
   account id once.
 - **Bottom-up result.** The parsed `Payroll` holds parsed `Transfer`s, so `run-payroll!` can hand each one to

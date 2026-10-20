@@ -22,7 +22,8 @@ The README covers how to use the library; this page covers what it promises and 
 | `parse-all` agrees with `parse` | Fetches grouped by declaration | `parse-all-agrees-with-parse-across-declarations`, `parse-all-agrees-with-parse-on-trees` |
 | A parsed tree is parsed all the way down, and `draft-of` returns drafts all the way down | Values built bottom-up | `parse-matches-the-tree-model`, `draft-of-returns-drafts-all-the-way-down` |
 | `match` handles every member of a sum, and only parsed values reach a branch | `match` compares its clauses with the sum when it expands, and calls `pt/parsed` in each branch | `match-compile-errors-test`, `match-runs-only-on-parsed-members` |
-| A deep or huge tree is refused with a 400, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test` |
+| A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
+| A deep or huge tree is refused with a 400, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others | `compile-errors-test` |
 | Threads that first use a declaration at once keep their remembered passes | The first plan stored wins | `concurrent-first-use-test` |
 
@@ -64,10 +65,13 @@ destructuring. `match` refuses a missing member, a type that isn't a member, and
 - **Equality.** Like a record, a value equals only a value of its own type with the same fields: a parsed value never
   equals a plain map or its draft. A `Transfer` built by hand still equals one `parse` made, because they hold the
   same value, so a set of parsed values can't tell a forgery apart. Proof is `pt/parsed`, never `=`. Java `.equals`
-  is one-sided, as with records: a `HashMap` or a Clojure map's `.equals` compares contents and says true, while the
-  value's own `.equals` says false.
+  is one-sided, unlike a record, whose `.equals` compares contents both ways: a `HashMap` or a Clojure map's `.equals`
+  compares contents and says true, while the value's own `.equals` says false. So a Java `HashSet` holding a parsed
+  value can report that it contains an equal plain map.
 - **What a parent check sees.** Each child is a value of its parsed type that passed its pure checks, built once and
-  issued only if the whole tree passes. Inside the check, `pt/parsed` refuses it, and its external checks haven't run.
+  issued only if the whole tree passes. Inside the check, `pt/parsed` refuses it. A parent's pure checks run before
+  any external check; a parent's external checks run after the children's, and one that reads a child that failed
+  an external check is held, so it can't throw over the child's failure.
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field is a 400: the map
