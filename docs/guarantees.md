@@ -70,6 +70,9 @@ and these gaps, are accepted:
   parsed types. A sum built that way with real members is the same as one `defsum` builds.
 - **`in-ns` can redefine a namespace's types.** Code that switches into a namespace with `in-ns` and runs a
   `defparsed` there redefines its types, with whatever checks it writes, the same way a REPL reload does.
+- **Replaced classes are never released.** Each re-evaluation of a `defparsed` defines two new classes, and the
+  registry's plan and the `print-method` entry keep the old ones, with their plans, for the life of the JVM. Only a
+  REPL re-evaluates, so only a REPL session grows, by a few classes per re-evaluation.
 - **External checks can go stale.** An external check reads the world at the moment of `parse`. A balance that
   passed can change later, so parse right before you act.
 

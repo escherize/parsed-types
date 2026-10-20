@@ -88,7 +88,8 @@
 ;;; ------------------------------------------------ State ------------------------------------------------
 
 ;; Draft type -> its plan, and parsed type -> the same plan, by identity. Written once per class, when its `defparsed`
-;; loads. Weak, so the classes a REPL replaces can be collected.
+;; loads. Its keys are weak, but each plan holds both classes, and so does the `print-method` entry `defparsed` adds,
+;; so a class a REPL replaces is never released: a REPL-only leak, of a few classes per re-evaluation.
 (defonce ^:private ^Map registry
   (.makeMap (.weakKeys (MapMaker.))))
 
