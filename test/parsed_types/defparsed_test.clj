@@ -239,11 +239,27 @@
         (doseq [[how thunk] [["keyword" #(:z x)]
                              ["get" #(get x :z)]
                              ["invoke" #(x :z)]
-                             ["destructuring" #(let [{:keys [z]} x] z)]]]
-          (is (= ::pt/no-field (:type (try (thunk) (catch clojure.lang.ExceptionInfo e (ex-data e))))) how))
-        (is (= ::none (get x :z ::none)))
-        (is (false? (contains? x :z)))
-        (is (nil? (find x :z)))
+                             ["destructuring" #(let [{:keys [z]} x] z)]
+                             ["get with a default" #(get x :z ::none)]
+                             ["get-in with a default" #(get-in x [:z] ::none)]
+                             ["keyword with a default" #(:z x ::none)]
+                             ["invoke with a default" #(x :z ::none)]
+                             ["destructuring with :or" #(let [{:keys [z] :or {z ::none}} x] z)]]]
+          (let [data (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+            (is (= ::pt/no-field (:type data)) how)
+            (is (= :parsed-types.rule/no-such-field-read (:rule data)) how)))
+        (testing "a field read with a default reads its value, nil too"
+          (is (= (repeat 5 (:x x)) [(get x :x ::none) (get-in x [:x] ::none) (:x x ::none) (x :x ::none)
+                              (let [{:keys [x] :or {x ::none}} x] x)]))
+          (is (nil? (:y (assoc d :y nil) ::none))))
+        (testing "contains?, find and select-keys probe"
+          (is (false? (contains? x :z)))
+          (is (nil? (find x :z)))
+          (is (= {:x (:x x)} (select-keys x [:x :z]))))
+        (testing "java.util.Map keeps Java's contract: get returns null, getOrDefault the default"
+          (is (nil? (.get ^java.util.Map x :z)))
+          (is (= ::none (.getOrDefault ^java.util.Map x :z ::none)))
+          (is (some? (.get ^java.util.Map x :x))))
         (is (= [:x :y] (keys x)))))))
 
 ;;; REPL reloads

@@ -219,12 +219,13 @@
     (throw (ex-info message {:type ::cannot-change, :rule rule, :draft (.getName (class draft)), :op op, :key k}))))
 
 (defn- no-field!
-  "Throws `::no-field`: `x` has no field `k`. `op` is `\"read\"` when a key that is not a field is read without a
-  default, or the change, such as `\"assoc\"` or `\"dissoc\"`, that named it. Called by the types [[defparsed]]
+  "Throws `::no-field`: `x` has no field `k`. `op` is `\"read\"` when a key that is not a field is read, `\"read with a
+  default\"` when it is read with one, or the change, such as `\"assoc\"` or `\"dissoc\"`, that named it. Called by the types [[defparsed]]
   defines."
   [x k op]
   (library-value! "parsed-types.core/no-field!" x)
   (let [fields  (vec (keys x))
+        read?   (#{"read" "read with a default"} op)
         n       (.getSimpleName (class x))
         draft?  (instance? DraftValue x)
         nearest (nearest k fields)
@@ -232,13 +233,19 @@
     (throw (ex-info (cond
                       (empty? fields)
                       (str n " has no field " (pr-str k) ": it has no fields at all, so every key "
-                           (if (= "read" op) "read without a default throws" "throws") ". Add the field to its"
+                           (if read? "read throws, with a default too" "throws") ". Add the field to its"
                            " defparsed, as in (defparsed " (if draft? (subs n 0 (- (count n) 5)) n) " ["
                            (if (keyword? k) (name k) "field") "]).")
 
                       (= "read" op)
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A key that is not a field"
                            " throws, never reads nil. Read one of its fields " fields ", as in (" field " x).")
+
+                      read?
+                      (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A key that is not a field"
+                           " throws, even read with a default, so a misspelled key never reads the default. Read one"
+                           " of its fields " fields ", as in (" field " x), or probe for the key with (contains? x "
+                           (pr-str k) ") or (find x " (pr-str k) ").")
 
                       draft?
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A draft has fixed fields. Set"
@@ -249,7 +256,7 @@
                            " fields, and never changes. Change one of " fields " on a copy, as in (pt/parse (assoc"
                            " (pt/draft-of x) " field " v))."))
                     (cond-> {:type                     ::no-field
-                             :rule                     (if (= "read" op)
+                             :rule                     (if read?
                                                          ::rule/no-such-field-read
                                                          ::rule/no-such-field-assoc)
                              (if draft? :draft :parsed) (.getName (class x))
@@ -337,8 +344,8 @@
         (toString [_] (.toString back))))))
 
 (defn- map-type-methods
-  "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws unless a default
-  is given. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name`, the form of a fn, throws for
+  "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws, with a default
+  too, but for `java.util.Map.get`, which returns null. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name`, the form of a fn, throws for
   any other change.
   `same-proof`, of the other value's symbol, is the form that says whether it holds this value's proof, or nil for a
   type without one. Every function in these bodies is written qualified, so no field name can shadow it."
@@ -391,7 +398,8 @@
       (~'seq [~this] (clojure.core/seq ~entries))
       (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
       (~'valAt [~this ~k] ~(lookup `((var no-field!) ~this ~k "read")))
-      (~'valAt [~this ~k ~nf] ~(lookup nf))
+      ;; a default does not make a misspelled key read it: only a field reads
+      (~'valAt [~this ~k ~nf] ~(lookup `((var no-field!) ~this ~k "read with a default")))
 
       clojure.lang.IKVReduce
       (~'kvreduce [~this ~f ~init]
@@ -410,7 +418,8 @@
       (~'withMeta [~this ~k] (~final-name ~this "with-meta" nil))
 
       java.util.Map
-      (~'get [~this ~k] (.valAt ~this ~k nil))
+      ;; Java's contract, null for a key that is not a field, for Java code that probes keys: the one silent read
+      (~'get [~this ~k] ~(lookup nil))
       (~'size [~this] ~(count fields))
       (~'isEmpty [~this] ~(empty? fields))
       (~'containsValue [~this ~o] (clojure.core/boolean (clojure.core/some #(clojure.core/= ~o %) [~@fields])))

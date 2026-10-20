@@ -89,6 +89,8 @@
    [:not-a-library-value #(#'pt/no-field! 5 :k "read") "parsed-types.core/no-field! got 5" "(get m k default)"]
    [:no-such-field-read #(:amont real) "Debit has no field :amont" "Did you mean :amount?"
     "[:user-id :account-id :amount]" "(:amount x)"]
+   [:no-such-field-read #(get real :amont 0) "Debit has no field :amont" "Did you mean :amount?"
+    "even read with a default" "(contains? x :amont)" "(find x :amont)"]
    [:no-such-field-assoc #(assoc draft :acount-id 1) "DebitDraft has no field :acount-id" "Did you mean :account-id?"
     "(assoc d :account-id v)"]
    ;; field names
@@ -385,7 +387,7 @@
 
 (deftest every-suggested-fix-applies-test
   (testing "a type with no fields says to add one, rather than naming a field it does not have"
-    (is (= "Unit has no field :x: it has no fields at all, so every key read without a default throws. Add the field to its defparsed, as in (defparsed Unit [x])."
+    (is (= "Unit has no field :x: it has no fields at all, so every key read throws, with a default too. Add the field to its defparsed, as in (defparsed Unit [x])."
            (:message (error #(:x (pt/parse (pt/draft Unit {})))))))
     (is (str/includes? (:message (error #(assoc (pt/draft Unit {}) :x 1))) "(defparsed Unit [x])")))
   (testing "a key that is not a field, on a parsed value, is reported first, so the fix names a field"

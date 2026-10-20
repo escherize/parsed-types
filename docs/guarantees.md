@@ -25,7 +25,7 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test`, `a-shared-collection-of-leaves-is-walked-once-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator, the default methods included, throw `::cannot-change`. So do the mutators of `keySet`, `values` and `entrySet`, of their iterators, and `setValue` on an entry of `entrySet` | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `java-map-interface-test`, `every-java-map-mutator-throws-ex-info-test` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `java-map-interface-test` |
-| A misspelled key fails, never reads `nil` | Drafts and parsed values have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `draft-test` |
+| A misspelled key fails, never reads `nil` or a default | Drafts and parsed values have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `draft-test` |
 | A field may be named like any `clojure.core` function | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on each library interface print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
@@ -97,7 +97,7 @@ but an `ex-info`. Class names in ex-data are strings, so ex-data can be serializ
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed` | `:class`, and `:ns` where it applies |
 | `::cannot-change` | a change to a parsed value, a `dissoc`, `with-meta` or `empty` on a draft, or a `java.util.Map` mutator on either | `:parsed` or `:draft`, `:op`, `:key` |
-| `::no-field` | reading a key that isn't a field without a default, or changing one. A key that isn't a field is reported before a change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
+| `::no-field` | reading a key that isn't a field, with a default too, or changing one. A key that isn't a field is reported before a change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
 | `::bad-input` | a field holds a value that is not known to be immutable, a draft, or an unissued value; `pt/draft` got the wrong keys or no literal map; a library fn got the wrong kind of argument | `:draft`, `:field`, `:path`, `:got` for a field's value |
 | `::bad-declaration` | a declaration error, when `defparsed`, `defsum` or `match` expands or loads, or a type whose `defparsed` stopped after its `deftype`s | `:draft` when found at load; `:class` and `:ns` for `type-not-loaded` |
 | `::bad-fetch` | a fetch returned no entry for some tuples, or no map | `:fetch`, `:missing` |
@@ -117,8 +117,6 @@ From `parse-all`, `:failures` maps the index of each draft that failed to its fa
 of each draft where a check threw to that set, `{}` when none did.
 
 ### Every rule
-
-Each rule below has an example in `parsed-types.errors-test`, with the values and the fix its message must hold.
 
 Changing values (`::cannot-change`, `::no-field`, `::bad-input`):
 
@@ -207,9 +205,11 @@ them throws `type-not-loaded` until the `defparsed` is fixed and re-evaluated.
 
 ## Behavior worth knowing
 
-- **Reading unknown keys.** A one-argument lookup throws: `(:k x)`, `(get x :k)`, `(x :k)` and destructuring. With a
-  default, `(get x :k ::none)` returns it, and so does `:or` in `let`, which reads with a default. `contains?` is
-  false, `find` is nil, `select-keys` leaves the key out, and `java.util.Map.get` returns null.
+- **Reading unknown keys.** A Clojure lookup throws, with a default too: `(:k x)`, `(get x :k)`, `(x :k)`,
+  `(get x :k d)`, `(get-in x [:k] d)`, `(:k x d)`, `(x :k d)` and destructuring, `:or` included. A field read with a
+  default reads its value, nil too. To probe, `contains?` is false, `find` is nil, and `select-keys` leaves the key
+  out. `java.util.Map.get` returns null and `getOrDefault` the default, as Java's contract says: the one silent
+  path, kept for Java code that probes keys.
 - **Java `.equals` is one-sided.** A `HashMap`'s or a Clojure map's `.equals` compares contents and says true for a
   parsed value with the same entries, while the value's own `.equals` says false. So a Java `HashSet` holding a
   parsed value can report that it contains an equal plain map.
@@ -219,7 +219,6 @@ them throws `type-not-loaded` until the `defparsed` is fixed and re-evaluated.
   later check that shares a field with it runs, unless a check that ran and failed holds it too. When a pure check
   fails, no fetch and no external check of that draft runs. Each external check is listed under `:blocked` of the
   pure checks that ran and failed.
-- **Every check runs every time.** There is no cache of passed checks, and no way to run some of them.
 - **Immutable values only.** Every field is walked, map keys and metadata included. Accepted: nil; `Boolean`,
   `Character`, `String`, keywords, symbols, `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`,
   `Float`, `BigInt`, `Ratio`, and `BigDecimal` and `BigInteger` by exact class, since they can be subclassed;

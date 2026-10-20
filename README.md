@@ -256,12 +256,15 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 
 ### Nothing fails silently
 
-A key that isn't a field throws instead of reading nil. A check passes only on exactly `true`; for a truthy result
-such as `(seq xs)`, the message says to wrap the body in `(boolean ...)`. An external check gets nil when a fetch
-found nothing, so guard it, as `(:price product)` does. A check body that throws is recorded under `:threw`, and its
-exception is the cause; the other checks of its phase still run. An exception from a fetch propagates. There is no `check` or `check-all`, because each returned a
-truthy value whether the checks passed or failed. A test stubs a fetch declared through its var, as
-`#'customers-by-id` is, with `(with-redefs [customers-by-id stub] ...)`.
+A key that isn't a field throws instead of reading nil, and so does a lookup with a default, such as `(get x :k d)`
+or `:or`: a misspelled key never reads the default. Probe with `contains?` or `find`. `java.util.Map.get` and
+`getOrDefault` keep Java's contract, null or the default: the one silent path, kept for Java interop. A check passes
+only on exactly `true`; for a truthy result such as `(seq xs)`, the message says to wrap the body in `(boolean ...)`.
+An external check gets nil when a fetch found nothing, so guard it, as `(:price product)` does. A check body that
+throws is recorded under `:threw`, and its exception is the cause; the other checks of its phase still run. An
+exception from a fetch propagates. There is no `check` or `check-all`, because each returned a truthy value whether
+the checks passed or failed. A test stubs a fetch declared through its var, as `#'customers-by-id` is, with
+`(with-redefs [customers-by-id stub] ...)`.
 
 ### Types reload like records, and `::stale-type` names what to re-evaluate
 

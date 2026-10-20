@@ -67,7 +67,7 @@
         (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
         (is (= ::pt/no-field (:type (thrown-data #(:nope parsed)))) "a key that is not a field throws")
-        (is (= ::none (get parsed :nope ::none)) "unless a default is given")
+        (is (= ::pt/no-field (:type (thrown-data #(get parsed :nope ::none)))) "with a default too")
         (is (not (contains? parsed :nope))))
       (testing "it prints with its type, and so do str, toString and pprint, which never show the proof"
         (doseq [shown [(pr-str parsed) (str parsed) (.toString ^Object parsed) (str/trim (with-out-str (binding [pprint/*print-right-margin* 200] (pprint/pprint parsed))))]]
@@ -210,7 +210,7 @@
       (is (= [:user-id :card-id :title] (keys real)))
       (is (= 3 (count real) (count (seq real)) (.size ^java.util.Map real)))
       (is (false? (contains? real :parse-proof)))
-      (is (= ::none (get real :parse-proof ::none)))
+      (is (= ::pt/no-field (:type (thrown-data #(get real :parse-proof ::none)))))
       (is (= ::pt/no-field (:type (thrown-data #(:parse-proof real))))))
     (testing "equality holds the proof: a value parse issued never equals one built without it"
       (is (not= real (RenameCard. 1 1 "New" nil)))
