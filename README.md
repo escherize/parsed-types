@@ -13,81 +13,97 @@ Clojure that type, and refuses the rest at run time.
 
 | Term | Meaning |
 |---|---|
-| **Draft** | Unchecked input, such as `TransferDraft`. Anyone builds one. Its fields are fixed. |
+| **Draft** | Unchecked input, such as `DebitDraft`. Anyone builds one. Its fields are fixed. |
 | **Parse** | Run every check on a draft. Return a new parsed value, or throw with every failure. |
-| **Parsed value** | Checked output, such as `Transfer`. Only `parse` makes one, and it can't change. |
+| **Parsed value** | Checked output, such as `Debit`. Only `parse` makes one, and it can't change. |
 | **Check** | A function of named fields that passes by returning exactly `true`. *Pure* checks read only fields; *external* checks read the world. |
 | **Fetch** | A batched lookup that external checks use, called once for many drafts. |
-| **Sink** | A function that acts, such as `transfer!`. It accepts only parsed values. |
+| **Sink** | A function that acts, such as `transact!`. It accepts only parsed values. |
 
 ```
-  ->TransferDraft, pt/draft
+   ->DebitDraft, pt/draft
             |
             v
-     +---------------+   pt/parse: every check passes   +-----------+
-     | TransferDraft | -------------------------------> | Transfer  | --> sinks: (pt/parsed Transfer x)
-     |    (draft)    | <------------------------------- | (parsed)  |
-     +---------------+           pt/draft-of            +-----------+
-       ^         |                                        assoc, dissoc: throw
-       | assoc   | pt/parse: a check fails
-       +---------+ ---> throws {:status-code 400, :failures {...}}
+     +------------+   pt/parse: every check passes   +----------+
+     | DebitDraft | -------------------------------> |  Debit   | --> sinks: (pt/parsed Debit x)
+     |  (draft)   | <------------------------------- | (parsed) |
+     +------------+           pt/draft-of            +----------+
+       ^        |                                      assoc, dissoc: throw
+       | assoc  | pt/parse: a check fails
+       +--------+ ---> throws {:status-code 400, :failures {...}}
 ```
 
 | | Draft | Parsed value |
 |---|---|---|
-| Make one | `->TransferDraft`, `pt/draft` | only `pt/parse` |
+| Make one | `->DebitDraft`, `pt/draft` | only `pt/parse` |
 | Read a field | `(:amount d)`; a key that isn't a field throws | the same; `pt/let` checks keys when compiling |
 | Change it | `assoc`, keeping the passes of checks that don't read the field | throws: `pt/draft-of`, `assoc`, `pt/parse` again |
 | A sink accepts it | no | yes |
 | Equal to | a draft of its type with the same fields | a value of its type with the same fields; never a plain map |
 
-**Proof is `pt/parsed`, never equality.** Equality compares values, and a `Transfer` built by hand has the same value
+**Proof is `pt/parsed`, never equality.** Equality compares values, and a `Debit` built by hand has the same value
 as one `parse` made. Never decide "was this checked?" with `=`, a set, or a map lookup.
 
-## Example: a transfer between accounts
+## Example: debits and credits
 
 ```clojure
 (require '[parsed-types.core :as pt])
 
-(pt/defparsed Transfer [user-id from-id to-id amount]
+;; debit: take money out of an account the user owns, if it holds enough
+(pt/defparsed Debit [user-id account-id amount]
   (pure ::amount-positive "The amount is a positive decimal."
         [amount]
         (and (decimal? amount) (pos? amount)))
-  (pure ::two-accounts "Money moves between two different accounts."
-        [from-id to-id]
-        (not= from-id to-id))
-  (external ::owns-source "The user owns the source account."
-            [user-id] [source ::source]
-            (= user-id (:owner source)))
-  (fetch ::source [from-id] accounts-by-id))
+  (external ::owns-account "The user owns the account."
+            [user-id] [account ::account]
+            (= user-id (:owner account)))
+  (external ::covers-amount "The account holds the amount."
+            [amount] [account ::account]
+            (<= amount (:balance account 0M)))
+  (fetch ::account [account-id] accounts-by-id))
 
-(defn transfer! [transfer]
-  (pt/let [{:keys [from-id to-id amount]} (pt/parsed Transfer transfer)]
-    (db/move-money! from-id to-id amount)))
+;; credit: put money into any open account
+(pt/defparsed Credit [user-id account-id amount]
+  (pure ::amount-positive "The amount is a positive decimal."
+        [amount]
+        (and (decimal? amount) (pos? amount)))
+  (external ::account-open "The account exists and is open."
+            [] [account ::account]
+            (= :open (:status account)))
+  (fetch ::account [account-id] accounts-by-id))
 
-(defn handle-transfer [{:keys [user-id body]}]
-  (transfer! (pt/parse (pt/draft Transfer {:user-id user-id
-                                           :from-id (:from body)
-                                           :to-id   (:to body)
-                                           :amount  (:amount body)}))))
+;; a transaction is a debit or a credit, and nothing else
+(pt/defsum Transaction [Debit Credit])
+
+(defn transact! [transaction]
+  (pt/match Transaction transaction
+    Debit  debit  (db/add-to-balance! (:account-id debit) (- (:amount debit)))
+    Credit credit (db/add-to-balance! (:account-id credit) (:amount credit))))
+
+(defn handle-debit [{:keys [user-id body]}]
+  (transact! (pt/parse (pt/draft Debit {:user-id    user-id
+                                        :account-id (:account body)
+                                        :amount     (:amount body)}))))
 ```
+
+`defparsed` defines the parsed type `Debit`, its draft `DebitDraft`, and the checks between them. A check's argument
+vector is the fields it reads; using any other field doesn't compile. An external check also binds fetches,
+`[account ::account]`, like `let`. `accounts-by-id` is your lookup, described under the run order below.
+
+`defsum` names a closed set of parsed types. `match` picks the branch for the value's type and binds the value, so
+the branch reads its fields with `(:amount debit)`. A `match` that leaves out a member, or names a type that isn't
+one, doesn't compile. Each branch runs only on a value `parse` made.
 
 Each bug from above now fails:
 
 | Bug | What happens |
 |---|---|
-| A caller skips the checks: `(transfer! {:from-id 1, :to-id 2, :amount 1000M})` | throws a 500: `parse` didn't make it |
-| A caller builds the type by hand: `(transfer! (->Transfer :ada 1 2 1000M))` | throws a 500, for the same reason |
-| A caller changes it after the check: `(assoc transfer :from-id 9)` | throws: a parsed value can't change |
-| The sink reads a field that doesn't exist: `{:keys [fromid]}` | doesn't compile |
-| The handler misspells a field: `{:from (:from body) ...}` | doesn't compile |
-
-`defparsed` defines `Transfer`, its draft `TransferDraft`, and the checks between them. A check's argument vector is
-the fields it reads; using any other field doesn't compile. An external check also binds fetches, `[source ::source]`,
-like `let`.
-
-`pt/parsed` returns its argument if `parse` made it, and throws otherwise. `pt/let` is `let`, plus a compile-time
-check of the keys destructured from `(pt/parsed Type x)`.
+| A caller skips the checks: `(transact! {:account-id 1, :amount 1000M})` | throws a 500: `parse` didn't make it |
+| A caller builds the type by hand: `(transact! (->Debit :ada 1 1000M))` | throws a 500, for the same reason |
+| A caller changes it after the check: `(assoc debit :account-id 9)` | throws: a parsed value can't change |
+| The sink reads a field that doesn't exist: `(:acount-id debit)` | throws: `Debit` has no field `:acount-id` |
+| The handler misspells a field: `{:acount-id (:account body) ...}` | doesn't compile |
+| A new kind of transaction is added to the sum, and `transact!` doesn't handle it | doesn't compile |
 
 ## Parse runs pure checks first, and touches the world only if they all pass
 
@@ -99,12 +115,13 @@ check of the keys destructured from `(pt/parsed Type x)`.
 Malformed input never queries the database. A failure reports every check by name:
 
 ```clojure
-(pt/parse (->TransferDraft :ada 1 1 -5M))
-;; Invalid Transfer
+(pt/parse (->DebitDraft :ada 1 -5M))
+;; Invalid Debit
 {:status-code 400
- :draft       TransferDraft
- :failures    {::amount-positive {:doc "The amount is a positive decimal.", :returned false, :blocked [::owns-source]}
-               ::two-accounts    {:doc "Money moves between two different accounts.", :returned false, :blocked [::owns-source]}}}
+ :draft       DebitDraft
+ :failures    {::amount-positive {:doc     "The amount is a positive decimal."
+                                  :returned false
+                                  :blocked [::owns-account ::covers-amount]}}}
 ```
 
 `:blocked` names the checks that didn't run because of this failure. The status is 400 for a pure check and 403 for
@@ -113,49 +130,34 @@ an external one, unless the check sets `{:status 404}`.
 ## A draft can hold drafts, and one parse covers the whole tree
 
 ```clojure
-(pt/defparsed Payroll [user-id from-id transfers]
-  (children transfers Transfer)
-  (pure ::one-source "Every transfer draws on the payroll's account."
-        [from-id transfers]
-        (every? #(= from-id (:from-id %)) transfers))
-  (pure ::one-payer "Every transfer is made by the payroll's user."
-        [user-id transfers]
-        (every? #(= user-id (:user-id %)) transfers))
-  (pure ::no-repeat-payee "No account is paid twice."
-        [transfers]
-        (= (count transfers) (count (set (map :to-id transfers)))))
-  (external ::covers-total "The account holds the sum of every transfer."
-            [transfers] [source ::source]
-            (<= (reduce + 0M (map :amount transfers)) (:balance source 0M)))
-  (fetch ::source [from-id] accounts-by-id))
+;; a journal entry: transactions by one user whose debits and credits balance
+(pt/defparsed JournalEntry [user-id lines]
+  (children lines Transaction)
+  (pure ::one-user "Every line is made by the entry's user."
+        [user-id lines]
+        (every? #(= user-id (:user-id %)) lines))
+  (pure ::balanced "The debits and the credits add up to the same amount."
+        [lines]
+        (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
+           (reduce + 0M (map :amount (filter #(instance? Credit %) lines))))))
+
+(defn post-entry! [entry]
+  (run! transact! (:lines (pt/parsed JournalEntry entry))))
 ```
 
-`transfers` holds `TransferDraft`s, and `parse` checks the payroll and every transfer in it together:
+`lines` holds `DebitDraft`s and `CreditDraft`s, and `parse` checks the entry and every line in it together:
 
 - **Children first.** A parent check sees each child as a value of its parsed type that passed its pure checks. The
-  value isn't issued yet, so `pt/parsed` refuses it inside the check, and the child's external checks may still fail.
-  When a child fails, the failure appears at its path, `{:transfers {3 {...}}}`, and the parent checks that read it
-  and haven't run yet are held, with `:blocked-by` naming the child.
-- **One query per fetch, not per child.** The 50 transfers' `::source` lookups are one call, with each distinct
-  account id once.
-- **Bottom-up result.** The parsed `Payroll` holds parsed `Transfer`s, so `run-payroll!` can hand each one to
-  `transfer!`.
+  value isn't issued yet, so `pt/parsed` and `match` refuse it inside the check, and the child's external checks may
+  still fail. When a child fails, the failure appears at its path, `{:lines {3 {...}}}`, and the parent checks that
+  read it and haven't run yet are held, with `:blocked-by` naming the child.
+- **One query per fetch, not per child.** The `::account` lookups of 50 debits are one call, with each distinct
+  account id once, and the credits' lookups are one more.
+- **Bottom-up result.** The parsed `JournalEntry` holds parsed `Debit`s and `Credit`s, so `post-entry!` can hand each
+  one to `transact!`.
 
-`(child field Type)` declares a field that holds one draft, or nil.
-
-## A sum is a closed set of parsed types
-
-```clojure
-(pt/defsum Payment [Transfer Payroll])
-
-(defn pay! [payment]
-  (pt/match Payment payment
-    Transfer t (transfer! t)
-    Payroll  p (run-payroll! p)))
-```
-
-A `match` that leaves out a member, or names a type that isn't one, doesn't compile. A sum also works in
-`pt/parsed`, `pt/parsed?`, `pt/let`, and `(children payments Payment)`. `pt/draft` needs a member type, not a sum.
+`(child field Type)` declares a field that holds one draft, or nil. A sum works in `children`, `child`, `pt/parsed`
+and `pt/parsed?`. `pt/draft` needs a member type, not a sum.
 
 ## Edit a draft with `assoc`
 
@@ -164,7 +166,7 @@ that don't read the changed field, so `parse` reruns only what the edit could af
 change a parsed value, go back to a draft:
 
 ```clojure
-(-> transfer pt/draft-of (assoc :amount 45M) pt/parse)
+(-> debit pt/draft-of (assoc :amount 45M) pt/parse)
 ```
 
 ## What it doesn't protect against
