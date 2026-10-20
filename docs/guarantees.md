@@ -56,7 +56,10 @@ and these gaps, are accepted:
 - **Reader syntax.** `#ns.Debit[...]` calls the constructor, so it builds a value without the proof. That fails
   closed: `pt/parsed` refuses it.
 - **Mutable values are refused by a walk of known classes.** It trusts a class's interfaces: a type that implements
-  `IPersistentVector` mutably passes. There is no opt-out for mutable values yet.
+  `IPersistentVector` mutably passes.
+- **`vec` of a Java array can share it.** `(vec a)` of a Java array of 32 or fewer elements is a `PersistentVector`
+  over the array itself, so changing the array changes the parsed value. The walk can't tell it from any other
+  vector without reflection. Use `(into [] a)`, which copies; the message for an array names it. There is no opt-out for mutable values yet.
 - **A sum can be built with its constructor.** A sum is a `deftype`, not a record, so `assoc` and `merge` can't
   make one from another, and `->Sum` is removed. `(parsed_types.core.Sum. 'S members)` still builds one, so every
   use checks the members again: `pt/parsed` and `pt/parsed?` refuse a sum whose members are not distinct
@@ -285,6 +288,15 @@ the class-name claim made only when a `defparsed` loads; a claim without its rol
 `defdraft-type` public; no checks when a `defparsed` loads; parent checks seeing children built with the token; the
 issued root holding children built without it; `empty`
 returning `{}`.
+
+Each of these broken copies, made while fixing the eighth review, fails a test: the library's classes redefined when
+it reloads; the class-name claim checked only when a `defparsed` loads; a sum as a record; a constructor-built sum
+not checked where it is used; pure checks sorted by how many fields they read; a check held only by checks over a
+proper subset of its fields; no check of the order pure checks are written in; a fetch allowed to read a child field;
+metadata allowed on a child field's vector; the walk skipping a shared collection reached deeper; the old recursive
+walk, on a small stack; clocks accepted; `pt/parse` of a value built by hand calling it already parsed; a key that
+isn't a field reported as a change to a parsed value; a type with no fields suggesting `(nil x)`; library fns that
+take any value; a dotted type name allowed; a fn only generated code calls left public.
 
 Each of these broken copies of earlier versions failed a test that is still in the suite: fetches grouped by draft
 type; an external check waiting only on its fetches; a truthy return counted as a pass; a tree fetching after a pure

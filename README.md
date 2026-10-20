@@ -5,7 +5,7 @@ it. Three bugs are easy to write: check one id and use another, forget the check
 So how does a value prove it was checked? This library answers with a parsed type, such as `Debit`, that only `parse`
 can make. The value carries its own proof. A sink such as `transact!` accepts a `Debit`, and refuses a `DebitDraft`,
 a plain map, or a value built by hand. `parse` runs pure checks before it touches the world, and batches every fetch.
-Every mistake throws an error that names the fix.
+Every mistake the library catches throws an error that names the fix.
 
 This is [parse, don't validate](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/) for Clojure,
 enforced at run time.
@@ -83,9 +83,10 @@ flowchart LR
 ```
 
 A check's argument vector names the fields it reads. An `external` check also binds fetches, as in
-`[account ::account]`. A check passes only when it returns exactly `true`. Pure checks run in the order written, and
-a failed one holds every later pure check that shares a field with it. So write a check on fewer fields first:
-`defparsed` refuses a check written before one that reads a proper subset of its fields.
+`[account ::account]`. A check passes only when it returns exactly `true`. Pure checks run in the order written. A
+failed one holds every later pure check that shares a field with it: the held check doesn't run, and the failure's
+`:blocked` names it. So write a check on fewer fields first: `defparsed` refuses a check written before one that
+reads a proper subset of its fields.
 
 `defsum` names a closed set of parsed types. `match` runs a branch only for a value `parse` made. A `match` that
 leaves out a member doesn't compile, so adding a member to the sum breaks every `match` that misses it.
@@ -121,7 +122,7 @@ The parsed type has no `->Debit` factory, and a value built with `(Debit. ...)` 
 Three more rules hold:
 
 - **Fields hold immutable values, all the way down.** `parse` refuses an atom, an array, a `java.util.Date`, a
-  mutable Java collection, or a lazy seq. The message names the fix, such as `(vec s)`. There is no opt-out yet.
+  clock, a mutable Java collection, or a lazy seq. The message names the fix, such as `(vec s)`. There is no opt-out yet.
 - **A walk fails loudly.** `empty` throws, so `clojure.walk` over a parsed value throws instead of dropping the
   proof. Use `(into {} x)` for a plain map.
 - **Types reload like records, and a stale one says what to reload.** Parsed types compare by class, so
@@ -130,13 +131,13 @@ Three more rules hold:
   names what to re-evaluate: the parent `defparsed`, the `defsum`, the namespace a `match` was compiled in, or the
   code that built an old value.
 
-## Parse spends each check once, and touches the world last
+## Parse runs the pure checks first, and touches the world last
 
 1. Pure checks. Malformed input stops here: no fetch or external check runs unless every pure check in the tree
    passed. A pure check should read only its fields. The library refuses field values that can change, such as an
    atom or a clock, but can't stop a pure check from calling the world.
-2. Fetches. Each fetch runs once per declaration, with each distinct tuple once. `parse-all` batches many drafts the
-   same way.
+2. Fetches. Each fetch runs once per declaration, with each distinct tuple once. Two declarations that both declare
+   a fetch named `::account` make two fetch calls, one each. `parse-all` batches many drafts the same way.
 3. External checks.
 
 After `parse`, the proof travels with the value. A sink checks the proof with `pt/parsed` or `match`, and runs no
@@ -179,7 +180,7 @@ A failure reports every check by name. `:blocked` names the checks that didn't r
 - **Children first.** A parent check sees each child after the child's pure checks pass. Inside the check, the child
   has no proof yet, so `pt/parsed` and `match` refuse it.
 - **A failed child holds its parent.** The child's failure appears at its path, `{:lines {0 {...}}}`. A parent check
-  that reads the child is held, with `:blocked-by [[:lines 0]]`.
+  that reads the child is held: it doesn't run, and it is reported with `:blocked-by [[:lines 0]]`.
 - **One query per fetch, not per child.** The `::account` lookups of 50 debits are one call, with each distinct
   account id once. A fetch may not read a child field: read the children in the check itself.
 - **Parsed all the way down.** A parsed `JournalEntry` holds parsed `Debit`s and `Credit`s, ready for `transact!`.
@@ -202,7 +203,7 @@ A person, or an agent, can apply the fix from the message alone.
 | `::not-parsed` | a sink, `match` or `draft-of` got a value `parse` didn't make |
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after; the message says what to reload |
 | `::cannot-change` | code called `assoc`, `dissoc` or `empty` on a parsed value |
-| `::no-field` | code read a key that isn't a field |
+| `::no-field` | code read or changed a key that isn't a field |
 | `::bad-input` | `pt/draft` got no literal map or unknown keys, a field holds a mutable value, or a tree is too big |
 | `::bad-declaration` | a `defparsed` or `match` has an error, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no entry for a tuple |
@@ -231,8 +232,11 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
   with it. The shipped clj-kondo config flags this.
 - **`with-redefs`.** Rebinding a library fn changes what the library checks.
 - **Reader syntax fails closed.** `#bank.Debit[...]` builds a value without the proof, and `pt/parsed` refuses it.
+- **`vec` of a Java array can share it.** `(vec a)` of a Java array of 32 or fewer elements is a vector over the
+  array itself, so changing the array changes the parsed value. `parse` can't tell it from any other vector. Use
+  `(into [] a)`.
 - **`in-ns` can redefine a type.** Code that switches into a namespace can re-evaluate its `defparsed` with other
-  checks. That is how a REPL reload works. Another namespace can't take the name: that throws when it loads.
+  checks. That is how a REPL reload works. Another namespace can't take the name: that throws when it expands.
 - **External checks can go stale.** A balance that passed at `parse` can change later. Parse right before you act.
 
 ## The API is ten names
