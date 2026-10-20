@@ -20,17 +20,15 @@ Clojure that type, and refuses the rest at run time.
 | **Fetch** | A batched lookup that external checks use, called once for many drafts. |
 | **Sink** | A function that acts, such as `transact!`. It accepts only parsed values. |
 
-```
-   ->DebitDraft, pt/draft
-            |
-            v
-     +------------+   pt/parse: every check passes   +----------+
-     | DebitDraft | -------------------------------> |  Debit   | --> sinks: (pt/parsed Debit x)
-     |  (draft)   | <------------------------------- | (parsed) |
-     +------------+           pt/draft-of            +----------+
-       ^        |                                      assoc, dissoc: throw
-       | assoc  | pt/parse: a check fails
-       +--------+ ---> throws {:status-code 400, :failures {...}}
+```mermaid
+flowchart LR
+  code([any code]) -->|"->DebitDraft, pt/draft"| D["DebitDraft<br/>(draft)"]
+  D -->|assoc| D
+  D -->|"pt/parse: every check passes"| P["Debit<br/>(parsed)"]
+  D -->|"pt/parse: a check fails"| F([throws, with every failure])
+  P -->|pt/draft-of| D
+  P -->|"(pt/parsed Debit x)"| S([sinks, such as transact!])
+  P -.->|"assoc, dissoc"| T([throws])
 ```
 
 | | Draft | Parsed value |
