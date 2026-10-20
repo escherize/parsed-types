@@ -45,6 +45,9 @@
            ["a fetch over a field the draft does not have"
             '(pt/defparsed A [a] (fetch ::f [b] identity))
             #"fields of the draft"]
+           ["a fetch that reads a child field"
+            '(pt/defparsed A [a kids] (children kids Point) (fetch ::f [a kids] identity))
+            #"the fetch :parsed-types.defparsed-test/f reads the child field kids\. A fetch runs before the children's external checks"]
            ["a child field that is not a field"
             '(pt/defparsed A [a] (children b A))
             #"child field must be a field"]

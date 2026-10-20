@@ -32,7 +32,7 @@ The README covers how to use the library; this page covers what it promises and 
 | A parsed tree is parsed all the way down, and `draft-of` returns drafts all the way down | When the whole tree passes, `parse` rebuilds it bottom-up with the token, so the issued root holds issued children | `a-check-sees-children-without-the-proof-test`, `parse-matches-the-tree-model`, `draft-of-returns-drafts-all-the-way-down` |
 | Edits to child fields parse like fresh trees | `assoc` on a draft builds a new draft | `edits-to-child-fields-match-the-tree-model` |
 | `match` handles every member of a sum, and only parsed values reach a branch | `match` compares its clauses with the sum when it expands, and runs a branch only when `pt/parsed?` accepts the value | `match-compile-errors-test`, `match-runs-only-on-parsed-members` |
-| A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
+| A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase. A fetch may not read a child field, so no check reaches a child through a fetch | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
 | A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
 | A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and scans its body for the others | `compile-errors-test` |
 | Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
@@ -112,6 +112,9 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
   reserved for the checks on child fields;
 - a check with no doc string or no body;
 - a fetch binding that names no declared fetch, binds a local with a field's name, or binds two fetches to one local;
+- a fetch that reads a child field. Fetches run before the children's external checks, so such a fetch would read
+  children that may still fail them, and a check that binds it would run over them. Read the children in the check
+  itself, as in `(external ::check "doc" [lines] ...)`, and fetch by the parent's own fields;
 - a pure check that binds a fetch;
 - an options map: checks take no options;
 - a field named twice, named `/`, like a special form, with a dot in it, starting with `__`, named `parse-proof`, or compiling

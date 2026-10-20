@@ -776,6 +776,15 @@
                                                       " draft, and a child field must be a field of the draft."
                                                       (did-you-mean field fields) " Name one of " fields ".")))
                                 [(keyword field) {:kind (if (= 'child head) :one :many), :type type}])))
+        _           (doseq [{n :name, :keys [reads]} fetches
+                            :let [kids (filter (set (keys children)) reads)]
+                            :when (seq kids)]
+                      (syntax-error! &form ::rule/fetch-reads-child-field
+                                     (str "the fetch " n " reads the child field " (symbol (first kids)) ". A fetch"
+                                          " runs before the children's external checks, so it would read children"
+                                          " that may fail them. Read the children in the check itself, as in"
+                                          " (external ::check \"doc\" [" (symbol (first kids)) "] ...), and fetch"
+                                          " by the parent's own fields.")))
         child-heads (map second (concat (get by-head 'child) (get by-head 'children)))
         _           (when-not (apply distinct? ::sentinel child-heads)
                       (syntax-error! &form ::rule/child-declared-twice

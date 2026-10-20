@@ -179,7 +179,7 @@ A failure reports every check by name. `:blocked` names the checks that didn't r
 - **A failed child holds its parent.** The child's failure appears at its path, `{:lines {0 {...}}}`. A parent check
   that reads the child is held, with `:blocked-by [[:lines 0]]`.
 - **One query per fetch, not per child.** The `::account` lookups of 50 debits are one call, with each distinct
-  account id once.
+  account id once. A fetch may not read a child field: read the children in the check itself.
 - **Parsed all the way down.** A parsed `JournalEntry` holds parsed `Debit`s and `Credit`s, ready for `transact!`.
 
 ## Every mistake throws an error that names the rule and the fix

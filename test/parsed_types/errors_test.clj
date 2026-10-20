@@ -141,6 +141,9 @@
    [:fetch-name-not-qualified (compiling '(pt/defparsed E1 [a] (fetch :f [a] rows))) "the fetch :f" "::f"]
    [:fetch-bad-fields (compiling '(pt/defparsed E1 [account-id] (fetch ::f [acount-id] rows))) "reads [acount-id]"
     "Did you mean account-id?" "[account-id]"]
+   [:fetch-reads-child-field (compiling '(pt/defparsed E1 [kids] (children kids Debit) (fetch ::f [kids] rows)))
+    "the fetch :parsed-types.errors-test/f reads the child field kids"
+    "Read the children in the check itself, as in (external ::check \"doc\" [kids] ...)"]
    [:fetch-no-fn (compiling '(pt/defparsed E1 [a] (fetch ::f [a]))) "has no function" "rows-by-id"]
    [:child-not-a-field (compiling '(pt/defparsed E1 [kids] (children kid Debit))) "the child field kid is not a field of the draft"
     "Did you mean kids?"]

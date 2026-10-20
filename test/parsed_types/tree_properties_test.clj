@@ -1,7 +1,7 @@
 (ns parsed-types.tree-properties-test
   "Generative tests of tree parsing against a model written by hand: the whole failure map (paths, :returned,
   :blocked-by, :blocked) and the kinds that failed, for random trees with :one and :many children, malformed children, a node
-  that does not read its child, a fetch and checks that read child fields, and edits to child fields."
+  that does not read its child, checks that read child fields, and edits to child fields."
   (:require
    [clojure.set :as set]
    [clojure.test.check.clojure-test :refer [defspec]]
@@ -20,8 +20,8 @@
 (declare views?)
 
 (defn- crate-rows [tuples]
-  (swap! seen conj [::crate-row (mapv first tuples) (every? (fn [[_ boxes]] (views? boxes)) tuples)])
-  (into {} (map (fn [[_ boxes :as t]] [t {:box-count (count boxes)}])) tuples))
+  (swap! seen conj [::crate-row (mapv first tuples)])
+  (into {} (map (fn [[total :as t]] [t {:total total}])) tuples))
 
 (pt/defparsed Leaf [n]
   (pure ::leaf-int "n is an integer." [n] (int? n))
@@ -39,9 +39,9 @@
   (pure ::sum-fits "The leaves add up to at most the total." [total leaves]
         (<= (reduce + 0 (map :n leaves)) total))
   (pure ::boxes-labeled "Every box has a label." [boxes] (every? #(keyword? (:label %)) boxes))
-  (external ::few-boxes "At most 3 boxes." [] [row ::crate-row] (<= (:box-count row) 3))
+  (external ::few-boxes "At most 3 boxes." [boxes] [row ::crate-row] (and (some? row) (<= (count boxes) 3)))
   (external ::views-seen "The checks see children as values, not drafts." [boxes] (views? boxes))
-  (fetch ::crate-row [total boxes] crate-rows))
+  (fetch ::crate-row [total] crate-rows))
 
 (defn- views?
   "Whether `boxes` holds values the checks may read: no draft anywhere in it."
@@ -182,17 +182,22 @@
                                [n e kind ok?] externals
                                :when (not ok?)]
                            [path n e kind])
-            ;; the crate's ::views-seen reads boxes, so it is held when a box, or its item, failed an external check
+            ;; the crate's ::few-boxes and ::views-seen read boxes, so they are held when a box, or its item, failed
+            ;; an external check
             bad-boxes    (filter (fn [bp] (some (fn [[path]] (= bp (take (count bp) path))) ext-failures))
                                  (map (fn [i] [:boxes i]) (range (count (:boxes crate)))))
             held         (when (seq bad-boxes)
-                           [[[] ::views-seen] {:doc        "The checks see children as values, not drafts."
+                           [[[[] ::few-boxes] {:doc        "At most 3 boxes."
                                                :blocked-by (set bad-boxes)
-                                               :blocked    #{}}])]
-        (if (seq ext-failures)
+                                               :blocked    #{}}]
+                            [[[] ::views-seen] {:doc        "The checks see children as values, not drafts."
+                                                :blocked-by (set bad-boxes)
+                                                :blocked    #{}}]])
+            ext-failures (remove (fn [[path n]] (and held (= [] path) (= ::few-boxes n))) ext-failures)]
+        (if (or (seq ext-failures) held)
           {:failed-kinds (into #{} (map #(nth % 3)) ext-failures)
            :failures (into {} (concat (for [[path n e] ext-failures] [[path n] (assoc (entry e) :blocked #{})])
-                                      (when held [held])))}
+                                      held))}
           :ok)))))
 
 ;;; What parse returned, in the model's shape
@@ -272,15 +277,14 @@
           (not (contains? (:failed-kinds expected) :pure))
           (empty? @seen)))))
 
-(defspec fetches-see-checked-values-and-run-once 300
+(defspec each-fetch-runs-once 300
   (prop/for-all [crate gen-any-crate]
     (reset! seen [])
     (parse-outcome crate)
     (let [crate-calls (filter #(= ::crate-row (first %)) @seen)
           leaf-calls  (filter #(= ::leaf-row (first %)) @seen)]
       (and (<= (count crate-calls) 1)
-           (<= (count leaf-calls) 1)
-           (every? #(true? (nth % 2)) crate-calls)))))
+           (<= (count leaf-calls) 1)))))
 
 (def ^:private gen-edit
   "An edit to a crate: a new total, a leaf replaced, a box's item replaced, or a draft-of round trip."
