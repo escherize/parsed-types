@@ -826,27 +826,45 @@
   "nil when `v` is known to be immutable all the way down, else `[path what fix class-name]`: where inside the field
   the first value that is not is, what it is, the fix, and its class. Accepts nil, the values of
   [[immutable-classes]], classes, `java.time` values, values [[parse]] issued, and persistent vectors, maps (records
-  and drafts included), sets, lists and queues whose contents pass, map keys included. Refuses everything else, lazy
-  and other seqs too: realizing one could run side effects or never end."
-  [v path]
-  (let [c       (class v)
-        refuse  (fn [what fix] [path what fix (.getName ^Class c)])]
+  and drafts included), sets, lists and queues whose contents pass, map keys and metadata included. A sorted
+  collection must use the default comparator, since a custom one can read state that changes. Refuses everything
+  else, lazy and other seqs too: realizing one could run side effects or never end.
+
+  `walked` is the identity set of the collections already walked in this parse: each is walked once, so shared
+  structure costs its size, not the number of paths to it."
+  [v path ^java.util.Set walked]
+  (let [c            (class v)
+        refuse       (fn [what fix] [path what fix (.getName ^Class c)])
+        meta-failure (delay (when (and (instance? clojure.lang.IObj v) (some? (meta v)))
+                              (not-immutable (meta v) (conj path '<meta>) walked)))]
     (cond
       (< max-value-depth (count path))           (refuse (str "a value nested deeper than " max-value-depth " levels")
                                                          "Flatten it.")
       (nil? v)                                   nil
+      (and (instance? clojure.lang.IPersistentCollection v)
+           (not (.add walked v)))                nil
+      (some? @meta-failure)                      @meta-failure
       (contains? immutable-classes c)            nil
       (class? v)                                 nil
       (java-time-value? c)                       nil
       (issued? v)                                nil
-      (instance? clojure.lang.IPersistentMap v)  (some (fn [[k x]] (or (not-immutable k (conj path '<key>))
-                                                                       (not-immutable x (conj path k))))
+      (and (instance? clojure.lang.Sorted v)
+           (not (identical? clojure.lang.RT/DEFAULT_COMPARATOR
+                            (.comparator ^clojure.lang.Sorted v)))) (refuse (str "a sorted collection with a custom"
+                                                                                 " comparator, which can read state"
+                                                                                 " that changes")
+                                                                            (str "Use (sorted-map ...) or (sorted-set"
+                                                                                 " ...), which sort with compare, or"
+                                                                                 " a plain map or set."))
+      (instance? clojure.lang.IPersistentMap v)  (some (fn [[k x]] (or (not-immutable k (conj path '<key>) walked)
+                                                                       (not-immutable x (conj path k) walked)))
                                                        v)
       (or (instance? clojure.lang.IPersistentVector v) (list? v)
-          (instance? clojure.lang.PersistentQueue v)) (some (fn [[i x]] (not-immutable x (conj path i)))
+          (instance? clojure.lang.PersistentQueue v)) (some (fn [[i x]] (not-immutable x (conj path i) walked))
                                                             (map-indexed vector v))
-      (instance? clojure.lang.IPersistentSet v)  (some #(not-immutable % (conj path '<element>)) v)
-      (.isArray c)                               (refuse "a Java array" "Copy it into a vector, as in (vec a).")
+      (instance? clojure.lang.IPersistentSet v)  (some #(not-immutable % (conj path '<element>) walked) v)
+      ;; not (vec a): vec of an Object[] of 32 or fewer elements shares the array
+      (.isArray c)                               (refuse "a Java array" "Copy it into a vector, as in (into [] a).")
       (instance? clojure.lang.IAtom v)           (refuse "an atom" "Deref it, as in @a.")
       (instance? clojure.lang.IRef v)            (refuse "a reference type" "Deref it, as in @r.")
       (instance? clojure.lang.Volatile v)        (refuse "a volatile" "Deref it, as in @v.")
@@ -868,23 +886,27 @@
 (defn- refuse-mutable!
   "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable:
   the checks would prove a value the parsed value does not keep. Child fields are not walked, because each child is
-  checked as its own node. There is no opt-out."
-  [draft {:keys [children]} values]
+  checked as its own node. There is no opt-out. `walked` is as for [[not-immutable]]."
+  [draft {:keys [children]} values walked]
   (doseq [[field v] values
           :when       (not (contains? children field))
-          :let        [[path what fix got] (not-immutable v [])]
+          :let        [[path what fix got] (not-immutable v [] walked)]
           :when       what]
-    (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field (when (seq path) (str " at " path))
+    (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field
+                         (when (seq path)
+                           (str " at " (if (< 8 (count path))
+                                         (str (subvec path 0 8) " and " (- (count path) 8) " levels more")
+                                         path)))
                          " holds " what " (" got "). A parsed value holds only values known to be immutable, so what"
                          " its checks proved stays true. " fix)
                     {:type ::bad-input, :rule ::rule/mutable-value, :draft (.getName (class draft)), :field field
                      :path path, :got got}))))
 
-(defn- start [draft]
+(defn- start [draft walked]
   (let [plan   (plan-for draft)
         ;; every field read once, so the checks and the parsed value see the same values
         values ((:read-draft plan) draft)]
-    (refuse-mutable! draft plan values)
+    (refuse-mutable! draft plan values walked)
     {:draft   draft
      :values  values
      :plan    plan
@@ -908,8 +930,9 @@
   (throw (ex-info message (merge {:type ::bad-input, :rule rule, :max-depth max-depth, :max-nodes max-nodes} data))))
 
 (defn- flatten-tree
-  "The drafts of the tree under `root`, children before parents, each with its `:path` from the root."
-  [tree root]
+  "The drafts of the tree under `root`, children before parents, each with its `:path` from the root. `walked` is as
+  for [[not-immutable]]."
+  [tree root walked]
   (loop [stack (list [root [] 1]), pre []]
     (if-let [[draft path depth] (first stack)]
       (let [_    (when (< max-depth depth)
@@ -924,7 +947,7 @@
                                   " drafts, counting a draft each time it appears. A parse is bounded in size. Parse"
                                   " it in smaller parts, as with (pt/parse-all parts).")
                              {}))
-            st   (assoc (start draft) :tree tree :path path)
+            st   (assoc (start draft walked) :tree tree :path path)
             kids (for [[field {:keys [kind type]}] (get-in st [:plan :children])
                        :let  [v (get-in st [:values field])]
                        :when (children-of-type? kind type v)
@@ -1055,7 +1078,8 @@
 (defn- run-all
   "Run the checks of every draft, and of every draft under it, and return one vector of nodes per draft."
   [drafts]
-  (let [nodes        (pure-phase (into [] (comp (map-indexed (fn [i d] (flatten-tree i d))) cat) drafts))
+  (let [walked       (java.util.Collections/newSetFromMap (java.util.IdentityHashMap.))
+        nodes        (pure-phase (into [] (comp (map-indexed (fn [i d] (flatten-tree i d walked))) cat) drafts))
         unproven     (into #{} (comp (filter (comp seq :failed)) (map :tree)) nodes)
         ;; nothing in a tree touches the world until every pure check in it has run and passed
         nodes        (mapv #(assoc % :world? (not (unproven (:tree %)))) nodes)

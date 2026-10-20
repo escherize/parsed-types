@@ -301,7 +301,7 @@
                    " proved stays true. Pass a vector, as in (vec s).")]
              [(int-array 1)
               (str "OtherDraft: the field :title holds a Java array ([I). A parsed value holds only values known to be"
-                   " immutable, so what its checks proved stays true. Copy it into a vector, as in (vec a).")]]]
+                   " immutable, so what its checks proved stays true. Copy it into a vector, as in (into [] a).")]]]
       (is (= message (try (pt/parse (->OtherDraft 1 1 v)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
   (testing "immutable values pass: scalars, java.time values, persistent collections, records and parsed values"
     (doseq [v [nil true \a "s" :k 'sym 1 (int 1) 1.5 1M 1N 1/3 (biginteger 1) (random-uuid) #"re" String
@@ -310,3 +310,47 @@
                [1 [2 #{3}] '(4 5) {:a {:b (java.time.Instant/now)}}] (sorted-map :a 1) clojure.lang.PersistentQueue/EMPTY
                (->Point 1 [2]) (pt/parse (->OtherDraft 1 1 nil))]]
       (is (some? (pt/parse (->OtherDraft 1 1 v))) (pr-str v)))))
+
+(deftest the-array-fix-copies-the-array-test
+  (testing "the fix the message names makes a value the array cannot change"
+    (let [a     (object-array [1 2])
+          fixed (into [] a)
+          p     (pt/parse (->OtherDraft 1 1 fixed))]
+      (aset a 0 :mutated)
+      (is (= [1 2] (:title p)))))
+  (testing "while vec, which the message no longer names, shares a small array"
+    (let [a (object-array [1 2]), v (vec a)]
+      (aset a 0 :mutated)
+      (is (= [:mutated 2] v)))))
+
+(deftest metadata-and-comparators-are-walked-test
+  (testing "metadata is walked like the value it is on"
+    (is (= {:type ::pt/bad-input, :field :title, :path '[<meta> :a], :got "clojure.lang.Atom"}
+           (refusal (with-meta [1] {:a (atom 1)}))))
+    (is (= '[:k <meta> :a] (:path (refusal {:k (with-meta 'sym {:a (atom 1)})}))))
+    (is (some? (pt/parse (->OtherDraft 1 1 (with-meta [1] {:doc "fine"}))))))
+  (testing "a sorted collection must sort with the default comparator"
+    (doseq [v [(sorted-set-by (fn [a b] (compare a b)) 1 2) (sorted-map-by > 1 :a)]]
+      (is (= ::pt/bad-input (:type (refusal v))))
+      (is (re-find #"custom comparator.*Use \(sorted-map \.\.\.\) or \(sorted-set \.\.\.\)"
+                   (try (pt/parse (->OtherDraft 1 1 v)) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))))
+    (is (some? (pt/parse (->OtherDraft 1 1 [(sorted-set 1 2) (sorted-map :a 1)]))))))
+
+(deftest shared-structure-is-walked-once-test
+  (testing "each collection is walked once per parse, so a value with 2^40 paths to its leaf parses fast"
+    (let [shared (reduce (fn [x _] [x x]) 1 (range 40))
+          result (promise)
+          ;; a daemon thread, so a walk that does not finish fails this test and does not hold the JVM open
+          _      (doto (Thread. ^Runnable #(deliver result (some? (pt/parse (->OtherDraft 1 1 shared)))))
+                   (.setDaemon true)
+                   (.start))]
+      (is (true? (deref result 1000 ::timed-out)))))
+  (testing "a mutable value under shared structure is still found"
+    (let [shared (reduce (fn [x _] [x x]) (atom 1) (range 40))]
+      (is (= "clojure.lang.Atom" (:got (refusal shared)))))))
+
+(deftest a-deep-path-is-truncated-in-the-message-test
+  (let [nested (reduce (fn [x _] [x]) (atom 1) (range 20))
+        msg    (try (pt/parse (->OtherDraft 1 1 nested)) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+    (is (re-find #"at \[0 0 0 0 0 0 0 0\] and 12 levels more holds an atom" msg))
+    (is (= 20 (count (:path (refusal nested)))) "the ex-data keeps the whole path")))

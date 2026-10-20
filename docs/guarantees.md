@@ -148,8 +148,12 @@ two are not equal. A parent's pure checks run
   `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`, `Float`, `BigInt`, `Ratio`, and `BigDecimal` and
   `BigInteger` by exact class, since they can be subclassed; classes; final classes of the `java.time` package; values
   `parse` issued; and persistent vectors, maps (records and drafts included), sets, lists and queues whose contents
-  pass. Refused: everything else, including lazy and other seqs, since realizing one could run side effects or never
-  end; pass `(vec ...)`. Nesting deeper than 1000 levels is refused too.
+  pass. Metadata on a value is walked like the value. A sorted map or set must sort with the default comparator: a
+  custom comparator can read state that changes. Refused: everything else, including lazy and other seqs, since
+  realizing one could run side effects or never end; pass `(vec ...)`. For an array the message names
+  `(into [] a)`, since `(vec a)` of an object array of 32 or fewer elements shares the array. Nesting deeper than 1000
+  levels is refused too, and the message shows the first 8 steps of a longer path. Each collection is walked once per
+  parse, by identity, so shared structure costs its size, not the number of paths to it.
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field throws
