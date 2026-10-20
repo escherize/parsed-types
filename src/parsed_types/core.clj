@@ -1256,11 +1256,11 @@
       (instance? ParsedValue v)
       (if (issued? v)
         [:walk []]
-        [:refuse ::rule/unissued-in-field (str "a " (.getSimpleName c) " that pt/parse did not issue")
+        [:refuse ::rule/unissued-in-field (str "a value of " (.getSimpleName c) " that pt/parse did not issue")
          (str "Pass the value pt/parse returns instead, as in " (parse-hint c) ".")])
 
       (instance? DraftValue v)
-      [:refuse ::rule/draft-in-field (str "a draft, a " (.getSimpleName c))
+      [:refuse ::rule/draft-in-field "a draft"
        "Parse it first, as in (pt/parse d), or each of a vector of drafts with (pt/parse-all ds)."]
 
       (and (instance? clojure.lang.Sorted v)

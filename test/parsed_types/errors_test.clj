@@ -169,10 +169,10 @@
     "(pt/parse draft)"]
    [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit {:user-id u, :account-id a, :amount n}))"]
    [:draft-in-field #(pt/parse (pt/draft Credit {:amount [(pt/draft Credit {:amount 1})]}))
-    "CreditDraft: the field :amount at [0] holds a draft, a CreditDraft (parsed_types.errors_test.CreditDraft)"
+    "CreditDraft: the field :amount at [0] holds a draft (parsed_types.errors_test.CreditDraft)"
     "never drafts" "(pt/parse d)" "(pt/parse-all ds)"]
    [:unissued-in-field #(pt/parse (pt/draft Credit {:amount (Credit. 1 nil)}))
-    "CreditDraft: the field :amount holds a Credit that pt/parse did not issue" "carries no proof"
+    "CreditDraft: the field :amount holds a value of Credit that pt/parse did not issue" "carries no proof"
     "(pt/parse (pt/draft Credit {:amount ...}))"]
    [:mutable-value #(pt/parse (pt/draft Debit {:user-id 1, :account-id 2, :amount (atom 1)})) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
