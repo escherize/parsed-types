@@ -23,7 +23,10 @@
   (pure ::b-string "b is a string." [b] (log! ::b-string) (string? b))
   (pure ::c-int "c is an integer." [c] (log! ::c-int) (int? c))
   ;; same fields as ::b-string, so it runs whatever that returns, and must accept any b
-  (pure ::b-short "b has at most 3 characters." [b] (log! ::b-short) (or (<= (count (str b)) 3) {:length (count (str b))}))
+  (pure ::b-short "b has at most 3 characters."
+        [b]
+        (log! ::b-short)
+        (or (<= (count (str b)) 3) {:length (count (str b))}))
   (pure ::a-below-c "a is below c." [a c] (log! ::a-below-c) (< a c))
   (external ::may-use-row "User 1 may use the row for a."
             [user-id] [row ::row]

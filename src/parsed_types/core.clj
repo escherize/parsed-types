@@ -440,7 +440,9 @@
 
   The plan [[parse]] follows is built and checked when the form loads, so every declaration error throws
   `::bad-declaration` then, not at the first parse. Only `defparsed` defines parsed types: the draft type and the
-  parsed type are defined together, so the draft type is the only one that parses to its parsed type."
+  parsed type are defined together, so the draft type is the only one that parses to its parsed type.
+
+  The parsed type has no `->Name` factory: only [[parse]] builds a value of it that [[parsed]] accepts."
   [parsed-name fields & clauses]
   (when-not (simple-symbol? parsed-name)
     (syntax-error! &form "write (defparsed Name [fields] clauses ...), with a symbol for Name."))
@@ -514,8 +516,8 @@
   [draft-class {:keys [checks fetches children]}]
   (doseq [[field {:keys [type]}] children]
     (when-not (or (parsed-type? type) (sum? type))
-      (bad-declaration! draft-class (str "the child field " field " holds " (pr-str type) ", which is not a type defined"
-                                         " with defparsed or a sum defined with defsum. Name one of those.")
+      (bad-declaration! draft-class (str "the child field " field " holds " (pr-str type) ", which is not a type"
+                                         " defined with defparsed or a sum defined with defsum. Name one of those.")
                         {:field field})))
   (doseq [{n :name, :keys [f]} fetches]
     (when-not (fn? f)
@@ -524,9 +526,9 @@
                         {:name n})))
   (doseq [{n :name, :keys [kind f]} checks]
     (when-let [locals (and (= :pure kind) (seq (closed-over-locals f)))]
-      (bad-declaration! draft-class (str "the pure check " n " closes over locals " (mapv symbol locals) ". A pure check"
-                                         " reads only the fields it names. Read the value from a field, or make the"
-                                         " check external.")
+      (bad-declaration! draft-class (str "the pure check " n " closes over locals " (mapv symbol locals) ". A pure"
+                                         " check reads only the fields it names. Read the value from a field, or make"
+                                         " the check external.")
                         {:name n, :locals locals}))))
 
 (defn- children-of-type?
@@ -981,7 +983,8 @@
   x)
 
 (defn draft-of
-  "A draft with the fields of `parsed`, a value [[parse]] issued. Child fields hold drafts of the children. Throws `::not-parsed` for any other value."
+  "A draft with the fields of `parsed`, a value [[parse]] issued. Child fields hold drafts of the children. Throws
+  `::not-parsed` for any other value."
   [parsed]
   (let [plan (when (issued? parsed) (.get registry (class parsed)))]
     (when-not plan
