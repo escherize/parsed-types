@@ -1928,7 +1928,10 @@
   a field you mean to leave empty. For values read at run time, name each field, as in `{:amount (:amount body)}`,
   or call `->NameDraft`.
 
-    (pt/draft Debit {:user-id u, :account-id 1, :amount 30M})"
+    (pt/draft Debit {:user-id u, :account-id 1, :amount 30M})
+
+  The values are evaluated in the order Clojure evaluates the same map literal: as written for up to 8 keys, and in
+  no order the source shows beyond that."
   [parsed-type m]
   (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
         _       (when-not (symbol? parsed-type)
@@ -1971,7 +1974,8 @@
                     " every field, so none is left out by mistake. Write nil for a field you mean to leave"
                     " empty, as in " (first missing) " nil.")
                {:missing (vec missing), :fields flds}))
-    ;; bind in the order written, so the values are evaluated as they read
+    ;; bind in the map's own order, the order Clojure evaluates the same map literal in: as written for up to 8 keys,
+    ;; and the reader's hash order beyond, which the source no longer holds
     (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
       `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
          (new ~dsym ~@(map syms flds))))))

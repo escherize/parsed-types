@@ -529,10 +529,25 @@
 
 (def ^:private order (atom []))
 
+(pt/defparsed Nine [a b c d e f g h i])
+
+(defn- logged [k] (swap! order conj k) k)
+
 (deftest draft-evaluates-a-literal-map-in-the-order-written-test
-  (reset! order [])
-  (pt/draft Point {:y (do (swap! order conj :y) 2), :x (do (swap! order conj :x) 1)})
-  (is (= [:y :x] @order)))
+  (testing "up to 8 keys, in the order written"
+    (reset! order [])
+    (pt/draft Point {:y (do (swap! order conj :y) 2), :x (do (swap! order conj :x) 1)})
+    (is (= [:y :x] @order)))
+  (testing "with more, in the order Clojure evaluates the same map literal, which the reader no longer keeps"
+    (reset! order [])
+    (pt/draft Nine {:i (logged :i) :h (logged :h) :g (logged :g) :f (logged :f) :e (logged :e) :d (logged :d)
+                    :c (logged :c) :b (logged :b) :a (logged :a)})
+    (let [drafted @order]
+      (reset! order [])
+      (is (map? {:i (logged :i) :h (logged :h) :g (logged :g) :f (logged :f) :e (logged :e) :d (logged :d)
+                 :c (logged :c) :b (logged :b) :a (logged :a)}))
+      (is (= @order drafted))
+      (is (not= [:i :h :g :f :e :d :c :b :a] drafted) "so not the order written"))))
 
 ;;; Equality, and the map interfaces
 

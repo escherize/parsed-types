@@ -134,8 +134,9 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
 - a type name with a dot in it, as in `C.D`;
 - a `defparsed` inside another form, such as a `let` or a `when`. Write it at the top level of a namespace, and move
   a local a check or fetch uses into a `def`;
-- a field named twice, named `/`, like a special form, with a dot in it, starting with `__`, named `parse-proof`, or compiling
-  to the same Java name as another field (`a-b` and `a_b`);
+- a field named twice, named `/`, like a special form, with a dot in it, named `__meta`, `__extmap`, `__hash` or
+  `__hasheq`, which `deftype` reserves, named `parse-proof`, or compiling to the same Java name as another field
+  (`a-b` and `a_b`);
 - a field declared as a child twice, or a child field that isn't a field;
 - a pure check written before a pure check that reads a proper subset of its fields. Pure checks run in the order
   written, and a failed one holds every later one that shares a field, so the smaller check goes first. A check that
@@ -207,7 +208,9 @@ two are not equal. A parent's pure checks run
 - **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` takes only a literal map.** It checks the keys when it compiles, so a map built at run time is a
-  compile error. Name each field in place, as in `{:amount (:amount body)}`, or call `->DebitDraft`.
+  compile error. Name each field in place, as in `{:amount (:amount body)}`, or call `->DebitDraft`. Its values are
+  evaluated in the order Clojure evaluates the same map literal: as written for up to 8 keys. The reader makes a
+  hash map of a literal with more, so their order is the hash order, not the order written.
 - **Failed kinds in a tree.** One tree never holds both: its external checks run only when every pure check in it
   passed. `parse-all` can report both, from different drafts.
 - **Exceptions.** An exception thrown by a check or fetch propagates out of `parse` and stops `parse-all` at that
