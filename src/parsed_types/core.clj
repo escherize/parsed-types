@@ -1295,7 +1295,9 @@
   checked as its own node. There is no opt-out. `walked` is as for [[not-immutable]]."
   [draft {:keys [children]} values walked]
   (doseq [[field v] values
-          :when       (and (contains? children field) (instance? clojure.lang.IObj v) (some? (meta v)))]
+          ;; only a vector, the shape a `children` field takes: a list the reader read carries its line, and fails the
+          ;; shape check instead. A draft, the shape a `child` field takes, carries no metadata.
+          :when       (and (= :many (get-in children [field :kind])) (vector? v) (some? (meta v)))]
     (throw (ex-info (str (.getSimpleName (class draft)) ": the child field " field " holds a vector with the metadata "
                          (pr-str (meta v)) ". The parsed value holds a new vector of the parsed children, so the"
                          " metadata would be dropped. Keep the metadata beside the draft, as in {:value x, :meta m},"

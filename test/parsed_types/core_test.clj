@@ -479,3 +479,14 @@
   (testing "while a check that ran and failed holds it"
     (is (= {::sum-under-x {:doc "The lines add up to less than x.", :returned false, :blocked [::x-under-y]}}
            (:failures (thrown-data #(pt/parse (->EntryDraft [(->LineDraft 100)] 5 1))))))))
+
+(deftest a-child-field-of-the-wrong-shape-fails-its-shape-check-test
+  (testing "a quoted list carries the reader's line metadata, and fails the shape check, not the metadata rule"
+    (let [v '(1)]
+      (is (some? (meta v)))
+      (is (= {:doc "lines holds a vector of drafts that parse to Line.", :returned false
+              :blocked [::sum-under-x]}
+             (get-in (thrown-data #(pt/parse (->EntryDraft v 5 6))) [:failures :parsed-types.child/lines])))))
+  (testing "while a vector with metadata is refused, since parse would drop it"
+    (is (= :parsed-types.rule/child-field-metadata
+           (:rule (thrown-data #(pt/parse (->EntryDraft (with-meta [] {:k 1}) 5 6))))))))

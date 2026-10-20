@@ -186,8 +186,9 @@ two are not equal. A parent's pure checks run
 - **Every check runs every time.** `parse` and `parse-all` run every check of every draft in the tree. There is no
   way to run some of them.
 - **Immutable values only.** Every field of every draft in the tree is walked, keys included, except child fields,
-  whose drafts are walked as their own nodes. A child field's vector may carry no metadata: the parsed value holds a
-  new vector of the parsed children, empty ones included, so `parse` refuses metadata it would drop. Accepted: nil; `Boolean`, `Character`, `String`, keywords, symbols,
+  whose drafts are walked as their own nodes. A `children` field's vector may carry no metadata: the parsed value
+  holds a new vector of the parsed children, empty ones included, so `parse` refuses metadata it would drop. A value
+  of another shape, such as a quoted list, which carries the reader's line, fails the shape check instead. Accepted: nil; `Boolean`, `Character`, `String`, keywords, symbols,
   `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`, `Float`, `BigInt`, `Ratio`, and `BigDecimal` and
   `BigInteger` by exact class, since they can be subclassed; classes; final classes of the `java.time` package, but
   not a `java.time.Clock` or `InstantSource`, which reads the time each time it is asked; values
