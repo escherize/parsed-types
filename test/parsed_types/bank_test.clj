@@ -29,7 +29,7 @@
 
 ;;; A transfer
 
-(pt/defdraft TransferDraft -> Transfer [user-id from-id to-id amount]
+(pt/defparsed Transfer [user-id from-id to-id amount]
   (pure ::amount-positive "The amount is a positive decimal."
         [amount]
         (and (decimal? amount) (pos? amount)))
@@ -60,10 +60,10 @@
 (defn- transfer!
   "Move the money. Takes a parsed Transfer and nothing else."
   [transfer]
-  (let [^Transfer t (pt/parsed Transfer transfer)]
+  (pt/let [{:keys [from-id to-id amount]} (pt/parsed Transfer transfer)]
     (swap! accounts #(-> %
-                         (update-in [(.-from-id t) :balance] - (.-amount t))
-                         (update-in [(.-to-id t) :balance] + (.-amount t))))))
+                         (update-in [from-id :balance] - amount)
+                         (update-in [to-id :balance] + amount)))))
 
 (defn- thrown-data [thunk]
   (try (thunk) nil
@@ -71,7 +71,7 @@
 
 (deftest transfer-test
   (testing "a valid transfer parses, and the sink moves the money"
-    (let [t (pt/parse (->TransferDraft :ada 1 2 30M))]
+    (let [t (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 30M}))]
       (is (= {:user-id :ada, :from-id 1, :to-id 2, :amount 30M} t))
       (transfer! t)
       (is (= [70M 40M] (map #(get-in @accounts [% :balance]) [1 2])))))
@@ -100,7 +100,7 @@
 
 ;;; A payroll: one account pays several people, parsed with its transfers in one call
 
-(pt/defdraft PayrollDraft -> Payroll [user-id from-id transfers]
+(pt/defparsed Payroll [user-id from-id transfers]
   (children transfers Transfer)
   (pure ::some-transfers "A payroll pays someone."
         [transfers]
@@ -122,8 +122,8 @@
 (defn- run-payroll!
   "Pay everyone. Each child is already a parsed Transfer, so it goes straight to transfer!."
   [payroll]
-  (let [^Payroll p (pt/parsed Payroll payroll)]
-    (run! transfer! (.-transfers p))))
+  (pt/let [{:keys [transfers]} (pt/parsed Payroll payroll)]
+    (run! transfer! transfers)))
 
 (defn- payroll [& [user-id from-id & pays]]
   (->PayrollDraft user-id from-id (mapv (fn [[to amount]] (->TransferDraft user-id from-id to amount))
@@ -167,7 +167,7 @@
 (deftest edit-a-parsed-payroll-test
   (let [p      (pt/parse (payroll :ada 1  2 10M  3 20M))
         draft  (pt/draft-of p)
-        edited (pt/assoc-field draft :transfers (assoc (:transfers draft) 1 (->TransferDraft :ada 1 3 25M)))]
+        edited (assoc-in draft [:transfers 1] (->TransferDraft :ada 1 3 25M))]
     (testing "draft-of goes back down the tree: the children are drafts again, known to pass"
       (is (every? #(instance? TransferDraft %) (:transfers draft)))
       (is (contains? (pt/passed-checks (first (:transfers draft))) ::amount-positive)))
@@ -177,7 +177,7 @@
 
 ;;; A budget: a tree of one type
 
-(pt/defdraft BudgetDraft -> Budget [name amount parts]
+(pt/defparsed Budget [name amount parts]
   (children parts Budget)
   (pure ::name-not-blank "The name is a non-blank string."
         [name]
@@ -220,13 +220,13 @@
 
 ;;; Grandchildren, and the limits on a tree's size
 
-(pt/defdraft LeafDraft -> Leaf [amount]
+(pt/defparsed Leaf [amount]
   (pure ::amount-int "The amount is an integer." [amount] (int? amount)))
 
-(pt/defdraft MiddleDraft -> Middle [leaf]
+(pt/defparsed Middle [leaf]
   (child leaf Leaf))
 
-(pt/defdraft TopDraft -> Top [middles]
+(pt/defparsed Top [middles]
   (children middles Middle)
   (pure ::leaves-positive "Every leaf's amount is positive."
         [middles]
@@ -239,7 +239,7 @@
                           ::leaves-positive   {:doc "Every leaf's amount is positive.", :blocked-by [[:middles 0]]}}}
            (select-keys (thrown-data #(pt/parse (->TopDraft [(->MiddleDraft (->LeafDraft "x"))]))) [:status-code :failures])))))
 
-(pt/defdraft ChainDraft -> Chain [next]
+(pt/defparsed Chain [next]
   (child next Chain))
 
 (deftest tree-limits-test
@@ -249,3 +249,51 @@
     (is (pt/parsed? Chain (pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 900))))))
   (testing "a draft shared at every level counts each time it appears, so the tree has a size limit"
     (is (= 400 (:status-code (thrown-data #(pt/parse (reduce (fn [b _] (->BudgetDraft "b" 0M [b b])) (->BudgetDraft "b" 0M []) (range 20)))))))))
+
+;;; A sum: a payment is a transfer or a payroll
+
+(pt/defsum Payment [Transfer Payroll])
+
+(defn- pay!
+  "Make any payment. match must handle every member of Payment, or this does not compile."
+  [payment]
+  (pt/match Payment payment
+    Transfer t (transfer! t)
+    Payroll  p (run-payroll! p)))
+
+(pt/defparsed Batch [payments]
+  (children payments Payment)
+  (pure ::some-payments "A batch makes some payment."
+        [payments]
+        (boolean (seq payments))))
+
+(deftest sum-test
+  (testing "match runs the branch for the member, with the value as that type"
+    (pay! (pt/parse (->TransferDraft :ada 1 2 5M)))
+    (pay! (pt/parse (payroll :ada 1  2 5M  3 5M)))
+    (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3]))))
+  (testing "match refuses anything parse did not issue, member type or not"
+    (is (= 500 (:status-code (thrown-data #(pay! (->Transfer :ada 1 2 1000M))))))
+    (is (= 500 (:status-code (thrown-data #(pay! (->TransferDraft :ada 1 2 1M))))))
+    (is (= 500 (:status-code (thrown-data #(pay! (pt/parse (budget "b" 1M)))))))
+    (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3])) "nothing moved"))
+  (testing "parsed and parsed? take a sum"
+    (is (pt/parsed? Payment (pt/parse (->TransferDraft :ada 1 2 1M))))
+    (is (not (pt/parsed? Payment (pt/parse (budget "b" 1M)))))))
+
+(deftest sum-children-test
+  (testing "a child field of a sum type holds drafts of any member, parsed with the parent"
+    (let [b (pt/parse (->BatchDraft [(->TransferDraft :ada 1 2 1M) (payroll :ada 1  3 1M)]))]
+      (is (= [Transfer Payroll] (map class (:payments b))))
+      (is (every? #(pt/parsed? Payment %) (:payments b)))
+      (run! pay! (:payments b))))
+  (testing "a draft of a type outside the sum fails the shape check"
+    (is (= {:parsed-types.child/payments {:doc      "payments holds a vector of drafts that parse to Payment."
+                                          :returned false
+                                          :blocked  [::some-payments]}}
+           (:failures (thrown-data #(pt/parse (->BatchDraft [(budget "b" 1M)]))))))))
+
+(deftest depth-boundary-test
+  (let [chain (fn [levels] (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range (dec levels))))]
+    (is (pt/parsed? Chain (pt/parse (chain 1000))) "1000 levels, counting the root, parse")
+    (is (= 400 (:status-code (thrown-data #(pt/parse (chain 1001))))) "1001 do not")))

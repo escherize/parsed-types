@@ -1,12 +1,13 @@
 (ns hooks.parsed-types
-  "How clj-kondo reads `defdraft`: both types, then every check as the fn it compiles to, so a check that uses a field
+  "How clj-kondo reads `defparsed`: both types, then every check as the fn it compiles to, so a check that uses a field
   it did not name is an unresolved symbol, and one that names a field it does not use is an unused binding.")
 
-(defmacro defdraft [draft-name _arrow parsed-name fields & clauses]
-  (let [decl (symbol (str draft-name "-declaration"))]
+(defmacro defparsed [parsed-name fields & clauses]
+  (let [draft-name (symbol (str parsed-name "Draft"))
+        decl       (symbol (str draft-name "-declaration"))]
     `(do
        (deftype ~parsed-name ~fields)
-       (defrecord ~draft-name ~fields)
+       (deftype ~draft-name ~fields)
        (def ~decl
          [~@(for [[head & args] clauses]
               (case head
@@ -26,3 +27,19 @@
                 (second args)
 
                 nil))]))))
+
+(defmacro match
+  "Each clause as a `let` of its binding to the value, so an unused binding is reported and each type must resolve.
+  Exhaustiveness is checked by the real macro, when compiling."
+  [sum-name x & clauses]
+  (let [v (gensym "v")]
+    `(let [~v ~x]
+       ~sum-name
+       [~@(for [[t b e] (partition 3 clauses)]
+            `(let [~b ~v] ~t ~e))])))
+
+(defmacro defdraft-type
+  "The type, and the declaration expression with the fields in scope."
+  [name fields declaration-expr]
+  `(do (deftype ~name ~fields)
+       (fn [~@fields] ~@fields ~declaration-expr)))

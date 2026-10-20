@@ -14,7 +14,7 @@
 
 (def ^:private writable-card-ids #{1 2})
 
-(pt/defparsed RenameCard [user-id card-id title])
+(pt/defparsed-type RenameCard [user-id card-id title])
 
 (def ^:private rename-card-declaration
   {:parses-to RenameCard
@@ -49,17 +49,15 @@
                          (into {} (map (fn [[id :as t]] [t {:id id, :writable? (contains? writable-card-ids id)}]))
                                arg-tuples))}]})
 
-(defrecord RenameCardDraft [user-id card-id title]
-  pt/Draft
-  (declaration [_] rename-card-declaration))
+(pt/defdraft-type RenameCardDraft [user-id card-id title]
+  rename-card-declaration)
 
-(pt/defparsed Other [user-id card-id title])
+(pt/defparsed-type Other [user-id card-id title])
 
 (def ^:private other-declaration {:parses-to Other, :checks []})
 
-(defrecord OtherDraft [user-id card-id title]
-  pt/Draft
-  (declaration [_] other-declaration))
+(pt/defdraft-type OtherDraft [user-id card-id title]
+  other-declaration)
 
 (defn- thrown-data [thunk]
   (try (thunk) nil
@@ -81,7 +79,9 @@
         (is (= {:user-id 1, :card-id 1, :title "New"} parsed))
         (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
-        (is (nil? (:nope parsed))))
+        (is (= 500 (:status-code (thrown-data #(:nope parsed)))) "a key that is not a field throws")
+        (is (= ::none (get parsed :nope ::none)) "unless a default is given")
+        (is (not (contains? parsed :nope))))
       (testing "it prints with its type"
         (is (= "#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}" (pr-str parsed))))))
   (testing "a failed pure check is a 400 reporting every failure by name, with its doc and what it returned"
@@ -121,15 +121,14 @@
     (testing "parse runs only what is not known to pass; external checks run every time"
       (is (= [[::card [[1]]] ::may-write-card]
              (runs #(pt/parse draft)))))
-    (testing "assoc-field keeps the passes of the checks that do not read the field it writes"
-      (let [renamed (pt/assoc-field draft :title "Newer")]
+    (testing "assoc keeps the passes of the checks that do not read the field it writes"
+      (let [renamed (assoc draft :title "Newer")]
         (is (= #{::card-id-positive} (pt/passed-checks renamed)))
         (is (= [::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
                (runs #(pt/parse renamed))))))
-    (testing "a plain assoc keeps nothing"
-      (is (= #{} (pt/passed-checks (assoc draft :title "Newer")))))
-    (testing "assoc-field refuses a key that is not a field"
-      (is (= 500 (:status-code (thrown-data #(pt/assoc-field draft :titel "x"))))))
+    (testing "assoc refuses a key that is not a field, and dissoc any key"
+      (is (= 500 (:status-code (thrown-data #(assoc draft :titel "x")))))
+      (is (= 500 (:status-code (thrown-data #(dissoc draft :title))))))
     (testing "a failure is not remembered"
       (let [bad (->RenameCardDraft 1 1 " ")]
         (pt/check bad nil)
@@ -144,11 +143,11 @@
       (is (= #{::card-id-positive ::title-not-blank ::title-not-the-card-id} (pt/passed-checks draft))))
     (testing "editing it reruns only the checks that read the field, and the external checks"
       (is (= [::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
-             (runs #(pt/parse (pt/assoc-field draft :title "Newer"))))))
+             (runs #(pt/parse (assoc draft :title "Newer"))))))
     (testing "draft-of refuses anything parse did not issue"
       (is (= 500 (:status-code (thrown-data #(pt/draft-of (->RenameCard 1 1 "New")))))))))
 
-(pt/defparsed Moded [user-id card-id title])
+(pt/defparsed-type Moded [user-id card-id title])
 
 (def ^:private lax-declaration
   {:parses-to Moded
@@ -158,16 +157,15 @@
   {:parses-to Moded
    :checks    [{:name ::strict, :doc "A positive card id.", :kind :pure, :reads [:card-id], :f pos-int?}]})
 
-(defrecord ModedDraft [user-id card-id title]
-  pt/Draft
-  (declaration [_] (if (= :strict user-id) strict-declaration lax-declaration)))
+(pt/defdraft-type ModedDraft [user-id card-id title]
+  (if (= :strict user-id) strict-declaration lax-declaration))
 
 (deftest remembered-passes-belong-to-a-plan-test
   (testing "passes remembered under one declaration are not read under another"
     (let [lax (->ModedDraft :lax -1 "t")]
       (pt/check lax nil)
       (is (= #{::lax} (pt/passed-checks lax)))
-      (let [strict (pt/assoc-field lax :user-id :strict)]
+      (let [strict (assoc lax :user-id :strict)]
         (is (= #{} (pt/passed-checks strict)))
         (is (= 400 (:status-code (thrown-data #(pt/parse strict)))))))))
 
@@ -189,7 +187,7 @@
                                         (->RenameCardDraft 1 3 "b")
                                         (->RenameCardDraft 1 -1 "c")]))))))
 
-(pt/defparsed NotFound [])
+(pt/defparsed-type NotFound [])
 
 (def ^:private not-found-declaration
   {:parses-to NotFound
@@ -199,9 +197,8 @@
                 :status-code 404
                 :f           (fn [] false)}]})
 
-(defrecord NotFoundDraft []
-  pt/Draft
-  (declaration [_] not-found-declaration))
+(pt/defdraft-type NotFoundDraft []
+  not-found-declaration)
 
 (deftest status-code-test
   (is (= 404 (:status-code (thrown-data #(pt/parse (->NotFoundDraft)))))))
@@ -209,12 +206,11 @@
 ;; The declaration under test. Each one is a new map, so each is planned afresh.
 (def ^:private bad-declaration (atom nil))
 
-(pt/defparsed BadParsed [a])
-(pt/defparsed WrongFields [b])
+(pt/defparsed-type BadParsed [a])
+(pt/defparsed-type WrongFields [b])
 
-(defrecord BadDraft [a]
-  pt/Draft
-  (declaration [_] @bad-declaration))
+(pt/defdraft-type BadDraft [a]
+  @bad-declaration)
 
 (deftest declaration-errors-test
   (let [x 1]
@@ -278,19 +274,18 @@
         (reset! bad-declaration decl)
         (is (= 500 (:status-code (thrown-data #(pt/parse (->BadDraft 1))))))))))
 
-(defrecord BadDraft2 [a]
-  pt/Draft
-  (declaration [_] @bad-declaration))
+(pt/defdraft-type BadDraft2 [a]
+  @bad-declaration)
 
 (deftest shared-declaration-test
-  (testing "two draft types may not share one declaration"
+  (testing "two draft types may not share one declaration: the second would parse to a type the first owns"
     (reset! bad-declaration {:parses-to BadParsed, :checks []})
     (pt/parse (->BadDraft 1))
-    (is (re-find #"shares its declaration"
+    (is (re-find #"BadParsed is parsed from another draft type"
                  (ex-message (try (pt/parse (->BadDraft2 1)) (catch clojure.lang.ExceptionInfo e e)))))))
 
-(deftest a-draft-must-be-a-record-test
-  (testing "a type whose fields could change between reads is refused"
+(deftest a-draft-must-be-a-draft-type-test
+  (testing "anything but a type defparsed or defdraft-type made is refused"
     (is (= 500 (:status-code (thrown-data #(pt/parse (reify pt/Draft (declaration [_] rename-card-declaration)))))))))
 
 (deftest parsed-refuses-anything-parse-did-not-issue-test
@@ -319,7 +314,7 @@
       (testing label
         (is (= 500 (:status-code (thrown-data thunk))))))
     (testing "the draft type is a record, and the parse is still the only way to the parsed one"
-      (is (= 500 (:status-code (thrown-data #(pt/assoc-field real :card-id 3))))))))
+      (is (= 500 (:status-code (thrown-data #(assoc real :card-id 3))))))))
 
 (deftest extend-cannot-replace-the-checks-test
   (testing "Clojure refuses to extend a draft to Draft when it implements it inline, so its checks cannot be emptied"
@@ -328,18 +323,16 @@
                             pt/Draft
                             (declaration [_] {:parses-to RenameCard, :checks []}))))))
 
-(pt/defparsed Claimed [a])
+(pt/defparsed-type Claimed [a])
 
 (def ^:private claim-a-declaration {:parses-to Claimed, :checks []})
 (def ^:private claim-b-declaration {:parses-to Claimed, :checks []})
 
-(defrecord ClaimADraft [a]
-  pt/Draft
-  (declaration [_] claim-a-declaration))
+(pt/defdraft-type ClaimADraft [a]
+  claim-a-declaration)
 
-(defrecord ClaimBDraft [a]
-  pt/Draft
-  (declaration [_] claim-b-declaration))
+(pt/defdraft-type ClaimBDraft [a]
+  claim-b-declaration)
 
 (deftest one-draft-type-per-parsed-type-test
   (testing "a second draft type with the same fields may not parse to a type another already parses to"
@@ -347,15 +340,15 @@
     (is (re-find #"Claimed is parsed from another draft type"
                  (ex-message (try (pt/parse (->ClaimBDraft 1)) (catch clojure.lang.ExceptionInfo e e)))))))
 
-(pt/defparsed Honest [a])
+(pt/defparsed-type Honest [a])
 
 (def ^:private lying-declaration
   {:parses-to Honest
    :checks    [{:name ::a-positive, :doc "a is positive.", :kind :pure, :reads [:a], :f (fn [a] (pos-int? a))}]})
 
-;; Claims to be a record, and answers `get` with a value its field does not hold.
+;; Claims to be a draft, and answers `get` with a value its field does not hold.
 (deftype LyingDraft [a]
-  clojure.lang.IRecord
+  parsed_types.core.DraftValue
   clojure.lang.ILookup
   (valAt [_ k] (when (= :a k) -999))
   (valAt [_ k not-found] (if (= :a k) -999 not-found))
@@ -367,7 +360,7 @@
     (let [parsed (pt/parse (->LyingDraft 5))]
       (is (= {:a 5} parsed)))))
 
-(pt/defparsed Closure [a])
+(pt/defparsed-type Closure [a])
 
 (def ^:private fetch-closure-declaration
   {:parses-to Closure
@@ -377,9 +370,8 @@
                 :reads [:a]
                 :f     (let [db {1 :one}] (fn [tuples] (into {} (map (fn [[a :as t]] [t (get db a)])) tuples)))}]})
 
-(defrecord ClosureDraft [a]
-  pt/Draft
-  (declaration [_] fetch-closure-declaration))
+(pt/defdraft-type ClosureDraft [a]
+  fetch-closure-declaration)
 
 (deftest a-fetch-may-close-over-a-local-test
   (testing "a fetch reads the world, so it may hold a database handle; only pure checks must close over nothing"

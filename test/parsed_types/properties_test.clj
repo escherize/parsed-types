@@ -14,7 +14,7 @@
 
 (defn- log! [x] (swap! ran conj x) true)
 
-(pt/defparsed Triple [user-id a b c])
+(pt/defparsed-type Triple [user-id a b c])
 
 (def ^:private triple-declaration
   {:parses-to Triple
@@ -61,9 +61,8 @@
                          (log! [::row arg-tuples])
                          (into {} (map (fn [[a :as t]] [t {:ok? (even? a)}])) arg-tuples))}]})
 
-(defrecord TripleDraft [user-id a b c]
-  pt/Draft
-  (declaration [_] triple-declaration))
+(pt/defdraft-type TripleDraft [user-id a b c]
+  triple-declaration)
 
 (def ^:private fields [:user-id :a :b :c])
 
@@ -97,14 +96,13 @@
 (def ^:private gen-edit
   (gen/one-of
    [(gen/fmap (fn [names] [:check names]) (gen/vector (gen/elements (vec check-names)) 0 3))
-    (gen/fmap (fn [[f v]] [:assoc-field f v]) (gen/tuple (gen/elements fields) gen-value))
     (gen/fmap (fn [[f v]] [:assoc f v]) (gen/tuple (gen/elements fields) gen-value))
     (gen/return [:round-trip])]))
 
 (defn- fresh
   "A draft with the same fields as `draft` and nothing remembered."
   [draft]
-  (map->TripleDraft (into {} draft)))
+  (->TripleDraft (:user-id draft) (:a draft) (:b draft) (:c draft)))
 
 (defn- outcome
   "What `thunk` returned, as a plain value, or the status and failures it threw."
@@ -118,7 +116,6 @@
 (defn- edit [draft [op x y]]
   (case op
     :check       (do (pt/check draft x) draft)
-    :assoc-field (pt/assoc-field draft x y)
     :assoc       (assoc draft x y)
     :round-trip  (try (pt/draft-of (pt/parse draft))
                       (catch clojure.lang.ExceptionInfo _ draft))))
@@ -130,7 +127,7 @@
       (= (outcome #(pt/parse (fresh edited)))
          (outcome #(pt/parse edited))))))
 
-(defspec assoc-field-keeps-only-passes-of-checks-that-do-not-read-the-field 300
+(defspec assoc-keeps-only-passes-of-checks-that-do-not-read-the-field 300
   (prop/for-all [draft gen-draft
                  names (gen/vector (gen/elements (vec check-names)) 0 4)
                  field (gen/elements fields)
@@ -138,7 +135,7 @@
     (pt/check draft names)
     (let [before   (pt/passed-checks draft)
           readers  (into #{} (comp (filter #(some #{field} (:reads %))) (map :name)) (:checks triple-declaration))
-          after    (pt/passed-checks (pt/assoc-field draft field v))]
+          after    (pt/passed-checks (assoc draft field v))]
       (= after (set/difference before readers)))))
 
 (defspec nothing-touches-the-world-until-every-pure-check-passes 300
@@ -252,7 +249,7 @@
 
 ;;; Several declarations in one call, sharing a fetch name with different fetches
 
-(pt/defparsed Pair [mode a])
+(pt/defparsed-type Pair [mode a])
 
 (def ^:private pair-row-declaration
   {:parses-to Pair
@@ -269,9 +266,8 @@
                 :f    (fn [tuples] (into {} (map (fn [[a :as t]] [t {:ok? (and (int? a) (neg? a))}])) tuples))}]})
 
 ;; The declaration varies with a field, and both fetch ::row, differently.
-(defrecord PairDraft [mode a]
-  pt/Draft
-  (declaration [_] (if (= :pos mode) pair-row-declaration pair-other-row-declaration)))
+(pt/defdraft-type PairDraft [mode a]
+  (if (= :pos mode) pair-row-declaration pair-other-row-declaration))
 
 (def ^:private gen-mixed-draft
   (gen/one-of [gen-draft
@@ -279,7 +275,7 @@
 
 (defspec parse-all-agrees-with-parse-across-declarations 300
   (prop/for-all [drafts (gen/vector gen-mixed-draft 0 8)]
-    (let [fresh-any (fn [d] (if (instance? TripleDraft d) (fresh d) (map->PairDraft (into {} d))))
+    (let [fresh-any (fn [d] (if (instance? TripleDraft d) (fresh d) (->PairDraft (:mode d) (:a d))))
           each      (mapv #(outcome (fn [] (pt/parse (fresh-any %)))) drafts)
           all       (outcome #(pt/parse-all (mapv fresh-any drafts)))
           failures  (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
@@ -296,7 +292,7 @@
 
 ;;; A declaration replaced after its passes were remembered
 
-(pt/defparsed Swapped [a])
+(pt/defparsed-type Swapped [a])
 
 (def ^:private int-declaration
   {:parses-to Swapped, :checks [{:name ::s, :doc "a is an integer.", :kind :pure, :reads [:a], :f (fn [a] (int? a))}]})
@@ -306,9 +302,8 @@
 
 (def ^:private current-declaration (atom int-declaration))
 
-(defrecord SwapDraft [a]
-  pt/Draft
-  (declaration [_] @current-declaration))
+(pt/defdraft-type SwapDraft [a]
+  @current-declaration)
 
 (defspec passes-are-not-read-under-a-replaced-declaration 200
   (prop/for-all [a gen/small-integer]
@@ -321,7 +316,7 @@
 
 ;;; Trees: a node holds child nodes, and one parse covers them all
 
-(pt/defparsed Node [v kids])
+(pt/defparsed-type Node [v kids])
 
 (def ^:private node-declaration
   {:parses-to Node
@@ -341,9 +336,8 @@
                 :reads [:v]
                 :f     (fn [tuples] (log! [::v-row tuples]) (into {} (map (fn [[v :as t]] [t {:v v}])) tuples))}]})
 
-(defrecord NodeDraft [v kids]
-  pt/Draft
-  (declaration [_] node-declaration))
+(pt/defdraft-type NodeDraft [v kids]
+  node-declaration)
 
 (def ^:private gen-tree
   (gen/recursive-gen (fn [inner]
@@ -420,8 +414,8 @@
                  edit-v (gen/one-of [gen/small-integer (gen/return nil)])]
     (let [nodes   (vec (nodes-of tree))
           _       (doseq [i picks] (pt/check (nth nodes (mod i (count nodes))) nil))
-          ;; and one edit through assoc-field, on the root
-          edited  (pt/assoc-field tree :v edit-v)]
+          ;; and one edit through assoc, on the root
+          edited  (assoc tree :v edit-v)]
       (and (= (outcome #(pt/parse (fresh-tree tree))) (outcome #(pt/parse tree)))
            (= (outcome #(pt/parse (fresh-tree edited))) (outcome #(pt/parse edited)))))))
 
@@ -433,3 +427,32 @@
                 again  (pt/parse (pt/draft-of parsed))]
             (and (= (map :v (nodes-of parsed)) (map :v (nodes-of again)))
                  (every? #(pt/parsed? Node %) (nodes-of again))))))))
+
+;;; Sums
+
+(pt/defsum TripleOrPair [Triple Pair])
+
+(defn- which [x]
+  (pt/match TripleOrPair x
+    Triple t [:triple (:a t)]
+    Pair   p [:pair (:a p)]))
+
+(def ^:private gen-candidate
+  "A parsed member, a forged member, a draft, or a parsed value of another type."
+  (gen/one-of [(gen/fmap (fn [d] [:parsed d]) gen-valid-draft)
+               (gen/fmap (fn [a] [:parsed (->PairDraft :pos a)]) (gen/fmap inc gen/nat))
+               (gen/fmap (fn [d] [:forged d]) gen-any-draft)
+               (gen/fmap (fn [a] [:draft (->PairDraft :pos a)]) gen/small-integer)
+               (gen/fmap (fn [v] [:other (->NodeDraft v [])]) gen/small-integer)]))
+
+(defspec match-runs-only-on-parsed-members 300
+  (prop/for-all [[kind d] gen-candidate]
+    (let [x      (case kind
+                   :parsed (pt/parse d)
+                   :forged (->Triple (:user-id d) (:a d) (:b d) (:c d))
+                   :draft  d
+                   :other  (try (pt/parse d) (catch clojure.lang.ExceptionInfo _ d)))
+          result (try (which x) (catch clojure.lang.ExceptionInfo e (:status-code (ex-data e))))]
+      (if (= :parsed kind)
+        (= [(if (instance? Triple x) :triple :pair) (:a x)] result)
+        (= 500 result)))))
