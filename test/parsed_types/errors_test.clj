@@ -489,6 +489,24 @@
       (is (= #{} (set/difference private flagged)) "private vars the config does not flag")
       (is (= #{} (set/difference flagged private)) "vars the config flags that are not private vars"))))
 
+(deftest every-test-guarantees-md-cites-exists-test
+  (testing "each test name in the Tested by column, and each `...-test` named elsewhere but the list of namespaces"
+    (let [nss   '[parsed-types.bank-test parsed-types.core-test parsed-types.defparsed-test parsed-types.errors-test
+                  parsed-types.properties-test]
+          _     (run! require nss)
+          doc   (str/replace (slurp (io/file "docs/guarantees.md")) #"(?s)## Tests\n.*?(?=\n## )" "")
+          table (subs doc 0 (str/index-of doc "## Accepted limits"))
+          cited (into (set (for [row  (str/split-lines table)
+                                 :when (str/starts-with? row "| ")
+                                 :let  [cells (str/split row #" \| ")]
+                                 :when (< 2 (count cells))
+                                 [_ n] (re-seq #"`([a-z0-9?!-]+)`" (nth cells 2))]
+                             n))
+                      (map second (re-seq #"`([a-z0-9?!-]+-test)`" doc)))
+          tests (set (for [ns-sym nss, [sym v] (ns-interns ns-sym) :when (:test (meta v))] (str sym)))]
+      (is (< 40 (count cited)))
+      (is (= #{} (set/difference cited tests)) "cited in docs/guarantees.md, but no such test"))))
+
 (deftest suggestions-are-data-too-test
   (is (= :amount (:suggestion (ex-data (try (:amont real) (catch clojure.lang.ExceptionInfo e e))))))
   (is (= :amount (:suggestion (ex-data (try ((compiling '(pt/draft Debit {:user-id 1, :account-id 2, :amont 3}))) nil

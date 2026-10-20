@@ -1,7 +1,6 @@
-# Guarantees, limits and design
+# Guarantees, limits and errors
 
-Every guarantee below is pinned by a named test, and every test was checked against a broken copy of the library.
-The README covers how to use the library; this page covers what it promises and why.
+This page lists what parsed-types promises, the test that pins each promise, its limits, and every error rule. The [README](../README.md) covers how to use the library and why it is built this way.
 
 ## Guarantees
 
@@ -10,75 +9,69 @@ The README covers how to use the library; this page covers what it promises and 
 | `pt/parsed` accepts only values `parse` made | A parsed value has a hidden `parse-proof` field. `parse` sets it to a private token. `pt/parsed` first checks that the value's class is one `defparsed` registered, by identity, then asks the value `(issuedWith token)`, which compares inside the type | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The token never leaves the value | The field is `volatile-mutable`, which Clojure compiles to a non-public field that interop can't read, and nothing sets it after the constructor. No public method returns it. A hand-written class is refused before it is asked, so it never sees the token | `the-proof-never-leaves-the-value-test` |
 | A hand-written type is refused, even with the same name | `pt/parsed` requires the class `defparsed` registered, by identity | `a-hand-written-class-with-the-same-name-is-refused-test` |
-| A `defparsed` can't redefine another's classes | Each class name is claimed with its role, parsed or draft, by the namespace, as written, whose `defparsed` first defined it. A `defparsed` whose classes would take a name claimed by another namespace (`my_app.bank` for `my-app.bank`), or a name in the other role (a type `FooDraft` beside `Foo`'s draft), throws `::bad-declaration` when it expands and again when it loads, before its `deftype`s, so it defines no class | `a-class-name-belongs-to-one-namespace-test`, `a-class-name-has-one-role-test` |
-| A parsed value can't be built by accident | `defparsed` removes the parsed type's `->Name` factory, so `(->Debit ...)` doesn't compile. `(Debit. a b c nil)` compiles, and `pt/parsed` refuses it | `the-positional-factory-is-removed-test`, `parsed-refuses-anything-parse-did-not-issue-test` |
+| A `defparsed` can't redefine another's classes | Each class name is claimed with its role, parsed or draft, by the namespace whose `defparsed` first defined it. A `defparsed` whose classes would take a name claimed by another namespace (`my_app.bank` for `my-app.bank`), or a name in the other role (a type `FooDraft` beside `Foo`'s draft), throws `::bad-declaration` before its `deftype`s | `a-class-name-belongs-to-one-namespace-test`, `a-class-name-has-one-role-test` |
+| Neither type has a positional constructor fn | `defparsed` removes `->Name` and `->NameDraft`. `pt/draft` builds a draft from a literal map that names every field, so reordering a type's fields swaps no value. `(Debit. ...)` compiles, and `pt/parsed` refuses what it builds | `the-positional-factories-are-removed-test`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The proof is not part of the map | `parse-proof` isn't a key, and isn't in `seq`, `count`, equality, hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
-| A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type, and a class name belongs to the namespace that first defined it. `defparsed-type` and `defdraft-type` are private, so calling them doesn't compile, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
-| A declaration error is found when the `defparsed` loads, at the latest | The macro refuses what it can see when it expands. The expansion builds and checks the plan when it loads, and throws `::bad-declaration` then | `compile-errors-test`, `declaration-errors-at-load-test` |
-| A `defparsed` that fails when it loads changes nothing | The expansion is a top-level `do`, which runs each form before it compiles the next. Its first form evaluates the fetch fns and the child types and checks them, before any class is defined. So a refused re-evaluation leaves the classes, the `->NameDraft` factory and the plan as they were | `declaration-errors-at-load-test` |
-| A type whose `defparsed` stopped after its `deftype`s says so | An error after the `deftype`s, such as a check body that doesn't compile, leaves classes that are claimed but have no plan. `parse`, `parsed`, `parsed?`, `pt/draft`, `match`, `defsum` and child fields throw `::bad-declaration` with the rule `type-not-loaded` for them, and say to fix the error and re-evaluate the `defparsed` | `declaration-errors-at-load-test` |
-| `defparsed` works only at the top level, and says so | Inside a `let`, a `when` or any other form, the whole form compiles before any of it runs, so the classes would exist before the checks that guard them. `defparsed` throws `::bad-declaration` when it has locals (`&env`) or compiles inside a fn body (`Compiler/METHOD` is bound) | `defparsed-only-at-the-top-level-test` |
+| A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type. `defparsed-type` and `defdraft-type` are private, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
+| A declaration error is found when the `defparsed` loads, at the latest, and a refused one changes nothing | The macro refuses what it can see when it expands. The expansion is a top-level `do`, which runs each form before it compiles the next; its first form checks the fetch fns before any class is defined | `compile-errors-test`, `declaration-errors-at-load-test` |
+| A type whose `defparsed` stopped after its `deftype`s says so | Its classes are claimed but have no plan, so every use of them throws `type-not-loaded`, saying to fix the error and re-evaluate the `defparsed` | `declaration-errors-at-load-test` |
+| `defparsed` works only at the top level, and says so | Inside another form, the whole form compiles before any of it runs, so the classes would exist before the checks that guard them. `defparsed` throws when it has locals (`&env`) or compiles inside a fn body (`Compiler/METHOD` is bound) | `defparsed-only-at-the-top-level-test` |
 | A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
-| A parsed value holds only immutable values | `parse` walks every field of every draft in the tree, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test`, `a-mutable-value-in-a-child-is-refused-test` |
+| A parsed value holds only immutable values | `parse` walks every field of the draft, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test` |
+| A field holds parsed values, never drafts | The walk refuses a draft anywhere in a field (`draft-in-field`), since no check of this parse looks inside it, and a value of a parsed type that `parse` did not issue (`unissued-in-field`) | `a-field-holds-parsed-values-not-drafts-test` |
+| An issued value in a field is not walked again | It proved its own checks and holds only immutable values, so the walk stops at it | `an-issued-value-in-a-field-is-not-walked-again-test` |
 | A clock is refused, though its class is a final `java.time` class | `java.time.Clock` and `InstantSource` values are refused before the `java.time` rule | `a-clock-is-refused-test` |
-| The immutability walk can't overflow the stack, or skip the depth limit through shared structure | The walk keeps an explicit stack, and records the height of each collection it walked: the most levels below it. One reached again is skipped when its deepest value is still within the limit from there, and walked again otherwise | `the-walk-keeps-its-own-stack-test`, `shared-structure-is-walked-again-when-reached-deeper-test` |
-| The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test` |
+| The walk can't overflow the stack, or skip the depth limit through shared structure | The walk keeps an explicit stack, and records the height of each collection it walked: the most levels below it, a leaf inside counting one. One reached again is skipped when its deepest value is still within the limit from there, and walked again otherwise | `the-walk-keeps-its-own-stack-test`, `shared-structure-is-walked-again-when-reached-deeper-test`, `a-shared-collection-of-leaves-counts-its-leaves-test` |
+| The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test`, `a-shared-collection-of-leaves-is-walked-once-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator, the default methods included, throw `::cannot-change`. So do the mutators of `keySet`, `values` and `entrySet`, of their iterators, and `setValue` on an entry of `entrySet` | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `java-map-interface-test`, `every-java-map-mutator-throws-ex-info-test` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `java-map-interface-test` |
-| A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `draft-test` |
+| A misspelled key fails, never reads `nil` | Drafts and parsed values have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `draft-test` |
 | A field may be named like any `clojure.core` function | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
-| The checks see the values that are issued | Each field is read once, from the type's own Java field, by a fn `defparsed` generates. The issued value holds the same field values the checks saw | `parse-matches-the-tree-model` |
-| `parse` reports exactly what the declaration says | | `parse-matches-the-model`, `parse-matches-the-tree-model`: each against a model written by hand, down to every path, `:blocked-by`, `:blocked` and `:failed-kinds` |
-| Pure checks run in the order written, and a failure holds the later checks on its fields | After the shape checks of the child fields, each pure check runs in its written place, held when a pure check before it that shares a field ran and failed. A held check didn't run, so it holds nothing and lists nothing under `:blocked`. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `a-held-check-holds-nothing-test`, `parse-matches-the-model`, `parse-matches-the-tree-model` |
-| Malformed input never reaches a fetch or an external check, anywhere in a tree | Fetches and external checks wait on every pure check in the tree | `nothing-touches-the-world-until-every-pure-check-passes`, `nothing-in-a-failing-tree-fetches` |
-| Each fetch runs once per declaration, with each tuple once, and answers every tuple | Tuples gathered across the call and deduplicated; a missing answer throws `::bad-fetch` | `parse-all-fetches-once-with-each-distinct-tuple`, `fetches-see-checked-values-and-run-once`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
-| `parse-all` agrees with `parse` | Fetches grouped by declaration | `parse-all-agrees-with-parse-across-declarations`, `parse-all-agrees-with-parse-on-trees` |
-| Inside a check, no child is parsed | While a tree is checked, a parent's checks see each child as a value built without the token, so `pt/parsed` and `match` refuse it | `a-check-sees-children-without-the-proof-test` |
-| A parsed tree is parsed all the way down, and `draft-of` returns drafts all the way down | When the whole tree passes, `parse` rebuilds it bottom-up with the token, so the issued root holds issued children | `a-check-sees-children-without-the-proof-test`, `parse-matches-the-tree-model`, `draft-of-returns-drafts-all-the-way-down` |
-| Edits to child fields parse like fresh trees | `assoc` on a draft builds a new draft | `edits-to-child-fields-match-the-tree-model` |
-| `match` handles every member of a sum, and only parsed values reach a branch | `match` compares its clauses with the sum when it expands, and runs a branch only when `pt/parsed?` accepts the value | `match-compile-errors-test`, `match-runs-only-on-parsed-members` |
-| A parent check never runs over children that failed, in either phase | Pure and external checks that read a child field are held, with `:blocked-by`, when anything under that field failed in the same phase. A fetch may not read a child field, so no check reaches a child through a fetch | `a-failed-grandchild-holds-the-grandparent-test`, `a-child-external-failure-holds-the-parent-test`, `parse-matches-the-tree-model` |
-| A deep or huge tree is refused with `::bad-input`, not a crash | The tree is walked with an explicit stack; at most 1000 levels counting the root, and 100,000 drafts counting repeats | `tree-limits-test`, `depth-boundary-test`, `node-limit-boundary-test` |
-| A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and refuses any symbol in its body equal to a field the argument vector doesn't name, quoted or bound as a local too. When the symbol also resolves to a var, the message offers both fixes: add the field to the argument vector, or write the var's qualified name. Otherwise it offers the argument vector, or renaming the local. Each fix compiles and passes | `compile-errors-test`, `every-suggested-fix-applies-test` |
-| Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `suggestions-are-data-too-test` |
-| Only types `defparsed` defined count as types | `pt/parsed`, `pt/parsed?`, `defsum` and child fields accept a class only when `defparsed` registered it, by identity. A class that only implements `ParsedValue` is refused with `::bad-input` | `the-type-argument-is-checked-test`, `only-sum-builds-a-sum-test` |
+| A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on each library interface print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
+| `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to every `:blocked` and `:failed-kinds` |
+| Pure checks run in the order written, and a failure holds the later checks on its fields | Each pure check runs in its written place, held when a pure check before it that shares a field ran and failed. A held check didn't run, so it holds nothing and lists nothing under `:blocked`. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `a-held-check-holds-nothing-test`, `parse-matches-the-model` |
+| Malformed input never reaches a fetch or an external check | A draft that failed a pure check fetches nothing, and its external checks are held | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test` |
+| Each fetch runs once per declaration, with each tuple once, and answers every tuple | `parse-all` gathers the tuples of every draft in the call, per declaration and fetch, and deduplicates them; a missing answer throws `::bad-fetch`. So a parent built from `(pt/parse-all parts)` costs one call per fetch, not one per part | `parse-all-fetches-once-with-each-distinct-tuple`, `batching-test`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
+| `parse-all` agrees with `parse` | Each draft's checks see only that draft | `parse-all-agrees-with-parse`, `parse-all-agrees-with-parse-across-declarations` |
+| A fetch may be a var | A var that holds a fn passes the load-time check and is called through, so `with-redefs` on it reaches the fetch | `a-fetch-may-be-a-var-test` |
+| `match` handles every member of a sum, and only parsed values reach a branch | `match` compares its clauses with the sum when it expands, and runs a branch only when the value is one `parse` issued, of that member's class | `match-compile-errors-test`, `match-runs-only-on-parsed-members` |
+| A check reads only the fields it names | `defparsed` compiles each check as a fn of its named fields, and refuses any symbol in its body equal to a field the argument vector doesn't name, quoted or bound as a local too. For a symbol that also names a var, as `count` does, the message offers both fixes: add the field, or write `clojure.core/count` | `compile-errors-test`, `every-suggested-fix-applies-test` |
+| Every error names what happened, the rule it broke and the fix | Each `ex-info` carries a `:rule` in `parsed-types.rule` next to `:type`, and its message holds the values, the rule and the fix as code. A misspelled key suggests the nearest field | `every-error-names-what-happened-the-rule-and-the-fix-test`, `every-rule-has-an-example-test`, `every-throw-names-a-rule-test`, `no-other-throws-test`, `suggestions-are-data-too-test` |
+| Only types `defparsed` defined count as types | `pt/parsed`, `pt/parsed?` and `defsum` accept a class only when `defparsed` registered it, by identity. A class that only implements `ParsedValue` is refused with `::bad-input` | `the-type-argument-is-checked-test`, `only-sum-builds-a-sum-test` |
 | A sum is built only from distinct parsed types | A sum isn't a map, so `assoc` can't change one. Every use checks its members, so one built with its constructor is checked too. Sums are equal when their names and members are | `only-sum-builds-a-sum-test` |
 | Reloading the library keeps every type and value defined before | The token is a `defonce`, and `ParsedValue`, `DraftValue` and `Sum` are defined only when they are not loaded yet | `reloading-the-library-keeps-every-type-test` |
-| Types compare by class, like records, and a stale class says what to re-evaluate | `pt/parsed`, `parsed?`, sums, a child field's shape check and `match` compare classes by identity. Where the class differs but the name matches, they throw `::stale-type`, naming the parent `defparsed` and its namespace, the `defsum`, the namespace a `match` was compiled in, or the code that built the old value | `re-evaluating-a-child-type-test`, `re-evaluating-a-member-of-a-sum-test`, `every-error-names-what-happened-the-rule-and-the-fix-test` |
+| Types compare by class, like records, and a stale class says what to re-evaluate | `pt/parsed`, `parsed?`, sums and `match` compare classes by identity. Where the class differs but the name matches, they throw `::stale-type`, naming the `defsum`, the namespace a `match` was compiled in, or the code that built the old value | `re-evaluating-a-type-test`, `re-evaluating-a-member-of-a-sum-test`, `every-reload-command-applies-test` |
+| The public API is ten names | Every fn that only generated code calls is private | `the-public-api-is-what-users-call-test` |
 
 ## Accepted limits
 
 The proof makes a parsed value impossible to build by accident, and hard to forge by mistake. These ways around it,
 and these gaps, are accepted:
 
-- **Reflection can forge.** `setAccessible` reads or writes any field, the proof field included.
-- **Any private var of `parsed-types.core`.** Code can name the private token as `@#'parsed-types.core/parse-token`
-  and pass it to the constructor. Any other private var forges as well: `#'pt/issue-tree` issues a hand-made tree,
-  `#'pt/registry` takes a hand-made plan, and `#'pt/register!` records one. `ns-resolve`, `ns-interns` and
-  `find-var` reach them without naming them. The clj-kondo config this library ships flags every private var named
-  outside `parsed-types.core`, by `#'` or `var`; it can't see `ns-resolve`, `ns-interns` or `find-var`.
+- **Reflection can forge:** `setAccessible` reaches the proof field.
+- **Any private var of `parsed-types.core` can forge.** Code can name the private token as
+  `@#'parsed-types.core/parse-token` and pass it to the constructor. `#'pt/issue` issues a value from any fields,
+  and `#'pt/register!` records a hand-made plan. `ns-resolve`, `ns-interns` and `find-var` reach them without naming
+  them. The clj-kondo config this library ships flags every private var named outside `parsed-types.core`, by `#'`
+  or `var`; it can't see `ns-resolve`, `ns-interns` or `find-var`.
 - **`with-redefs` on library fns.** Rebinding `pt/parsed?` or a private fn changes what the library checks.
-- **Reader syntax.** `#ns.Debit[...]` calls the constructor, so it builds a value without the proof. That fails
-  closed: `pt/parsed` refuses it.
-- **Mutable values are refused by a walk of known classes.** It trusts a class's interfaces: a type that implements
-  `IPersistentVector` mutably passes.
-- **`vec` of a Java array can share it.** `(vec a)` of a Java array of 32 or fewer elements is a `PersistentVector`
-  over the array itself, so changing the array changes the parsed value. The walk can't tell it from any other
-  vector without reflection. Use `(into [] a)`, which copies; the message for an array names it. There is no opt-out for mutable values yet.
-- **A sum can be built with its constructor.** A sum is a `deftype`, not a record, so `assoc` and `merge` can't
-  make one from another, and `->Sum` is removed. `(parsed_types.core.Sum. 'S members)` still builds one, so every
-  use checks the members again: `pt/parsed` and `pt/parsed?` refuse a sum whose members are not distinct
-  parsed types. A sum built that way with real members is the same as one `defsum` builds.
-- **`in-ns` can redefine a namespace's types.** Code that switches into a namespace with `in-ns` and runs a
-  `defparsed` there redefines its types, with whatever checks it writes, the same way a REPL reload does.
-- **Replaced classes are never released.** Each re-evaluation of a `defparsed` defines two new classes, and the
-  registry's plan and the `print-method` entry keep the old ones, with their plans, for the life of the JVM. Only a
-  REPL re-evaluates, so only a REPL session grows, by a few classes per re-evaluation.
+- **Reader syntax fails closed.** `#ns.Debit[...]` calls the constructor, so it builds a value without the proof.
+  `pt/parsed` refuses it.
+- **The walk trusts a class's interfaces.** A type that implements `IPersistentVector` mutably passes.
+- **`vec` of a Java array can share it.** `(vec a)` of 32 or fewer elements wraps the array itself, and the walk
+  can't tell that vector from another. Use `(into [] a)`, which copies; the message for an array names it.
+- **A sum can be built with its constructor.** `(parsed_types.core.Sum. 'S members)` builds one, so every use
+  checks the members again. One built that way with real members is the same as one `defsum` builds.
+- **`in-ns` can redefine a namespace's types**, with whatever checks it writes, as a REPL reload does.
+- **Replaced classes are never released.** The registry keeps each class a REPL re-evaluation replaces, with its
+  plan, so a REPL session grows by two classes per re-evaluation.
+- **A pure check can call the world.** The library can't stop its body from calling a database.
 - **External checks can go stale.** An external check reads the world at the moment of `parse`. A balance that
   passed can change later, so parse right before you act.
-
-Reading the token from a real value is no longer possible without reflection.
+- **An external check gets nil when a fetch found nothing.** A fetch returns nil for a tuple with no row, and every
+  external check bound to that fetch gets the nil. Guard it, as in `(some? row)` in its own check, and
+  `(:balance account 0M)` in the others.
 
 ## Errors
 
@@ -92,134 +85,157 @@ Expected a parsed Debit, got a DebitDraft, which is not checked yet. A sink take
 pt/parse on it first, as in (pt/parse draft), and pass the result.
 ```
 
-The ex-data holds the same facts as data, so no information is in the prose alone. When a key is not a field, the
-message suggests the nearest field within a couple of edits, as in `Did you mean :account-id?`, and `:suggestion`
-holds it. `errors-test` has one example of every rule, and fails when `core.clj` has a rule with no example, an `ex-info`
-without a `:rule`, or a `throw` of anything but an `ex-info`.
+The ex-data holds the same facts as data. When a key is not a field, the message suggests the nearest field, as in
+`Did you mean :account-id?`, and `:suggestion` holds it. Where a fix builds a value, it names `pt/draft` with the type's own fields, as in
+`(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))`. `parsed-types.errors-test` has an example of every
+rule, and fails when `core.clj` has a rule with no example, an `ex-info` without a `:rule`, or a `throw` of anything
+but an `ex-info`. Class names in ex-data are strings, so ex-data can be serialized.
 
 | `:type` | Thrown when | Other ex-data |
 |---|---|---|
-| `::invalid` | `parse` or `parse-all` ran the checks and some failed. The message names the first five failed checks with their docs | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
-| `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue. The rule says which: nil, a plain map, a draft of the type, an unchecked value of the type, or a value of another type | `:expected`, `:got` |
-| `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed`. The rule says which, and the message what to re-evaluate (see "REPL reloads") | `:class`, and `:ns`, `:field` or `:parent` where they apply |
-| `::cannot-change` | `assoc`, `dissoc`, `with-meta` and the like on a parsed value, `dissoc` or `with-meta` on a draft, `empty` on either, or a `java.util.Map` mutator on either: `put`, `putAll`, `remove`, `clear`, `replaceAll`, `compute`, `computeIfAbsent`, `computeIfPresent`, `merge`, `putIfAbsent` and `replace`, and the mutators of the `keySet`, `values` and `entrySet` views, of their iterators, and of their entries. `ex-info` is a `RuntimeException`, as `UnsupportedOperationException` is, so Java callers still get an unchecked throw, but not that class. The entries of `seq` and of the map's own `iterator` are `clojure.lang.MapEntry`, whose `setValue` throws `UnsupportedOperationException`, as the iterator's `remove` does | `:parsed` or `:draft`, `:op`, `:key` |
-| `::no-field` | reading a key that isn't a field, or changing one on a draft or a parsed value: a key that isn't a field is reported before the change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
-| `::bad-input` | a field's value nests deeper than 1000 levels (`value-too-deep`, with `:path` cut to its first 8 steps and `:depth`), `pt/parse-all` got a single draft, a map or something that is not sequential, `pt/parsed` or `pt/parsed?` got a type argument that is not a parsed type or a sum, `conj` got a vector that is not a `[key value]` pair, `pt/draft` got anything but a literal map that names every field and only fields (found when it compiles), `parse`, `parse-all` or `pt/declaration` got something that isn't a draft of a type `defparsed` defined (the message and `:fn` name the fn, and the fix calls it), a field holds a value not known to be immutable, or a tree is over the limits | depends on the cause; `:draft`, `:field`, `:path`, `:got` for a mutable value |
-| `::bad-declaration` | a declaration error, when `defparsed` expands or loads, or a type whose `defparsed` stopped after its `deftype`s (`type-not-loaded`) | `:draft` when found at load; `:class` and `:ns` for `type-not-loaded` |
-| `::bad-fetch` | a fetch returned no entry for some tuples | `:fetch`, `:missing` |
+| `::invalid` | `parse` or `parse-all` ran the checks and some failed. The message names the first five failed checks with their docs, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:failures`, `:failed-kinds`, and `:draft` from `parse` |
+| `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
+| `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed` | `:class`, and `:ns` where it applies |
+| `::cannot-change` | a change to a parsed value, a `dissoc`, `with-meta` or `empty` on a draft, or a `java.util.Map` mutator on either | `:parsed` or `:draft`, `:op`, `:key` |
+| `::no-field` | reading a key that isn't a field without a default, or changing one. A key that isn't a field is reported before a change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
+| `::bad-input` | a field holds a value that is not known to be immutable, a draft, or an unissued value; `pt/draft` got the wrong keys or no literal map; a library fn got the wrong kind of argument | `:draft`, `:field`, `:path`, `:got` for a field's value |
+| `::bad-declaration` | a declaration error, when `defparsed`, `defsum` or `match` expands or loads, or a type whose `defparsed` stopped after its `deftype`s | `:draft` when found at load; `:class` and `:ns` for `type-not-loaded` |
+| `::bad-fetch` | a fetch returned no entry for some tuples, or no map | `:fetch`, `:missing` |
 
-Class names in ex-data are strings, so ex-data can be serialized. For `::invalid`:
+For `::invalid`:
 
-- `:failures` is shaped like the tree: the root's checks at the top, and each child's under its field (and index,
-  for `children`). From `parse-all`, it maps the index of each draft that failed to its failures.
-- `:failed-kinds` is a set of `:pure` and `:external`: the kinds of check that returned a failure anywhere in the
-  call. A pure failure means the input is malformed. An external one means a check of the world refused it. A caller
-  can map each kind to its own error codes.
+- `:failures` maps each failed or held check's name to `{:doc :returned :blocked}`. `:returned` is what the check
+  returned; a held check has none. `:blocked` lists the checks a failure held. From `parse-all`, `:failures` maps
+  the index of each draft that failed to its failures.
+- `:failed-kinds` is a set of `:pure` and `:external`: the kinds of check that returned a failure. A pure failure
+  means the input is malformed. An external one means a check of the world refused it.
 - `:draft` is the name of the draft's class.
 
-## Errors caught when compiling
+### Every rule
 
-`defparsed` refuses:
+Each rule below has an example in `parsed-types.errors-test`, with the values and the fix its message must hold.
 
-- a check that reads a field the draft doesn't have, or names one twice;
-- a check whose body holds a symbol equal to a field its argument vector doesn't name. The rule is syntactic: a
-  quoted symbol or a local with a field's name counts too. When the symbol also resolves to a var, as `count` does to
-  `clojure.core/count`, the message says to add the field to the argument vector if you meant the field, or to write
-  `clojure.core/count` if you meant the function. Otherwise it says to add the field, or to rename the local, as in
-  `count-value`;
-- a check or fetch name that isn't a qualified keyword, is used twice, or is in `parsed-types.child`, which is
-  reserved for the checks on child fields;
-- a check with no doc string or no body;
-- a fetch binding that names no declared fetch, binds a local with a field's name, or binds two fetches to one local;
-- a fetch that reads a child field. Fetches run before the children's external checks, so such a fetch would read
-  children that may still fail them, and a check that binds it would run over them. Read the children in the check
-  itself, as in `(external ::check "doc" [lines] ...)`, and fetch by the parent's own fields;
-- a pure check that binds a fetch;
-- an options map: checks take no options;
-- a type name with a dot in it, as in `C.D`;
-- a `defparsed` inside another form, such as a `let` or a `when`. Write it at the top level of a namespace, and move
-  a local a check or fetch uses into a `def`;
-- a field named twice, named `/`, like a special form, with a dot in it, named `__meta`, `__extmap`, `__hash` or
-  `__hasheq`, which `deftype` reserves, named `parse-proof`, or compiling to the same Java name as another field
-  (`a-b` and `a_b`);
-- a field declared as a child twice, or a child field that isn't a field;
-- a pure check written before a pure check that reads a proper subset of its fields. Pure checks run in the order
-  written, and a failed one holds every later one that shares a field, so the smaller check goes first. A check that
-  reads no field shares none, so it may go anywhere.
+Changing values (`::cannot-change`, `::no-field`, `::bad-input`):
 
-`pt/draft` refuses a type named by anything but a symbol, anything but a literal map, and a literal map that names a
-key that isn't a field, or leaves a field out. `match` refuses a sum or a clause type named by anything but a symbol,
-a missing member, a type that isn't a member, and a member handled twice. For a name written as a string or a
-keyword, the message names the symbol to write. A call to `pt/defparsed-type`, `pt/defdraft-type` or
-a parsed type's `->Name` doesn't compile.
+- `parsed-value-is-final`: a change to a parsed value. Fix: `(pt/parse (assoc (pt/draft-of x) :k v))`.
+- `draft-fields-are-fixed`: `dissoc` or a mutator on a draft. Fix: `(assoc d :k nil)`.
+- `no-metadata`: `with-meta` on either. Fix: keep it beside, as in `{:value x, :meta m}`.
+- `no-empty`: `empty` on either. Fix: `(into {} x)`.
+- `no-such-field-read`, `no-such-field-assoc`: a key that isn't a field. Fix: one of its fields, as named.
+- `conj-not-a-pair`: `conj` of a vector that isn't `[k v]`.
+- `not-a-library-value`: a private fn the types call got another value.
 
-## Errors caught when a `defparsed` loads
+Field names (`::bad-declaration`):
 
-The expansion builds and checks the plan when it loads, before any `parse`. It throws `::bad-declaration` when:
+- `fields-not-symbols`: the fields aren't a vector of simple symbols.
+- `field-named-twice`: a field, or a field a check reads, is named twice.
+- `field-name-unusable`: `/`, a special form, a dot, two names with one Java name, `__meta` and the other names
+  `deftype` reserves, or `parse-proof`. Fix: rename it, as the message shows.
 
-- a child field names something that isn't a type defined with `defparsed` or a sum defined with `defsum`;
-- a fetch's function isn't a fn.
+Declarations (`::bad-declaration`):
 
-Both are checked before the `deftype`s, so a re-evaluation that fails them leaves the type as it was. The fetch fns
-and the child types are evaluated then too, once: a fetch fn can't name the type being defined, and a child field
-names it by its own name, as in `(child next Chain)`. An error later in the form, such as a check body that doesn't
-compile, comes after the `deftype`s. Its classes then have no plan, and every use of them throws `type-not-loaded`
-until the `defparsed` is fixed and re-evaluated.
+- `name-not-symbol`: a type or sum named by anything but a symbol, in `defparsed`, `defsum`, `match` or `pt/draft`.
+- `name-with-dot`: a type name with a dot.
+- `missing-argument`: `defparsed`, `defsum`, `match` or `pt/draft` called with one argument.
+- `unknown-clause`: a clause other than `pure`, `external` or `fetch`.
+- `check-options`: an options map on a check.
+- `name-not-qualified`: a check or fetch name that isn't a qualified keyword.
+- `check-no-doc`, `check-no-body`, `check-no-field-vector`: a check without its doc, body or argument vector.
+- `pure-check-fetches`: a pure check that binds a fetch.
+- `reads-unknown-field`: a check or fetch that reads a field the draft doesn't have.
+- `check-bad-fetch-binding`: a fetch binding that names no declared fetch.
+- `fetch-local-taken`: two fetches bound to one local, or a fetch bound to a field's name.
+- `check-uses-unnamed-field`: a check body that uses a field its argument vector doesn't name.
+- `fetch-no-fn`: a fetch with no function.
+- `name-used-twice`: a check or fetch name used twice.
+- `pure-check-order`: a pure check written before one on a proper subset of its fields.
+- `defparsed-not-top-level`: a `defparsed` inside another form.
+- `class-name-taken`, `class-name-other-role`: a class name another namespace or role claimed.
+- `fetch-not-fn`: a fetch that is not a fn or a var holding one, found when it loads.
+- `type-not-loaded`: a type whose `defparsed` stopped after its `deftype`s.
+- `bad-sum-members`: a `defsum` whose members aren't distinct parsed types.
+- `match-not-a-sum`, `match-clause-shape`, `match-not-a-type`, `match-not-a-member`, `match-missing-member`,
+  `match-member-twice`: a `match` that names no sum, has a clause that isn't a type, binding and expression, names
+  a type that isn't one or isn't a member (for a draft type, it names the parsed type to write), misses a member, or
+  names one twice.
+
+`pt/draft` (`::bad-input`):
+
+- `draft-not-a-literal-map`, `draft-not-a-parsed-type`, `draft-literal-unknown-keys`,
+  `draft-literal-missing-fields`: `pt/draft` got no literal map, a name that isn't a parsed type, a key that isn't
+  a field, or a map that leaves one out.
+
+Parsing (`::bad-input`, `::invalid`, `::bad-fetch`):
+
+- `not-a-draft`: `parse`, `parse-all` or `pt/declaration` got something that isn't a draft. The fix calls that fn.
+- `parse-all-not-a-vector`: `parse-all` got a single draft, a map, or something not sequential.
+- `mutable-value`: a field holds a value not known to be immutable. Fix: the conversion for its class.
+- `value-too-deep`: a field nests deeper than 1000 levels.
+- `draft-in-field`: a field holds a draft. Fix: `(pt/parse d)`, or `(pt/parse-all ds)` for a vector.
+- `unissued-in-field`: a field holds a value of a parsed type that `parse` didn't issue.
+- `checks-failed`: some check returned anything but `true`.
+- `fetch-missing-tuples`: a fetch returned no map, or no entry for some tuple.
+
+Sinks (`::bad-input`, `::not-parsed`, `::stale-type`):
+
+- `not-a-parsed-type`: `pt/parsed` or `pt/parsed?` got a type argument that is neither a parsed type nor a sum.
+- `got-draft`: a sink got a draft. Fix: `(pt/parse draft)`.
+- `got-unparsed`: a sink got nil, a plain map, a value built by hand, or a value of another type. Fix:
+  `(pt/parse (pt/draft T {...}))`.
+- `draft-of-a-draft`, `draft-of-unissued`: `draft-of` got a draft, or a value `parse` didn't issue.
+- `match-compiled-before-member`: a `match` compiled before a member joined its sum.
+- `stale-value`, `stale-sink`, `stale-match`: see "REPL reloads".
+
+## When each error is caught
+
+`defparsed`, `defsum`, `match` and `pt/draft` throw what they can see when they expand, so the file doesn't
+compile: every declaration and `pt/draft` rule above but `fetch-not-fn` and `type-not-loaded`. `match` reports a type
+that isn't a member before a missing member. A call to `pt/defparsed-type`, `pt/defdraft-type`, `->Name` or
+`->NameDraft` doesn't compile either.
+
+The expansion checks the fetch fns when it loads, before its `deftype`s, so a re-evaluation that fails the check
+leaves the type as it was; a fetch fn therefore can't name the type being defined. An error later in the form, such
+as a check body that doesn't compile, comes after the `deftype`s: its classes then have no plan, and every use of
+them throws `type-not-loaded` until the `defparsed` is fixed and re-evaluated.
 
 ## Behavior worth knowing
 
 - **Reading unknown keys.** A one-argument lookup throws: `(:k x)`, `(get x :k)`, `(x :k)` and destructuring. With a
   default, `(get x :k ::none)` returns it, and so does `:or` in `let`, which reads with a default. `contains?` is
   false, `find` is nil, `select-keys` leaves the key out, and `java.util.Map.get` returns null.
-- **Equality.** Like a record, a value equals only a value of its own type with the same fields, and a parsed value
-  also only one with the same proof. So equality no longer confuses a parsed value with one built by hand, but sinks
-  still check with `pt/parsed`. Two values built without the proof, such as the views parent checks see, are equal
-  when their fields are. Java `.equals` is one-sided, unlike a record, whose `.equals` compares contents both ways: a `HashMap` or a Clojure
-  map's `.equals` compares contents and says true, while the value's own `.equals` says false. So a Java `HashSet`
-  holding a parsed value can report that it contains an equal plain map.
+- **Java `.equals` is one-sided.** A `HashMap`'s or a Clojure map's `.equals` compares contents and says true for a
+  parsed value with the same entries, while the value's own `.equals` says false. So a Java `HashSet` holding a
+  parsed value can report that it contains an equal plain map.
 - **No empty version.** `empty` throws, and so does anything built on `(into (empty x) ...)`, such as
   `clojure.walk`. Use `(into {} x)` for a plain map.
-- **What a parent check sees.** Each child is a value of its parsed type that passed its pure checks, built without
-  the token. Inside the check, `pt/parsed` refuses it; ask its type with `instance?`, as in
-  `(filter #(instance? Debit %) lines)`. When the whole tree passes, `parse` builds each node again with
-  the token. The issued value has the same fields as the value the checks saw, but that value lacks the proof, so the
-two are not equal. A parent's pure checks run
-  before any external check. A parent's external checks run after the children's, and one that reads a child that
-  failed an external check is held, so it can't throw over the child's failure.
 - **What a held check reports.** A held check didn't run, so it has no `:returned`, and it holds no other check: a
-  later check that shares a field with it runs, unless a check that ran and failed holds it too. In a tree that
-  failed a pure check, no external check runs. Each is listed under `:blocked` of the pure checks of its node that
-  ran and failed, and under none when every failure in its node was held.
-- **Every check runs every time.** `parse` and `parse-all` run every check of every draft in the tree. There is no
-  way to run some of them.
-- **Immutable values only.** Every field of every draft in the tree is walked, keys included, except child fields,
-  whose drafts are walked as their own nodes. A `children` field's vector may carry no metadata: the parsed value
-  holds a new vector of the parsed children, empty ones included, so `parse` refuses metadata it would drop. A value
-  of another shape, such as a quoted list, which carries the reader's line, fails the shape check instead. Accepted: nil; `Boolean`, `Character`, `String`, keywords, symbols,
-  `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`, `Float`, `BigInt`, `Ratio`, and `BigDecimal` and
-  `BigInteger` by exact class, since they can be subclassed; classes; final classes of the `java.time` package, but
-  not a `java.time.Clock` or `InstantSource`, which reads the time each time it is asked; values
-  `parse` issued; and persistent vectors, maps (records and drafts included), sets, lists and queues whose contents
-  pass. Metadata on a value is walked like the value. A sorted map or set must sort with the default comparator: a
-  custom comparator can read state that changes. Refused: everything else, including lazy and other seqs, since
-  realizing one could run side effects or never end; pass `(vec ...)`. For an array the message names
-  `(into [] a)`, since `(vec a)` of an object array of 32 or fewer elements shares the array. Nesting deeper than 1000
-  levels is refused too, with the rule `value-too-deep`. The message shows the first 8 steps of a longer path, and
-  so does `:path` in the ex-data, with `:depth` for its length. The walk keeps its own stack, so a thread with a small
-  stack gets the same answer. Each collection is walked once per parse, by identity, so shared structure costs its
-  size, not the number of paths to it. One reached again deeper than its height allows is walked again, so the depth
-  limit holds on every path. A `java.sql.Date` is refused with `(.toLocalDate d)` as the fix, a `java.sql.Time` with
-  `(.toLocalTime d)`, since both throw on `.toInstant`, and a `java.sql.Timestamp` with `(.toInstant d)`.
-- **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
+  later check that shares a field with it runs, unless a check that ran and failed holds it too. When a pure check
+  fails, no fetch and no external check of that draft runs. Each external check is listed under `:blocked` of the
+  pure checks that ran and failed.
+- **Every check runs every time.** There is no cache of passed checks, and no way to run some of them.
+- **Immutable values only.** Every field is walked, map keys and metadata included. Accepted: nil; `Boolean`,
+  `Character`, `String`, keywords, symbols, `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`,
+  `Float`, `BigInt`, `Ratio`, and `BigDecimal` and `BigInteger` by exact class, since they can be subclassed;
+  classes; final classes of the `java.time` package, but not a `java.time.Clock` or `InstantSource`, which reads the
+  time each time it is asked; values `parse` issued, which are not walked again; and persistent vectors, maps
+  (records included), sets, lists and queues whose contents pass. A sorted map or set must sort with the default
+  comparator: a custom comparator can read state that changes. Refused: drafts, values of a parsed type `parse`
+  didn't issue, and everything else, including lazy and other seqs, since realizing one could run side effects or
+  never end; pass `(vec ...)`. For an array the message names `(into [] a)`. A `java.sql.Date` is refused with
+  `(.toLocalDate d)` as the fix, a `java.sql.Time` with `(.toLocalTime d)`, since both throw on `.toInstant`, and a
+  `java.sql.Timestamp` with `(.toInstant d)`.
+- **Depth.** Nesting deeper than 1000 levels is refused, with the rule `value-too-deep`. The message shows the first
+  8 steps of a longer path, and so does `:path` in the ex-data, with `:depth` for its length. The walk keeps its own
+  stack, so a thread with a small stack gets the same answer.
+- **Cost.** The walk costs time per value inside a field: about 25 us for 1,000 numbers in 100 vectors. An issued
+  value in a field costs one step, so a large immutable value parsed once is not walked again by each parent that
+  holds it. `clojure -M:bench` prints the current numbers.
+- **Fetch calls.** One call per declaration and fetch for the whole `parse-all`, with each distinct tuple once.
+  Drafts that failed a pure check add no tuple.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
-- **`pt/draft` takes only a literal map.** It checks the keys when it compiles, so a map built at run time is a
-  compile error. Name each field in place, as in `{:amount (:amount body)}`, or call `->DebitDraft`. Its values are
-  evaluated in the order Clojure evaluates the same map literal: as written for up to 8 keys. The reader makes a
-  hash map of a literal with more, so their order is the hash order, not the order written.
-- **Failed kinds in a tree.** One tree never holds both: its external checks run only when every pure check in it
-  passed. `parse-all` can report both, from different drafts.
-- **Exceptions.** An exception thrown by a check or fetch propagates out of `parse` and stops `parse-all` at that
-  draft.
+- **`pt/draft` evaluates its values as Clojure evaluates the same map literal:** in the order written for up to 8
+  keys, and in hash order beyond, since the reader makes a hash map of a larger literal.
+- **Exceptions** thrown by a check or fetch propagate out of `parse` and stop `parse-all`.
 
 ## REPL reloads
 
@@ -232,140 +248,39 @@ and the message says what to re-evaluate:
 
 | Rule | Where | Fix the message names |
 |---|---|---|
-| `stale-value` | a sink, `match` or a child field got a value or draft built before its type was re-evaluated | build it again from a new draft, or re-run the code that built it |
+| `stale-value` | a sink or `match` got a value built before its type was re-evaluated | build it again from a new draft, or re-run the code that built it |
 | `stale-sink` | `(pt/parsed Debit x)` compiled before `Debit` was re-evaluated got a new value | re-evaluate the namespace that calls it, or `(clojure.tools.namespace.repl/refresh)` |
-| `stale-child-type` | a parent evaluated before its child type, or its sum, was re-evaluated got a new draft | reload the sum's namespace, if the child type is a sum, then the parent's, as in `(require 'app.sum 'app.parent :reload)` |
-| `stale-match` | a `match` compiled before a member was re-evaluated got a new value | reload the `defsum`'s namespace, then the match's, as in `(require 'app.sum 'app.core :reload)` |
-| `stale-sum` | a `match` names a member re-evaluated after its `defsum` | the same: the `defsum`'s namespace, then the match's |
+| `stale-match` | a `match` compiled before a member was re-evaluated got a new value, or a `match` names a member re-evaluated after its `defsum` | reload the `defsum`'s namespace, then the match's, as in `(require 'app.sum 'app.core :reload)` |
 
 Each command names the namespaces in the order they depend on each other, and works as printed:
 `every-reload-command-applies-test` runs each one. A namespace that imports a type from another keeps the old class
-until its `ns` form runs again, so re-evaluating one form there is not enough. The message offers that, as in
-"Re-evaluate the defsum Members, then the defparsed Holder", only when every form involved is in one namespace.
+until its `ns` form runs again, so the message offers re-evaluating single forms only when every form involved is in
+one namespace.
 
-Two registered classes share a name only when the namespace that defined them defines them again: a REPL reload, or
-code that switches into that namespace with `in-ns`. A `defparsed` in another namespace whose name compiles to the
-same Java name is refused.
-
-Reloading `parsed-types.core` itself, with `:reload` or with the `:reload-all` of a namespace that requires it, keeps
-everything defined before working. The token is a `defonce`, and the library defines its interfaces and its sum class
-only when they are not loaded yet. So values parsed before stay parsed, drafts built before still parse, and sums and
-`match`es defined before still take their members.
-
-## Design decisions
-
-**Drafts and parsed values are map types with fixed fields, not records.** `assoc` on a record returns another record
-of the same class, which for a parsed value would look like proof, and `map->` turns a typo into an extra key.
-
-**Proof is in the value.** A value carries the fact that it was checked, in a hidden field that only `parse` sets to
-a private token. A weak identity map of issued values did the same job, but kept that fact apart from the value. The
-field isn't a key, so it changes no lookup or printing. Equality does read it, so a forgery never equals a parsed
-value. The token goes into the value and only a boolean comes out. It makes a parsed value impossible to build by
-accident, not impossible to forge: see "Accepted limits".
-
-**Only immutable values.** A check proves the value it saw. If a field held an atom or an array, the parsed value
-would keep something that can change under the proof. An allowlist of known immutable classes, walked all the way
-down, is simpler to trust than a denylist, which misses what it doesn't name.
-
-**No partial checks.** `check` and `check-all` ran checks without issuing anything, and a subset of names left a tree
-half-proven, which needed its own rules. A failure tree is also truthy, so `(when (pt/check d nil) ...)` read as a
-pass. Only `parse` and `parse-all` remain.
-
-**Only `defparsed` makes types.** The draft type and the parsed type are defined in one form, so the draft type is the
-only one that parses to its parsed type, with no table of claims. Declarations are no longer written by hand as data.
-`(pt/declaration draft)` still returns the declaration `defparsed` wrote, as data.
-
-**Plans are built when `defparsed` loads.** A declaration error shows up when the file loads, not at the first parse,
-and no lazy cache is needed. A registry maps each draft class and each parsed class to its plan.
-
-**Types compare by class, like records.** `instance?` and type hints then work, inside checks too. A reload strands
-code compiled against the old class, as it does for a record, so the library detects a class whose name matches and
-throws `::stale-type` with what to re-evaluate. Comparing by name kept old code working, but let a value of one
-generation pass where code expected another, and needed a second way to ask a type, `pt/is?`, inside checks.
-
-**No remembered passes.** `parse` runs every check every time. A pass remembered on a draft was a second, weaker kind
-of proof, kept beside the value, and it cost bitmasks, a 64-check limit and a weak map.
-
-**A check's argument vector is its reads.** One list says what the check reads, and the compiler holds the body to
-it. A check can't close over a local, since `defparsed` is refused inside another form. It may read a var, and the
-library doesn't look: a check that reads a var that changes is pure in name only.
-
-**Building and reading need no reflection.** `defparsed` knows each class and its fields when it expands, so it
-generates the fns that build a parsed value, build a draft and read a draft's fields.
-
-**Checks happen in ordinary forms.** `pt/draft` builds what `->DebitDraft` builds. It adds a compile-time check and
-expands to the plain form.
-
-**A check passes only on exactly `true`.** `nil`, a string or a map of errors is a failure, so a check can't pass by
-accident.
-
-**Children are drafts, parsed with the parent.** All the tree's checks run at one moment, all its fetches are batched,
-and a child parsed elsewhere, perhaps for another user, can't be reused.
-
-**`match` bindings carry no type hint.** After a reload, a hint would name the old class, and interop on the binding
-would throw a `ClassCastException`. Read fields by keyword.
+Reloading `parsed-types.core` itself keeps everything defined before working: the token is a `defonce`, and the
+library defines its interfaces and its sum class only when they are not loaded yet.
 
 ## Tests
 
 `clojure -X:test` runs:
 
-- `bank-test`: transfers, payrolls, budgets and payments, against an in-memory bank;
+- `bank-test`: transfers, payrolls built from parsed transfers, and payments, against an in-memory bank;
+- `readme-test`: every code block of the README, run;
 - `core-test`: each behavior, the proof, mutable values, and the ways to forge or change a value we know of;
 - `defparsed-test`: compile errors, load errors, unknown keys, field names, REPL reloads, with the namespaces under
   `test/parsed_types/stale_fixture` reloaded to apply each reload command a message prints;
-- `properties-test`: `test.check` properties over random drafts and trees, against a model written by hand;
-- `errors-test`: one example of every error rule, with the values and the fix its message must hold;
-- `tree-properties-test`: `test.check` properties over random trees with `:one` and `:many` children, malformed
-  children and edits to child fields, against a model of the whole failure map.
+- `properties-test`: `test.check` properties over random drafts, against a model written by hand;
+- `errors-test`: an example of every error rule, with the values and the fix its message must hold, and a check
+  that every test this page cites exists.
 
-Each of these deliberately broken copies of this version fails at least one test: the proof field public; a method
-handing the token out; the registry not consulted before asking a value for its proof; equality ignoring the proof;
-the immutability walk shallow, skipping map keys, or accepting seqs; no did-you-mean, or one that suggests any field;
-an `ex-info` without a `:rule`; a rule with no example; a message that drops its fix; types compared by name; a type
-argument that only implements `ParsedValue` accepted; a sink, a child field or a `match` with no stale-type check;
-the class-name claim made only when a `defparsed` loads; a claim without its role; `pt/parsed` ignoring the proof; the
-`->Name` factory kept; the proof in a value's `seq`; a field named `parse-proof` allowed; `defparsed-type` or
-`defdraft-type` public; no checks when a `defparsed` loads; parent checks seeing children built with the token; the
-issued root holding children built without it; `empty`
-returning `{}`.
-
-Each of these broken copies, made while fixing the eighth review, fails a test: the library's classes redefined when
-it reloads; the class-name claim checked only when a `defparsed` loads; a sum as a record; a constructor-built sum
-not checked where it is used; pure checks sorted by how many fields they read; a check held only by checks over a
-proper subset of its fields; no check of the order pure checks are written in; a fetch allowed to read a child field;
-metadata allowed on a child field's vector; the walk skipping a shared collection reached deeper; the old recursive
-walk, on a small stack; clocks accepted; `pt/parse` of a value built by hand calling it already parsed; a key that
-isn't a field reported as a change to a parsed value; a type with no fields suggesting `(nil x)`; library fns that
-take any value; a dotted type name allowed; a fn only generated code calls left public.
-
-Each of these broken copies, made while fixing the ninth review, fails a test: the fetch fns and child types checked
-after the `deftype`s; no `type-not-loaded` check; no top-level check, or one that reads only `&env`; a reload command
-that names only the parent's or the match's namespace; the walk without its heights, or skipping a collection
-whenever it was walked before; a value too deep reported as `mutable-value`; a `java.sql.Date` told to call
-`.toInstant`; a held check that holds later checks, directly or through the check that held it; external checks run
-in a tree that failed; a check that reads no field refused as out of order; a child field's metadata checked before
-its shape; the `java.util.Map` default methods, a persistent `keySet`, an entry's `setValue` or a view iterator's
-`remove` throwing `UnsupportedOperationException`; `pt/draft` or a `match` clause without a symbol check; every
-non-draft error naming `pt/parse`; `draft-of` suggesting `->DebitDraft` for any type; `pt/draft` binding in field
-order; the lint config missing a private var.
-
-Each of these broken copies of earlier versions failed a test that is still in the suite: fetches grouped by draft
-type; an external check waiting only on its fetches; a truthy return counted as a pass; a tree fetching after a pure
-check failed; tuples not deduplicated; a missing fetch answer allowed; `draft-of` leaving a child parsed; checks or
-fetches seeing children as drafts or as open maps; `:blocked-by` naming one child; `:failed-kinds` missing a kind; a
-grandchild failure not holding the grandparent; an unknown key returning
-`nil`; a literal `pt/draft` leaving a field out; reserved check names allowed; a map-type method calling a function a
-field can shadow; the depth limit off or missing; `match` binding a value `parse` didn't make.
+`clojure -M:bench` prints timings; it is not part of the tests.
 
 ## Lint
 
-The library ships a clj-kondo config. `defparsed` expands into the functions it compiles to, so a check that uses a
-field it didn't name is an unresolved symbol in the editor, and one that names a field it doesn't use is an unused
-binding. A field named like a `clojure.core` function is caught when compiling instead. `match` lints as a `let` per
-branch. Any private var of `parsed-types.core` named outside it, as in `#'pt/issue-tree`, is flagged as a discouraged
-var, and `the-lint-config-flags-every-private-var-test` keeps the list whole. A lookup by name, with `ns-resolve`,
-`ns-interns` or `find-var`, isn't flagged. Copy the
-config with:
+The library ships a clj-kondo config. A check that uses a field it didn't name is an unresolved symbol in the editor,
+and one that names a field it doesn't use is an unused binding. `match` lints as a `let` per branch. A private var
+of `parsed-types.core` named outside it, as in `#'pt/issue`, is flagged, and
+`the-lint-config-flags-every-private-var-test` keeps the list whole. Copy the config with:
 
 ```
 clj-kondo --lint "$(clojure -Spath)" --dependencies --copy-configs --skip-lint
