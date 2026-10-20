@@ -1176,11 +1176,12 @@
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
-(def ^:private immutable-classes
+(def ^:private ^java.util.Set immutable-classes
   "Classes whose values never change, by exact class: `BigDecimal` and `BigInteger` can be subclassed, so a subclass is
-  not trusted."
-  #{Boolean Character String clojure.lang.Keyword clojure.lang.Symbol java.util.UUID java.util.regex.Pattern
-    Long Integer Short Byte Double Float BigDecimal BigInteger clojure.lang.BigInt clojure.lang.Ratio})
+  not trusted. A `java.util.Set`, whose lookup of a class is the walk's most frequent call."
+  (java.util.Set/of (object-array [Boolean Character String clojure.lang.Keyword clojure.lang.Symbol java.util.UUID
+                                   java.util.regex.Pattern Long Integer Short Byte Double Float BigDecimal BigInteger
+                                   clojure.lang.BigInt clojure.lang.Ratio])))
 
 (def ^:private max-value-depth
   "The most levels of nesting a field's value may have. A deeper one throws `::bad-input`."
@@ -1199,71 +1200,104 @@
         (keep #(try (Class/forName %) (catch ClassNotFoundException _ nil)))
         ["java.time.InstantSource"]))
 
+(defn- leaf?
+  "Whether `x` holds no value and carries no metadata: nil, or a value of [[immutable-classes]] that cannot have any,
+  such as a number, a string or a keyword. The walk visits no frame for one."
+  [x]
+  (or (nil? x) (and (.contains immutable-classes (class x)) (not (instance? clojure.lang.IObj x)))))
+
+(defn- add-frame
+  "`frames`, a transient vector, with a frame to visit `x`, at `step` inside the value at `path`, or as it is when `x`
+  is a [[leaf?]]: a leaf only counts one level in `acc`, the height of the value that holds it. When `deep?`, a value
+  inside would sit past the depth limit, so a leaf is visited too, and refused."
+  [frames x step path ^longs acc deep?]
+  (if (and (not deep?) (leaf? x))
+    (do (aset acc 0 (max (aget acc 0) 1)) frames)
+    (conj! frames [:visit x (conj path step) acc])))
+
+(defn- frames-of
+  "`[:walk frames]` for `v`, at `path`: a frame for its metadata, then for each of `items`, the values inside it,
+  through their own iterator, so [[add-frame]] is called from one place: a reduce would share its call site with
+  every other reduce in the program. `kind` is `:map`, `:indexed` or `:set`."
+  [v ^Iterable items kind path ^longs acc]
+  (let [deep? (<= max-value-depth (count path))
+        m     (when (instance? clojure.lang.IObj v) (meta v))
+        it    (.iterator items)]
+    (loop [fs (cond-> (transient []) (some? m) (conj! [:visit m (conj path '<meta>) acc])), i 0]
+      (if (.hasNext it)
+        (let [x (.next it)]
+          (recur (case kind
+                   :map     (let [k (key x)]
+                              (-> fs (add-frame k '<key> path acc deep?) (add-frame (val x) k path acc deep?)))
+                   :indexed (add-frame fs x i path acc deep?)
+                   :set     (add-frame fs x '<element> path acc deep?))
+                 (inc i)))
+        [:walk (persistent! fs)]))))
+
 (defn- children-or-refusal
   "What the walk in [[not-immutable]] does with `v`, at `path`: `[:refuse rule what fix]`, or `[:walk frames]`, a
-  frame to visit for each value inside it, its metadata first, each with `acc`, which collects `v`'s height."
-  [v path acc]
-  (let [c        (class v)
-        refuse   (fn [what fix] [:refuse ::rule/mutable-value what fix])
-        frame    (fn [x p] [:visit x p acc])
-        walk     (fn [frames] [:walk (cond->> frames
-                                       (and (instance? clojure.lang.IObj v) (some? (meta v)))
-                                       (cons (frame (meta v) (conj path '<meta>))))])]
+  vector of frames to visit for the values inside it, each with `acc`, which collects `v`'s height. Collections are
+  tested first, as the most common."
+  [v path ^longs acc]
+  (let [c (class v)]
     (cond
-      (contains? immutable-classes c) (walk nil)
-      (class? v)                      (walk nil)
+      (.contains immutable-classes c) (frames-of v [] :indexed path acc) ; a symbol may carry metadata
 
-      (some #(.isInstance ^Class % v) clock-classes)
-      (refuse "a clock, which reads the time each time it is asked" "Pass the instant it reads, as in (.instant clock).")
-
-      (java-time-value? c) (walk nil)
       ;; an issued value proved its own checks, and holds only immutable values, so it is not walked again
-      (issued? v)          (walk nil)
+      (instance? ParsedValue v)
+      (if (issued? v)
+        [:walk []]
+        [:refuse ::rule/unissued-in-field (str "a " (.getSimpleName c) " that pt/parse did not issue")
+         (str "Pass the value pt/parse returns instead, as in " (parse-hint c) ".")])
 
       (instance? DraftValue v)
       [:refuse ::rule/draft-in-field (str "a draft, a " (.getSimpleName c))
        "Parse it first, as in (pt/parse d), or each of a vector of drafts with (pt/parse-all ds)."]
 
-      (instance? ParsedValue v)
-      [:refuse ::rule/unissued-in-field (str "a " (.getSimpleName c) " that pt/parse did not issue")
-       (str "Pass the value pt/parse returns instead, as in " (parse-hint c) ".")]
-
       (and (instance? clojure.lang.Sorted v)
            (not (identical? clojure.lang.RT/DEFAULT_COMPARATOR (.comparator ^clojure.lang.Sorted v))))
-      (refuse "a sorted collection with a custom comparator, which can read state that changes"
-              "Use (sorted-map ...) or (sorted-set ...), which sort with compare, or a plain map or set.")
+      [:refuse ::rule/mutable-value "a sorted collection with a custom comparator, which can read state that changes"
+       "Use (sorted-map ...) or (sorted-set ...), which sort with compare, or a plain map or set."]
 
-      (instance? clojure.lang.IPersistentMap v)
-      (walk (mapcat (fn [[k x]] [(frame k (conj path '<key>)) (frame x (conj path k))]) v))
+      (instance? clojure.lang.IPersistentMap v) (frames-of v v :map path acc)
+      (or (instance? clojure.lang.IPersistentVector v) (list? v)
+          (instance? clojure.lang.PersistentQueue v)) (frames-of v v :indexed path acc)
+      (instance? clojure.lang.IPersistentSet v) (frames-of v v :set path acc)
 
-      (or (instance? clojure.lang.IPersistentVector v) (list? v) (instance? clojure.lang.PersistentQueue v))
-      (walk (map-indexed (fn [i x] (frame x (conj path i))) v))
+      (class? v) [:walk []]
 
-      (instance? clojure.lang.IPersistentSet v)
-      (walk (map (fn [x] (frame x (conj path '<element>))) v))
+      (some #(.isInstance ^Class % v) clock-classes)
+      [:refuse ::rule/mutable-value "a clock, which reads the time each time it is asked"
+       "Pass the instant it reads, as in (.instant clock)."]
 
-      ;; not (vec a): vec of an Object[] of 32 or fewer elements shares the array
-      (.isArray c)                        (refuse "a Java array" "Copy it into a vector, as in (into [] a).")
-      (instance? clojure.lang.IAtom v)    (refuse "an atom" "Deref it, as in @a.")
-      (instance? clojure.lang.IRef v)     (refuse "a reference type" "Deref it, as in @r.")
-      (instance? clojure.lang.Volatile v) (refuse "a volatile" "Deref it, as in @v.")
-      ;; java.sql.Date and java.sql.Time throw on .toInstant
-      (instance? java.sql.Date v)         (refuse "a mutable date" "Use java.time.LocalDate, as in (.toLocalDate d).")
-      (instance? java.sql.Time v)         (refuse "a mutable time" "Use java.time.LocalTime, as in (.toLocalTime d).")
-      (instance? java.util.Date v)        (refuse "a mutable date" "Use java.time.Instant, as in (.toInstant d).")
-
-      (instance? clojure.lang.LazySeq v)
-      (refuse "a lazy seq, which realizing could run side effects or never end" "Pass a vector, as in (vec s).")
-
-      (instance? clojure.lang.ISeq v) (refuse "a seq, which may be lazy" "Pass a vector, as in (vec s).")
-
-      (or (instance? java.util.Collection v) (instance? java.util.Map v))
-      (refuse "a mutable Java collection" "Copy it into a Clojure collection, as in (vec c) or (into {} m).")
+      (java-time-value? c) [:walk []]
 
       :else
-      (refuse "a value not known to be immutable"
-              (str "Convert it to an immutable value, such as a string, a number, a java.time value or a persistent"
-                   " collection.")))))
+      (let [[what fix]
+            (cond
+              ;; not (vec a): vec of an Object[] of 32 or fewer elements shares the array
+              (.isArray c)                        ["a Java array" "Copy it into a vector, as in (into [] a)."]
+              (instance? clojure.lang.IAtom v)    ["an atom" "Deref it, as in @a."]
+              (instance? clojure.lang.IRef v)     ["a reference type" "Deref it, as in @r."]
+              (instance? clojure.lang.Volatile v) ["a volatile" "Deref it, as in @v."]
+              ;; java.sql.Date and java.sql.Time throw on .toInstant
+              (instance? java.sql.Date v)         ["a mutable date" "Use java.time.LocalDate, as in (.toLocalDate d)."]
+              (instance? java.sql.Time v)         ["a mutable time" "Use java.time.LocalTime, as in (.toLocalTime d)."]
+              (instance? java.util.Date v)        ["a mutable date" "Use java.time.Instant, as in (.toInstant d)."]
+
+              (instance? clojure.lang.LazySeq v)
+              ["a lazy seq, which realizing could run side effects or never end" "Pass a vector, as in (vec s)."]
+
+              (instance? clojure.lang.ISeq v)     ["a seq, which may be lazy" "Pass a vector, as in (vec s)."]
+
+              (or (instance? java.util.Collection v) (instance? java.util.Map v))
+              ["a mutable Java collection" "Copy it into a Clojure collection, as in (vec c) or (into {} m)."]
+
+              :else
+              ["a value not known to be immutable"
+               (str "Convert it to an immutable value, such as a string, a number, a java.time value or a persistent"
+                    " collection.")])]
+        [:refuse ::rule/mutable-value what fix]))))
 
 (defn- not-immutable
   "nil when `v` is known to be immutable all the way down, else `[rule path what fix class-name]`: the rule, where
@@ -1301,8 +1335,8 @@
                       " (pr-str v).")
                  (.getName (class x))]
 
-                ;; the common leaves first, with no lookup: none holds a value, or has metadata
-                (or (nil? x) (and (contains? immutable-classes (class x)) (not (instance? clojure.lang.IObj x))))
+                ;; the root, when it is a leaf: a leaf inside a value gets no frame
+                (leaf? x)
                 (do (bump! parent 0) (recur stack))
 
                 (and known (<= (+ depth (long known)) max-value-depth))
@@ -1315,8 +1349,12 @@
                     (let [[rule what fix] more] [rule path what fix (.getName (class x))])
                     (let [frames (first more)]
                       (if (empty? frames)
-                        (do (bump! parent 0) (recur stack))
-                        (recur (into (conj stack [:exit x acc parent]) (reverse frames)))))))))))))))
+                        ;; only leaves inside, or none: its height is already in acc
+                        (let [h (aget acc 0)]
+                          (when (pos? h) (.put heights x h))
+                          (bump! parent h)
+                          (recur stack))
+                        (recur (into (conj stack [:exit x acc parent]) (rseq frames)))))))))))))))
 
 (defn- refuse-mutable!
   "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable,
@@ -1565,6 +1603,11 @@
                       {:type ::bad-input, :rule ::rule/not-a-parsed-type, :fn fn-name
                        :got  (if (class? t) (.getName ^Class t) (pr-str t))})))))
 
+(defn- issued-member?
+  "Whether `x` is a value [[parse]] issued, of `type` or of a member of the sum `type`, already checked."
+  [type x]
+  (and (some? x) (member? type (class x)) (issued? x)))
+
 (defn parsed?
   "Whether `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`: a value of
   the class itself, as for a record, whose hidden proof field holds the proof only `parse` sets. Throws `::bad-input`
@@ -1574,9 +1617,7 @@
   [parsed-type x]
   (check-type! "pt/parsed?" parsed-type)
   (stale-sink! "pt/parsed?" parsed-type x)
-  (and (some? x)
-       (member? parsed-type (class x))
-       (issued? x)))
+  (issued-member? parsed-type x))
 
 (defn parsed
   "`x`, which must be a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`. Throws
@@ -1585,7 +1626,8 @@
   [parsed-type x]
   (check-type! "pt/parsed" parsed-type)
   (stale-sink! "pt/parsed" parsed-type x)
-  (when-not (parsed? parsed-type x)
+  ;; not parsed?, which would check the type and the class again
+  (when-not (issued-member? parsed-type x)
     (let [t                      (type-name parsed-type)
           {:keys [rule message]} (cond
                                    (nil? x)

@@ -463,6 +463,29 @@
           chain (reduce (fn [acc _] [inner acc]) [] (range 500))]
       (is (= :parsed-types.rule/value-too-deep (:rule (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title chain})))))))))
 
+(deftest a-shared-collection-of-leaves-counts-its-leaves-test
+  (testing "a vector holding only leaves is one level high, so reached again at the limit it is walked again"
+    (let [inner [1]
+          nest  (fn [n] (reduce (fn [x _] [x]) inner (range n)))]
+      ;; inner's 1 sits at depth 1001 in the second path, and at 1000 in the third
+      (is (= :parsed-types.rule/value-too-deep (:rule (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title [inner (nest 999)]}))))))
+      (is (some? (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title [inner (nest 998)]}))))))
+  (testing "and a vector holding one is two levels high"
+    (let [inner [[1]]
+          nest  (fn [n] (reduce (fn [x _] [x]) inner (range n)))]
+      (is (= :parsed-types.rule/value-too-deep (:rule (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title [inner (nest 998)]}))))))
+      (is (some? (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title [inner (nest 997)]})))))))
+
+(deftest a-shared-collection-of-leaves-is-walked-once-test
+  (testing "it is recorded like any other collection, so a chain that reaches it at every level walks it once"
+    (let [shared (vec (range 10))
+          chain  (reduce (fn [acc _] [shared acc]) [] (range 50))
+          walks  (atom 0)
+          f      @#'pt/children-or-refusal]
+      (with-redefs [pt/children-or-refusal (fn [v path acc] (when (identical? v shared) (swap! walks inc)) (f v path acc))]
+        (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title chain})))
+      (is (= 1 @walks)))))
+
 (deftest a-value-too-deep-test
   (let [nested (reduce (fn [x _] [x]) 1 (range 1001))
         data   (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title nested})))]
