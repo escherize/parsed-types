@@ -102,6 +102,7 @@ Malformed input never queries the database. A failure reports every check by nam
 (pt/parse (->TransferDraft :ada 1 1 -5M))
 ;; Invalid Transfer
 {:status-code 400
+ :draft       TransferDraft
  :failures    {::amount-positive {:doc "The amount is a positive decimal.", :returned false, :blocked [::owns-source]}
                ::two-accounts    {:doc "Money moves between two different accounts.", :returned false, :blocked [::owns-source]}}}
 ```
@@ -114,6 +115,12 @@ an external one, unless the check sets `{:status 404}`.
 ```clojure
 (pt/defparsed Payroll [user-id from-id transfers]
   (children transfers Transfer)
+  (pure ::one-source "Every transfer draws on the payroll's account."
+        [from-id transfers]
+        (every? #(= from-id (:from-id %)) transfers))
+  (pure ::one-payer "Every transfer is made by the payroll's user."
+        [user-id transfers]
+        (every? #(= user-id (:user-id %)) transfers))
   (pure ::no-repeat-payee "No account is paid twice."
         [transfers]
         (= (count transfers) (count (set (map :to-id transfers)))))
@@ -125,9 +132,12 @@ an external one, unless the check sets `{:status 404}`.
 
 `transfers` holds `TransferDraft`s, and `parse` checks the payroll and every transfer in it together:
 
-- **Children first.** A parent check sees each child as a checked value. When a child fails, the failure appears at
-  its path, `{:transfers {3 {...}}}`, and the parent checks that read it don't run.
-- **One query per fetch, not per child.** The 50 transfers' `::source` lookups are one call with 50 ids.
+- **Children first.** A parent check sees each child as a value of its parsed type that passed its pure checks. The
+  value isn't issued yet, so `pt/parsed` refuses it inside the check, and the child's external checks may still fail.
+  When a child fails, the failure appears at its path, `{:transfers {3 {...}}}`, and the parent checks that read it
+  don't run.
+- **One query per fetch, not per child.** The 50 transfers' `::source` lookups are one call, with each distinct
+  account id once.
 - **Bottom-up result.** The parsed `Payroll` holds parsed `Transfer`s, so `run-payroll!` can hand each one to
   `transfer!`.
 
@@ -144,8 +154,8 @@ an external one, unless the check sets `{:status 404}`.
     Payroll  p (run-payroll! p)))
 ```
 
-A `match` that leaves out a member, or names a type that isn't one, doesn't compile. A sum works wherever a type
-does: `pt/parsed`, `pt/let`, and `(children payments Payment)`.
+A `match` that leaves out a member, or names a type that isn't one, doesn't compile. A sum also works in
+`pt/parsed`, `pt/parsed?`, `pt/let`, and `(children payments Payment)`. `pt/draft` needs a member type, not a sum.
 
 ## Edit a draft with `assoc`
 

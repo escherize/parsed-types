@@ -12,7 +12,8 @@ The README covers how to use the library; this page covers what it promises and 
 | A parsed value never equals a plain map or its draft | The type's equality checks the class; it isn't marked map-equivalent, so Clojure's maps refuse it too | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw | `a-parsed-value-cannot-be-changed` |
 | A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; `pt/let` and literal `pt/draft` check keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `let-compile-errors-test`, `let-checks-every-binding-test`, `draft-test` |
-| Any field name works, except special forms | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `special-form-field-names-test` |
+| A field may be named like any `clojure.core` function, or like the generated declaration | The map type's methods call every function qualified, and `defparsed` names its declaration qualified, so no field shadows either | `fields-named-like-core-functions-test`, `a-field-cannot-shadow-the-declaration-test` |
+| Equality is a record's: same type, each field `=` | `equiv` checks the class, then compares fields with `=`, so `1.0M` equals `1.00M` | `equality-test` |
 | The checks see the values that are issued | Each field is read once, from the type's own field; each node's value is built once and is both what parent checks see and what `parse` returns | `fields-are-read-once-from-the-record-test`, `parse-matches-the-tree-model` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`, `parse-matches-the-tree-model`: each against a model written by hand, down to every path, `:blocked-by`, `:blocked` and status |
 | Remembered passes never change an outcome | `assoc` clears the passes of the checks that read the field; passes are tied to the declaration that set them; a child field's shape check always runs | `remembered-passes-never-change-the-outcome`, `remembered-passes-never-change-a-tree-outcome-under-edits`, `passes-are-not-read-under-a-replaced-declaration`, `re-evaluating-a-child-type-test` |
@@ -36,8 +37,9 @@ The README covers how to use the library; this page covers what it promises and 
 - a fetch binding that names no declared fetch, binds a local with a field's name, or binds two fetches to one local;
 - a pure check that binds a fetch;
 - an option other than `:status`, or a `:status` that isn't an integer;
-- a field named twice or like a special form, a field declared as a child twice, or a child field that isn't a
-  field.
+- a field named twice, like a special form, with a dot in it, starting with `__`, or compiling to the same Java name
+  as another field (`a-b` and `a_b`);
+- a field declared as a child twice, or a child field that isn't a field.
 
 `pt/draft` refuses a literal map that names a key that isn't a field, or leaves a field out. `pt/let` refuses a key
 that isn't a field of the type (of every member, for a sum), `:or`, `:strs`, `:syms`, qualified keys, and vector
@@ -56,11 +58,17 @@ destructuring. `match` refuses a missing member, a type that isn't a member, and
 ## Behavior worth knowing
 
 - **Reading unknown keys.** A one-argument lookup throws: `(:k x)`, `(get x :k)`, `(x :k)` and destructuring. With a
-  default, `(get x :k ::none)` returns it. `contains?` is false, `find` is nil, and `select-keys` leaves the key out.
+  default, `(get x :k ::none)` returns it, and so does `:or` in a plain `let`, which reads with a default; `pt/let`
+  refuses `:or`. `contains?` is false, `find` is nil, `select-keys` leaves the key out, and `java.util.Map.get`
+  returns null.
 - **Equality.** Like a record, a value equals only a value of its own type with the same fields: a parsed value never
   equals a plain map or its draft. A `Transfer` built by hand still equals one `parse` made, because they hold the
-  same value, so a set of parsed values can't tell a forgery apart. Proof is `pt/parsed`, never `=`. From Java,
-  `HashMap.equals` still compares contents, since `java.util.Map` knows nothing of Clojure types.
+  same value, so a set of parsed values can't tell a forgery apart. Proof is `pt/parsed`, never `=`. Java `.equals`
+  is one-sided, as with records: a `HashMap` or a Clojure map's `.equals` compares contents and says true, while the
+  value's own `.equals` says false.
+- **What a parent check sees.** Each child is a value of its parsed type that passed its pure checks, built once and
+  issued only if the whole tree passes. Inside the check, `pt/parsed` refuses it, and its external checks haven't run.
+- **Fetch calls.** One call per declaration and fetch for the whole call, with each distinct tuple once.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field is a 400: the map
   is usually a request.

@@ -299,3 +299,57 @@
   (reset! order [])
   (pt/draft Point {:y (do (swap! order conj :y) 2), :x (do (swap! order conj :x) 1)})
   (is (= [:y :x] @order)))
+
+;;; Equality, and the map interfaces
+
+(pt/defparsed Money [amount count])
+(pt/defparsed OtherMoney [amount count])
+
+(deftest equality-test
+  (testing "like a record: fields compare with =, so numbers of different classes but equal value are equal"
+    (is (= (->Money 1.0M (int 2)) (->Money 1.00M 2)))
+    (is (= (hash (->Money 1.0M (int 2))) (hash (->Money 1.00M 2))))
+    (is (= (->Money [1N] 2) (->Money [1] 2))))
+  (testing "a value equals only a value of its own type"
+    (is (not= (->Money 1M 2) (->OtherMoney 1M 2)))
+    (is (not= (->Money 1M 2) (->MoneyDraft 1M 2)))
+    (is (not= (->Money 1M 2) {:amount 1M, :count 2}))
+    (is (not= {:amount 1M, :count 2} (->Money 1M 2)))
+    (is (not (.equals (->Money 1M 2) {:amount 1M, :count 2})))))
+
+(deftest java-map-interface-test
+  (let [m ^java.util.Map (->Money 1M 2)]
+    (is (= 1M (.get m :amount)))
+    (is (nil? (.get m :nope)) "java.util.Map.get returns null for a missing key, as the interface says")
+    (is (.containsKey m :count))
+    (is (.containsValue m 2))
+    (is (not (.isEmpty m)))
+    (is (= 2 (.size m)))
+    (is (= #{:amount :count} (set (.keySet m))))
+    (is (= #{[:amount 1M] [:count 2]} (set (map (fn [^java.util.Map$Entry e] [(.getKey e) (.getValue e)]) (.entrySet m)))))
+    (is (thrown? UnsupportedOperationException (.put m :amount 2M)))
+    (is (= {} (empty m)))
+    (is (= [[:amount 1M] [:count 2]] (reduce-kv (fn [acc k v] (conj acc [k v])) [] m)) "kvreduce in field order")))
+
+(deftest conj-test
+  (let [d (->MoneyDraft 1M 2)]
+    (is (= 5M (:amount (conj d [:amount 5M]))))
+    (is (= 5M (:amount (conj d (clojure.lang.MapEntry/create :amount 5M)))))
+    (is (= 5M (:amount (conj d {:amount 5M}))))
+    (is (= 5M (:amount (conj d (java.util.HashMap. {:amount 5M})))))
+    (is (identical? d (conj d nil)))
+    (is (thrown? IllegalArgumentException (conj d [:amount 5M :extra])))))
+
+(deftest a-field-cannot-shadow-the-declaration-test
+  (testing "a field named like the generated declaration var does not replace the checks"
+    (eval-here '(pt/defparsed Shadow [ShadowDraft-declaration]
+                  (pure ::never "Never passes." [ShadowDraft-declaration] false)))
+    (let [d ((resolve 'parsed-types.defparsed-test/->ShadowDraft) {:parses-to (resolve 'parsed-types.defparsed-test/Shadow)
+                                                                  :checks []})]
+      (is (= 400 (:status-code (try (pt/parse d) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
+
+(deftest field-name-limits-test
+  (doseq [[fields re] [['[a.b] #"cannot contain a dot"]
+                       ['[a-b a_b] #"compile to the same Java name"]
+                       ['[__meta] #"cannot start with __"]]]
+    (is (re-find re (str (compile-error (list 'pt/defparsed 'Limits fields)))))))

@@ -32,7 +32,8 @@
   passes of the checks that do not read the field it sets."
   (:refer-clojure :exclude [let])
   (:require
-   [clojure.set :as set])
+   [clojure.set :as set]
+   [clojure.string])
   (:import
    (clojure.lang Reflector)
    (com.google.common.collect MapMaker)
@@ -137,12 +138,28 @@
                               (clojure.lang.MapEntry/create ~k (.valAt ~this ~k))
                               nil))
       (~'count [~this] ~(count fields))
-      (~'cons [~this ~o] (clojure.core/reduce (fn [m# [k# v#]] (clojure.core/assoc m# k# v#))
-                                              ~this
-                                              (if (clojure.core/map? ~o) ~o (clojure.core/some-> ~o clojure.core/vector))))
+      ;; like APersistentMap.cons: nil, a map entry, a pair, or a seq of entries
+      (~'cons [~this ~o]
+       (clojure.core/cond
+         (clojure.core/nil? ~o)                   ~this
+         (clojure.core/instance? java.util.Map$Entry ~o)
+         (clojure.core/assoc ~this (.getKey ~(with-meta o {:tag 'java.util.Map$Entry}))
+                             (.getValue ~(with-meta o {:tag 'java.util.Map$Entry})))
+         (clojure.core/vector? ~o)
+         (if (clojure.core/= 2 (clojure.core/count ~o))
+           (clojure.core/assoc ~this (clojure.core/nth ~o 0) (clojure.core/nth ~o 1))
+           (throw (IllegalArgumentException. "Vector arg to map conj must be a pair")))
+         :else
+         (clojure.core/reduce (fn [m# e#] (clojure.core/assoc m# (.getKey ^java.util.Map$Entry e#)
+                                                             (.getValue ^java.util.Map$Entry e#)))
+                              ~this
+                              (clojure.core/seq ~o))))
       (~'empty [~this] {})
+      ;; like defrecord: the same class, and each field `=`, so 1.0M equals 1.00M and an Integer equals a Long
       (~'equiv [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
-                                             (clojure.lang.APersistentMap/mapEquals ~this ~o)))
+                                             ~@(map (fn [fld] `(clojure.core/= ~fld (.valAt ~(with-meta o {:tag 'clojure.lang.ILookup})
+                                                                                                ~(keyword fld))))
+                                                    fields)))
       (~'seq [~this] (clojure.core/seq ~entries))
       (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
       (~'valAt [~this ~k] ~(lookup `(no-field! ~this ~k)))
@@ -192,7 +209,13 @@
   (when-not (apply distinct? ::sentinel fields)
     (throw (ex-info (str "a field is named twice: " (pr-str form)) {:form form})))
   (when-let [special (seq (filter #(or (special-symbol? %) (= '& %)) fields))]
-    (throw (ex-info (str "a field cannot be named like a special form: " (vec special)) {:form form}))))
+    (throw (ex-info (str "a field cannot be named like a special form: " (vec special)) {:form form})))
+  (when-let [dotted (seq (filter #(clojure.string/includes? (name %) ".") fields))]
+    (throw (ex-info (str "a field name cannot contain a dot: " (vec dotted)) {:form form})))
+  (when-let [clash (seq (for [[_ fs] (group-by #(munge (name %)) fields) :when (< 1 (count fs))] fs))]
+    (throw (ex-info (str "these fields compile to the same Java name: " (vec (first clash))) {:form form})))
+  (when-let [reserved (seq (filter #(clojure.string/starts-with? (name %) "__") fields))]
+    (throw (ex-info (str "a field name cannot start with __, which deftype reserves: " (vec reserved)) {:form form}))))
 
 (defn- print-method-form [name]
   ;; `#ns.Type{...}`, like a record, so a value is told apart from a plain map at the REPL. The reader cannot build one
@@ -420,7 +443,8 @@
           :checks    ~checks
           :fetches   ~fetches
           :children  ~children})
-       (defdraft-type ~draft-name ~fields ~decl-sym)
+       ;; qualified, so a field named like the declaration cannot shadow it
+       (defdraft-type ~draft-name ~fields ~(symbol (str *ns*) (str decl-sym)))
        (register-draft! ~parsed-name ~draft-name)
        ~parsed-name)))
 

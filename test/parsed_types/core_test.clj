@@ -380,3 +380,9 @@
   (testing "a fetch reads the world, so it may hold a database handle; only pure checks must close over nothing"
     (is (= {:a 1} (into {} (pt/parse (->ClosureDraft 1)))))
     (is (= 403 (:status-code (thrown-data #(pt/parse (->ClosureDraft 2))))))))
+
+(deftest a-hand-written-declaration-may-not-use-reserved-names-test
+  (reset! bad-declaration {:parses-to BadParsed
+                           :checks    [{:name :parsed-types.child/a, :doc "d", :kind :pure, :reads [:a], :f (fn [_] true)}]})
+  (is (re-find #"reserved for child-field checks"
+               (ex-message (try (pt/parse (->BadDraft 1)) (catch clojure.lang.ExceptionInfo e e))))))
