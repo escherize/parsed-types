@@ -10,9 +10,10 @@ The README covers how to use the library; this page covers what it promises and 
 | `pt/parsed` accepts only values `parse` made | A parsed value has a hidden `parse-proof` field. `parse` sets it to a private token. `pt/parsed` first checks that the value's class is one `defparsed` registered, by identity, then asks the value `(issuedWith token)`, which compares inside the type | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The token never leaves the value | The field is `volatile-mutable`, which Clojure compiles to a non-public field that interop can't read, and nothing sets it after the constructor. No public method returns it. A hand-written class is refused before it is asked, so it never sees the token | `the-proof-never-leaves-the-value-test` |
 | A hand-written type is refused, even with the same name | `pt/parsed` requires the class `defparsed` registered, by identity. The class name decides only which declared type a value counts as | `a-hand-written-class-with-the-same-name-is-refused-test` |
+| A type of one namespace can't stand in for another's | `register!` records the namespace, as written, that first defined each parsed class name. A `defparsed` in another namespace whose name compiles to the same Java class name, such as `my_app.bank` for `my-app.bank`, throws `::bad-declaration` when it loads, so it registers nothing | `a-class-name-belongs-to-one-namespace-test` |
 | A parsed value can't be built by accident | `defparsed` removes the parsed type's `->Name` factory, so `(->Debit ...)` doesn't compile. `(Debit. a b c nil)` compiles, and `pt/parsed` refuses it | `the-positional-factory-is-removed-test`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The proof is not part of the map | `parse-proof` isn't a key, and isn't in `seq`, `count`, equality, hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
-| A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type. `defparsed-type` and `defdraft-type` are private, so calling them doesn't compile, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
+| A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type, and a class name belongs to the namespace that first defined it. `defparsed-type` and `defdraft-type` are private, so calling them doesn't compile, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
 | A declaration error is found when the `defparsed` loads, at the latest | The macro refuses what it can see when it expands. The expansion builds and checks the plan when it loads, and throws `::bad-declaration` then | `compile-errors-test`, `declaration-errors-at-load-test` |
 | A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
 | A parsed value holds only immutable values | `parse` walks every field of every draft in the tree, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test`, `a-mutable-value-in-a-child-is-refused-test` |
@@ -50,6 +51,8 @@ and these gaps, are accepted:
   closed: `pt/parsed` refuses it.
 - **Mutable values are refused by a walk of known classes.** It trusts a class's interfaces: a type that implements
   `IPersistentVector` mutably passes. There is no opt-out for mutable values yet.
+- **`in-ns` can redefine a namespace's types.** Code that switches into a namespace with `in-ns` and runs a
+  `defparsed` there redefines its types, with whatever checks it writes, the same way a REPL reload does.
 - **External checks can go stale.** An external check reads the world at the moment of `parse`. A balance that
   passed can change later, so parse right before you act.
 
@@ -134,7 +137,8 @@ The expansion builds and checks the plan when it loads, before any `parse`. It t
   `clojure.walk`. Use `(into {} x)` for a plain map.
 - **What a parent check sees.** Each child is a value of its parsed type that passed its pure checks, built without
   the token. Inside the check, `pt/parsed` refuses it. When the whole tree passes, `parse` builds each node again with
-  the token. The issued value equals what the checks saw, but it is a different object. A parent's pure checks run
+  the token. The issued value has the same fields as the value the checks saw, but that value lacks the proof, so the
+two are not equal. A parent's pure checks run
   before any external check. A parent's external checks run after the children's, and one that reads a child that
   failed an external check is held, so it can't throw over the child's failure.
 - **Every check runs every time.** `parse` and `parse-all` run every check of every draft in the tree. There is no
@@ -167,7 +171,9 @@ definition stands in for the old one, the way Ring's `#'handler` follows the lat
 - Compiled sinks, such as `(pt/parsed Debit x)` and `match`, accept values of the new class.
 - A draft of the old class still parses, with the plan it was defined with.
 
-Two classes share a name only when a REPL re-evaluates the namespace that defined them. Reloading
+Two registered classes share a name only when the namespace that defined them defines them again: a REPL reload, or
+code that switches into that namespace with `in-ns`. A `defparsed` in another namespace whose name compiles to the
+same Java name is refused. Reloading
 `parsed-types.core` itself keeps the token, which is a `defonce`, so values already issued stay parsed.
 
 ## Design decisions

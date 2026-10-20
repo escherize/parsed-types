@@ -623,7 +623,8 @@
        ~(defparsed-type parsed-name fields)
        ~(defdraft-type draft-name fields)
        ;; through `var`, because `register!` is private: only this expansion may record a plan
-       ((var register!) ~parsed-name ~draft-name {:checks ~checks, :fetches ~fetches, :children ~children}
+       ((var register!) '~(ns-name *ns*) ~parsed-name ~draft-name
+        {:checks ~checks, :fetches ~fetches, :children ~children}
         ~(builders parsed-name draft-name fields))
        ~parsed-name)))
 
@@ -633,6 +634,12 @@
 ;; loads. Weak, so the classes a REPL replaces can be collected.
 (defonce ^:private ^Map registry
   (.makeMap (.weakKeys (MapMaker.))))
+
+;; Parsed class name -> the namespace, as written, whose `defparsed` first defined it. Types compare by class name, and
+;; `my-app.bank` and `my_app.bank` compile to the same Java names, so without this a `defparsed` in one could stand in
+;; for the types of the other.
+(defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
+  (java.util.concurrent.ConcurrentHashMap.))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
 
@@ -760,7 +767,16 @@
   "Build and check the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the
   `builders` [[defparsed]] generated. Called by the expansion of [[defparsed]], when it loads; throws
   `::bad-declaration` then."
-  [parsed-type draft-type decl builders]
+  [ns-sym parsed-type draft-type decl builders]
+  (let [class-name (.getName ^Class parsed-type)
+        owner      (or (.putIfAbsent owners class-name ns-sym) ns-sym)]
+    (when-not (= owner ns-sym)
+      (bad-declaration! draft-type ::rule/class-name-taken
+                        (str class-name " is already defined by a defparsed in the namespace " owner ", and the"
+                             " namespace " ns-sym " compiles to the same Java class name. Parsed types compare by"
+                             " class name, so one namespace's types could stand in for the other's. Rename one of the"
+                             " namespaces, as in " ns-sym "-2.")
+                        {:class class-name, :owner owner, :ns ns-sym})))
   (let [plan (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
     (.put registry draft-type plan)
     (.put registry parsed-type plan)))

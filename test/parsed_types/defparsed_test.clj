@@ -258,6 +258,34 @@
       (testing "while membership is still by name: the real value counts as the type"
         (is (pt/parsed? genuine real))))))
 
+(defn- eval-in
+  "Evaluate `form` in the namespace `ns-sym`, created with clojure.core referred and parsed-types.core as pt."
+  [ns-sym form]
+  (binding [*ns* (create-ns ns-sym)]
+    (refer-clojure)
+    (require '[parsed-types.core :as pt])
+    (eval form)))
+
+(deftest a-class-name-belongs-to-one-namespace-test
+  (eval-in 'pt-owner.my-app.bank '(pt/defparsed Debit [amount] (pure ::pos "The amount is positive." [amount] (pos? amount))))
+  (let [real-type (eval-in 'pt-owner.my-app.bank 'Debit)
+        sink      (eval-in 'pt-owner.my-app.bank '(fn [d] (:amount (pt/parsed Debit d))))]
+    (testing "a namespace whose name compiles to the same Java package cannot define a type of that name"
+      (let [e (try (eval-in 'pt-owner.my_app.bank '(pt/defparsed Debit [amount])) nil
+                   (catch Throwable t (if (ex-data t) t (ex-cause t))))]
+        (is (= {:type  ::pt/bad-declaration, :rule :parsed-types.rule/class-name-taken
+                :class "pt_owner.my_app.bank.Debit", :owner 'pt-owner.my-app.bank, :ns 'pt-owner.my_app.bank}
+               (select-keys (ex-data e) [:type :rule :class :owner :ns])))
+        (is (re-find #"already defined by a defparsed in the namespace pt-owner.my-app.bank" (ex-message e)))
+        (is (re-find #"Rename one of the namespaces" (ex-message e)))))
+    (testing "so its drafts parse to nothing, and the sink accepts nothing from it"
+      (is (= ::pt/bad-input (:type (try (eval-in 'pt-owner.my_app.bank '(pt/parse (->DebitDraft -1000))) nil
+                                        (catch Throwable t (ex-data (if (ex-data t) t (ex-cause t)))))))))
+    (testing "the owning namespace may redefine it, as a REPL reload does"
+      (eval-in 'pt-owner.my-app.bank '(pt/defparsed Debit [amount] (pure ::pos "The amount is positive." [amount] (pos? amount))))
+      (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse (->DebitDraft 5))))))
+      (is (= (.getName ^Class real-type) (.getName ^Class (eval-in 'pt-owner.my-app.bank 'Debit)))))))
+
 ;;; Field names
 
 (pt/defparsed Awkward [count map set str seq into contains? or when keys]

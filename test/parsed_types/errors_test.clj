@@ -58,6 +58,14 @@
 (defn- compiling [form]
   #(binding [*ns* (the-ns 'parsed-types.errors-test)] (eval form)))
 
+(defn- in-ns-named
+  "A thunk that evaluates `form` in the namespace `ns-sym`, created with clojure.core and parsed-types.core as pt."
+  [ns-sym form]
+  #(binding [*ns* (create-ns ns-sym)]
+     (refer-clojure)
+     (require '[parsed-types.core :as pt])
+     (eval form)))
+
 (def ^:private real (pt/parse (->DebitDraft 1 2 30M)))
 
 (def ^:private draft (->DebitDraft 1 2 30M))
@@ -141,6 +149,10 @@
     "(child a java.lang.String)" "Name one of those"]
    [:fetch-not-fn (compiling '(pt/defparsed E2 [a] (external ::c "d" [] [r ::f] (some? r)) (fetch ::f [a] 42)))
     "is 42, not a fn" "(fetch :parsed-types.errors-test/f [a] rows-by-id)"]
+   [:class-name-taken #(do ((in-ns-named 'errs.my-app '(pt/defparsed Owned [x])))
+                           ((in-ns-named 'errs.my_app '(pt/defparsed Owned [x]))))
+    "errs.my_app.Owned is already defined by a defparsed in the namespace errs.my-app" "the namespace errs.my_app"
+    "Rename one of the namespaces"]
    [:pure-check-closes-over-locals
     ;; a defparsed inside a let compiles once its type exists, as when a REPL re-evaluates it
     #(do ((compiling '(pt/defparsed Guarded [a])))
