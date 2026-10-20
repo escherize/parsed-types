@@ -141,9 +141,10 @@ Class names in ex-data are strings, so ex-data can be serialized. For `::invalid
   written, and a failed one holds every later one that shares a field, so the smaller check goes first. A check that
   reads no field shares none, so it may go anywhere.
 
-`pt/draft` refuses anything but a literal map, and a literal map that names a key that isn't a field, or leaves a
-field out. `match` refuses a missing
-member, a type that isn't a member, and a member handled twice. A call to `pt/defparsed-type`, `pt/defdraft-type` or
+`pt/draft` refuses a type named by anything but a symbol, anything but a literal map, and a literal map that names a
+key that isn't a field, or leaves a field out. `match` refuses a sum or a clause type named by anything but a symbol,
+a missing member, a type that isn't a member, and a member handled twice. For a name written as a string or a
+keyword, the message names the symbol to write. A call to `pt/defparsed-type`, `pt/defdraft-type` or
 a parsed type's `->Name` doesn't compile.
 
 ## Errors caught when a `defparsed` loads

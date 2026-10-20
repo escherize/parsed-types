@@ -99,6 +99,8 @@
    [:bad-sum-members (compiling '(pt/defsum Bad [Debit Debit])) "[Debit Debit]" "(defsum Bad [Debit Credit])"]
    [:sum-name-not-symbol (compiling '(pt/defsum "Bad" [Debit Credit])) "the name \"Bad\" is not a symbol"
     "(defsum Transaction [Debit Credit])"]
+   [:match-sum-not-a-symbol (compiling '(fn [x] (pt/match "Txn" x Debit d 1 Credit c 2))) "the sum \"Txn\" is not a symbol"
+    "(pt/match Txn x Debit d 1 Credit c 2)"]
    [:match-not-a-sum (compiling '(fn [x] (pt/match Debit x Debit d 1))) "Debit is not a sum" "(pt/defsum Transaction [Debit Credit])"]
    [:match-clause-shape (compiling '(fn [x] (pt/match Txn x Debit d))) "2 clause forms" "Debit d (f d)"]
    [:match-not-a-type (compiling '(fn [x] (pt/match Txn x nope d 1 Credit c 2))) "nope is not a type"
@@ -251,6 +253,8 @@
    ;; pt/draft
    [:draft-not-a-literal-map (compiling '(fn [m] (pt/draft Debit m))) "pt/draft: m is not a literal map"
     "(pt/draft Debit {:user-id ..., :account-id ..., :amount ...})" "(->DebitDraft ...)"]
+   [:draft-type-not-a-symbol (compiling '(pt/draft "Credit" {:amount 1})) "the type \"Credit\" is not a symbol"
+    "(pt/draft Credit {:amount 1})"]
    [:draft-not-a-parsed-type (compiling '(pt/draft String {})) "String is not a type defined with defparsed"
     "(pt/draft Debit {...})"]
    [:draft-literal-unknown-keys (compiling '(pt/draft Debit {:user-id 1, :account-id 2, :amont 3}))
@@ -411,6 +415,22 @@
       (is (= :parsed-types.rule/not-a-draft rule))
       (is (str/includes? message "It is a Debit that pt/parse did not issue: a value with no proof. Build a draft and parse that, as in (pt/parse (->DebitDraft ...))."))
       (is (not (str/includes? message "already parsed")))))
+  (testing "a type or sum named by something other than a symbol: each fix the message names compiles"
+    (doseq [[form fixed?] [['(pt/draft "Credit" {:amount 1}) #(instance? CreditDraft %)]
+                           ['(pt/draft :Credit {:amount 1}) #(instance? CreditDraft %)]
+                           ['(fn [x] (pt/match "Txn" x Debit d 1 Credit c 2)) fn?]
+                           ['(fn [x] (pt/match :Txn x Debit d 1 Credit c 2)) fn?]]]
+      (let [{:keys [rule message]} (error (compiling form))
+            fix                    (re-find #"\(pt/(?:draft|match) .*\)(?=\.$)" (str message))]
+        (is (#{:parsed-types.rule/draft-type-not-a-symbol :parsed-types.rule/match-sum-not-a-symbol} rule) (pr-str form))
+        ;; the match is written inside (fn [x] ...), so its fix goes there too
+        (is (fixed? ((compiling (cond->> (read-string fix) (= 'fn (first form)) (list 'fn '[x]))))) fix)))
+    (testing "and a clause named by a keyword or a string says which symbol to write"
+      (doseq [clause [:Debit "Debit"]]
+        (let [{:keys [rule message]} (error (compiling (list 'fn '[x] (list 'pt/match 'Txn 'x clause 'd 1 'Credit 'c 2))))]
+          (is (= :parsed-types.rule/match-not-a-type rule))
+          (is (str/includes? message (str "Write Debit for " (pr-str clause) ", naming one of [Debit Credit].")))))
+      (is (fn? ((compiling '(fn [x] (pt/match Txn x Debit d 1 Credit c 2))))))))
   (testing "parse of a value parse issued says it is already parsed"
     (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
 

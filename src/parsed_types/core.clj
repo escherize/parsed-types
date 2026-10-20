@@ -680,7 +680,16 @@
   `::not-parsed`."
   [sum-name x & clauses]
   (let [refuse! (fn [rule message data]
-                  (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (str sum-name)))))
+                  (throw (ex-info message (assoc data :type ::bad-declaration, :rule rule, :sum (pr-str sum-name)))))
+        _       (when-not (symbol? sum-name)
+                  (refuse! ::rule/match-sum-not-a-symbol
+                           (str "match: the sum " (pr-str sum-name) " is not a symbol. match names a sum by its"
+                                " symbol. Write "
+                                (if (or (string? sum-name) (keyword? sum-name))
+                                  (pr-str (list* 'pt/match (symbol (name sum-name)) x clauses))
+                                  "(pt/match Transaction x Debit d (f d) Credit c (g c))")
+                                ".")
+                           {}))
         sum-var (resolve sum-name)
         s       (when (var? sum-var) @sum-var)
         _       (when-not (sum? s)
@@ -694,7 +703,15 @@
                                 " clause is a type, a binding, and an expression. Write clauses like Debit d (f d).")
                            {:clauses clauses}))
         triples (partition 3 clauses)
-        types   (map (fn [[t]] (let [c (resolve t)]
+        members (mapv #(symbol (.getSimpleName ^Class %)) (sum-members s))
+        types   (map (fn [[t]] (let [_ (when-not (symbol? t)
+                                         (refuse! ::rule/match-not-a-type
+                                                  (str "match on " sum-name ": the clause " (pr-str t) " is not a symbol."
+                                                       " Each clause starts with a member type, by its symbol. Write "
+                                                       (if (or (string? t) (keyword? t)) (symbol (name t)) (first members))
+                                                       " for " (pr-str t) ", naming one of " members ".")
+                                                  {:clause (pr-str t)}))
+                                     c (resolve t)]
                                  (when (class? c) (not-loaded! (str "match on " sum-name) c))
                                  (when-not (class? c)
                                    (refuse! ::rule/match-not-a-type
@@ -1901,6 +1918,15 @@
     (pt/draft Debit {:user-id u, :account-id 1, :amount 30M})"
   [parsed-type m]
   (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
+        _       (when-not (symbol? parsed-type)
+                  (refuse! ::rule/draft-type-not-a-symbol
+                           (str "pt/draft: the type " (pr-str parsed-type) " is not a symbol. pt/draft names a parsed"
+                                " type by its symbol. Write "
+                                (if (or (string? parsed-type) (keyword? parsed-type))
+                                  (pr-str (list 'pt/draft (symbol (name parsed-type)) m))
+                                  "(pt/draft Debit {...})")
+                                ".")
+                           {:got (pr-str parsed-type)}))
         cls     (resolve parsed-type)
         _       (when (class? cls) (not-loaded! "pt/draft" cls))
         dcls    (when (and (parsed-type? cls) (.get registry cls)) (:draft-class (.get registry cls)))
