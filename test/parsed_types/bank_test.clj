@@ -180,7 +180,12 @@
     (is (= {:type ::pt/bad-input, :draft "parsed_types.bank_test.TransferDraft", :field :amount}
            (select-keys (thrown-data #(pt/parse (->PayrollDraft :ada 1 [(->TransferDraft :ada 1 2 (atom 1M))])))
                         [:type :draft :field])))
-    (is (= [] @fetched))))
+    (is (= [] @fetched)))
+  (testing "a child field's vector may carry no metadata, empty or not, since the parsed value holds a new vector"
+    (doseq [kids [[] [(->TransferDraft :ada 1 2 1M)]]]
+      (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/child-field-metadata, :field :transfers}
+             (select-keys (thrown-data #(pt/parse (->PayrollDraft :ada 1 (with-meta kids {:sneaky (atom 1)}))))
+                          [:type :rule :field]))))))
 
 ;;; A budget: a tree of one type
 

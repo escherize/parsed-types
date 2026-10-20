@@ -1078,6 +1078,14 @@
   checked as its own node. There is no opt-out. `walked` is as for [[not-immutable]]."
   [draft {:keys [children]} values walked]
   (doseq [[field v] values
+          :when       (and (contains? children field) (instance? clojure.lang.IObj v) (some? (meta v)))]
+    (throw (ex-info (str (.getSimpleName (class draft)) ": the child field " field " holds a vector with the metadata "
+                         (pr-str (meta v)) ". The parsed value holds a new vector of the parsed children, so the"
+                         " metadata would be dropped. Keep the metadata beside the draft, as in {:value x, :meta m},"
+                         " and pass the vector without it, as in (with-meta v nil).")
+                    {:type ::bad-input, :rule ::rule/child-field-metadata, :draft (.getName (class draft))
+                     :field field})))
+  (doseq [[field v] values
           :when       (not (contains? children field))
           :let        [[path what fix got] (not-immutable v [] walked)]
           :when       what]
@@ -1137,12 +1145,16 @@
                                   " it in smaller parts, as with (pt/parse-all parts).")
                              {}))
             st   (assoc (start draft walked) :tree tree :path path)
-            kids (for [[field {:keys [kind], :as child}] (get-in st [:plan :children])
+            ;; the child fields of the right shape: their children are walked, and an empty vector is rebuilt too
+            ok   (filterv (fn [[field child]] (children-of-type? (:plan st) field child (get-in st [:values field])))
+                          (get-in st [:plan :children]))
+            kids (for [[field {:keys [kind]}] ok
                        :let  [v (get-in st [:values field])]
-                       :when (children-of-type? (:plan st) field child v)
                        [i d] (if (= :one kind) (when v [[nil v]]) (map-indexed vector v))]
                    [field (child-path path field i) d])
-            st   (assoc st :child-paths (reduce (fn [m [field p]] (update m field (fnil conj []) p)) {} kids))]
+            st   (assoc st :child-paths (reduce (fn [m [field p]] (update m field conj p))
+                                                (into {} (map (fn [[field]] [field []])) ok)
+                                                kids))]
         ;; pushing the children in order pops the last first, so the reverse of this pre-order is a post-order with
         ;; the children in order
         (recur (into (rest stack) (map (fn [[_ p d]] [d p (inc depth)])) kids) (conj pre st)))
@@ -1197,11 +1209,12 @@
 (declare build-parsed)
 
 (defn- child-inputs
-  "The node's field values, with each child field holding `(built path)` for the path of each of its children."
+  "The node's field values, with each child field holding `(built path)` for the path of each of its children: a new
+  vector for `children`, empty ones included, and nil or the one child for `child`."
   [{:keys [plan values child-paths]} built]
   (reduce-kv (fn [m field paths]
                (assoc m field (if (= :one (get-in plan [:children field :kind]))
-                                (built (first paths))
+                                (some-> (first paths) built)
                                 (mapv built paths))))
              values child-paths))
 

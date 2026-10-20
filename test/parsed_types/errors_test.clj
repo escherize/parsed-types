@@ -169,6 +169,8 @@
    [:parse-all-not-a-vector #(pt/parse-all draft) "pt/parse-all got a DebitDraft" "(pt/parse-all [draft])"
     "(pt/parse draft)"]
    [:not-a-draft #(pt/parse {:amount 1}) "pt/parse got a plain map" "(pt/parse (pt/draft Debit {:user-id u, ...}))"]
+   [:child-field-metadata #(pt/parse (->WideDraft (with-meta [] {:sneaky (atom 1)})))
+    "WideDraft: the child field :parts holds a vector with the metadata" "(with-meta v nil)"]
    [:mutable-value #(pt/parse (->DebitDraft 1 2 (atom 1))) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
    [:tree-too-deep #(pt/parse (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range 1000)))
