@@ -1138,7 +1138,7 @@
                                 (not-loaded! (str (.getSimpleName ^Class (:draft-class parent)) ": the child field " field)
                                              (class d)))
                               (and (draft-value? d)
-                                (let [c (:parses-to (plan-for d))]
+                                (let [c (:parses-to (plan-for "pt/parse" d))]
                                   (when (and (named-member parsed-type c) (not (member? parsed-type c)))
                                     (stale-child! parent field child d c))
                                   (member? parsed-type c))))]
@@ -1227,33 +1227,41 @@
 
 (declare issued?)
 
-(defn- plan-for [draft]
+(defn- plan-for
+  "The plan of `draft`'s type. Throws `::bad-input` for anything but a draft of a type [[defparsed]] defined, naming
+  `fn-name`, the fn that got it, and its fix as a call of that fn."
+  [fn-name draft]
   (when-not (draft-value? draft)
-    (when (instance? DraftValue draft) (not-loaded! "pt/parse" (class draft)))
-    (throw (ex-info (str "pt/parse got " (describe draft) ". It parses only drafts of types defparsed defined."
-                         (cond
-                           (issued? draft)
-                           " It is already parsed: pass it as it is, or call (pt/draft-of x) to get its draft."
+    (when (instance? DraftValue draft) (not-loaded! fn-name (class draft)))
+    (let [call (fn [arg] (if (= "pt/parse-all" fn-name) (str "(pt/parse-all [" arg "])") (str "(" fn-name " " arg ")")))]
+      (throw (ex-info (str fn-name " got " (describe draft) ". It takes only drafts of types defparsed defined."
+                           (cond
+                             (issued? draft)
+                             (if (#{"pt/parse" "pt/parse-all"} fn-name)
+                               " It is already parsed: pass it as it is, or call (pt/draft-of x) to get its draft."
+                               (str " It is already parsed: pass its draft, as in " (call "(pt/draft-of x)") "."))
 
-                           (instance? ParsedValue draft)
-                           (str " It is a " (.getSimpleName (class draft)) " that pt/parse did not issue: a value"
-                                " with no proof. Build a draft and parse that, as in (pt/parse (->"
-                                (.getSimpleName (class draft)) "Draft ...)).")
+                             (instance? ParsedValue draft)
+                             (str " It is a " (.getSimpleName (class draft)) " that pt/parse did not issue: a value"
+                                  " with no proof. Build a draft and pass that, as in "
+                                  (call (str "(->" (.getSimpleName (class draft)) "Draft ...)")) ".")
 
-                           (map? draft)
-                           (str " Build a draft from its fields, naming every field, as in (pt/parse (pt/draft Debit"
-                                " {:user-id u, ...})), or with (pt/parse (->DebitDraft ...)).")
+                             (map? draft)
+                             (str " Build a draft from its fields, naming every field, as in "
+                                  (call "(pt/draft Debit {:user-id u, ...})") ", or with " (call "(->DebitDraft ...)")
+                                  ".")
 
-                           :else
-                           " Build one with its constructor, as in (pt/parse (->DebitDraft ...)), or with pt/draft."))
-                    {:type ::bad-input, :rule ::rule/not-a-draft, :got (some-> draft class .getName)})))
+                             :else
+                             (str " Build one with its constructor, as in " (call "(->DebitDraft ...)")
+                                  ", or with pt/draft.")))
+                      {:type ::bad-input, :rule ::rule/not-a-draft, :fn fn-name, :got (some-> draft class .getName)}))))
   (.get registry (class draft)))
 
 (defn declaration
   "The declaration `defparsed` wrote for `draft`'s type: `{:parses-to :checks :fetches :children}`, as data. Throws
   `::bad-input` for anything but a draft."
   [draft]
-  (:declaration (plan-for draft)))
+  (:declaration (plan-for "pt/declaration" draft)))
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
@@ -1421,8 +1429,8 @@
                              (when (= rule ::rule/value-too-deep)
                                {:path (subvec path 0 8), :depth (count path)})))))))
 
-(defn- start [draft walked]
-  (let [plan   (plan-for draft)
+(defn- start [fn-name draft walked]
+  (let [plan   (plan-for fn-name draft)
         ;; every field read once, so the checks and the parsed value see the same values
         values ((:read-draft plan) draft)]
     (refuse-mutable! draft plan values walked)
@@ -1448,9 +1456,9 @@
   (throw (ex-info message (merge {:type ::bad-input, :rule rule, :max-depth max-depth, :max-nodes max-nodes} data))))
 
 (defn- flatten-tree
-  "The drafts of the tree under `root`, children before parents, each with its `:path` from the root. `walked` is as
-  for [[not-immutable]]."
-  [tree root walked]
+  "The drafts of the tree under `root`, children before parents, each with its `:path` from the root. `fn-name` names
+  the fn that got `root`, and `walked` is as for [[not-immutable]]."
+  [fn-name tree root walked]
   (loop [stack (list [root [] 1]), pre []]
     (if-let [[draft path depth] (first stack)]
       (let [_    (when (< max-depth depth)
@@ -1465,7 +1473,7 @@
                                   " drafts, counting a draft each time it appears. A parse is bounded in size. Parse"
                                   " it in smaller parts, as with (pt/parse-all parts).")
                              {}))
-            st   (assoc (start draft walked) :tree tree :path path)
+            st   (assoc (start fn-name draft walked) :tree tree :path path)
             ;; the child fields of the right shape: their children are walked, and an empty vector is rebuilt too
             ok   (filterv (fn [[field child]] (children-of-type? (:plan st) field child (get-in st [:values field])))
                           (get-in st [:plan :children]))
@@ -1606,10 +1614,11 @@
      (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)]) wanted))))
 
 (defn- run-all
-  "Run the checks of every draft, and of every draft under it, and return one vector of nodes per draft."
-  [drafts]
+  "Run the checks of every draft, and of every draft under it, and return one vector of nodes per draft. `fn-name`
+  names the fn that got them."
+  [fn-name drafts]
   (let [walked       (java.util.IdentityHashMap.)
-        nodes        (pure-phase (into [] (comp (map-indexed (fn [i d] (flatten-tree i d walked))) cat) drafts))
+        nodes        (pure-phase (into [] (comp (map-indexed (fn [i d] (flatten-tree fn-name i d walked))) cat) drafts))
         unproven     (into #{} (comp (filter (comp seq :failed)) (map :tree)) nodes)
         ;; nothing in a tree touches the world until every pure check in it has run and passed
         nodes        (mapv #(assoc % :world? (not (unproven (:tree %)))) nodes)
@@ -1683,7 +1692,7 @@
 (defn- assoc-draft
   "`draft` with `field` set to `v`: a new draft. This is what `assoc` on a draft does; call `assoc`."
   [draft field v]
-  (let [{:keys [fields make-draft read-draft]} (plan-for draft)]
+  (let [{:keys [fields make-draft read-draft]} (plan-for "assoc" draft)]
     (when-not (some #{field} fields)
       (no-field! draft field "assoc"))
     (make-draft (assoc (read-draft draft) field v))))
@@ -1700,7 +1709,7 @@
                          " parsed values. Pass a vector, as in (pt/parse-all [draft]), or parse one draft with"
                          " (pt/parse draft).")
                     {:type ::bad-input, :rule ::rule/parse-all-not-a-vector, :got (some-> drafts class .getName)})))
-  (let [trees    (run-all drafts)
+  (let [trees    (run-all "pt/parse-all" drafts)
         failures (into (sorted-map) (keep-indexed (fn [i nodes] (some->> (tree-failures nodes) (vector i)))) trees)]
     (when (seq failures)
       (let [failing (map #(nth trees %) (keys failures))]
@@ -1722,7 +1731,7 @@
 
   Exceptions out of a check or fetch propagate."
   [draft]
-  (let [nodes (first (run-all [draft]))]
+  (let [nodes (first (run-all "pt/parse" [draft]))]
     (when-let [failures (tree-failures nodes)]
       (invalid! (.getSimpleName ^Class (:parses-to (:plan (peek nodes)))) (failed-names nodes) nodes
                 {:draft (.getName (class draft)), :failures failures}))
@@ -1816,7 +1825,7 @@
                                                   " pt/parse issued. Write " (parse-hint parsed-type)
                                                   " and pass the result.")}
 
-                                   (and (draft-value? x) (named-member parsed-type (:parses-to (plan-for x))))
+                                   (and (draft-value? x) (named-member parsed-type (:parses-to (plan-for "pt/parsed" x))))
                                    {:rule    ::rule/got-draft
                                     :message (str "Expected a parsed " t ", got " (describe x) ", which is not"
                                                   " checked yet. A sink takes only a value pt/parse issued. Call"
@@ -1893,10 +1902,14 @@
       (throw (ex-info (if (instance? DraftValue parsed)
                         (str "pt/draft-of got " (describe parsed) ", which is already a draft. draft-of turns a value"
                              " pt/parse issued back into a draft. Use the draft as it is.")
-                        (str "pt/draft-of got " (describe parsed)
-                             (when (instance? ParsedValue parsed) " that pt/parse did not issue")
-                             ". draft-of takes only a value pt/parse issued. Build a draft with its constructor"
-                             " instead, as in (->DebitDraft ...), or with (pt/draft Debit {...})."))
+                        (let [plan (when (instance? ParsedValue parsed) (.get registry (class parsed)))
+                              [t d] (if plan
+                                      [(.getSimpleName ^Class (:parses-to plan)) (.getSimpleName ^Class (:draft-class plan))]
+                                      ["Debit" "DebitDraft"])]
+                          (str "pt/draft-of got " (describe parsed)
+                               (when (instance? ParsedValue parsed) " that pt/parse did not issue")
+                               ". draft-of takes only a value pt/parse issued. Build a draft with its constructor"
+                               " instead, as in (->" d " ...), or with (pt/draft " t " {...}).")))
                       {:type ::not-parsed
                        :rule (if (instance? DraftValue parsed) ::rule/draft-of-a-draft ::rule/draft-of-unissued)
                        :got  (some-> parsed class .getName)})))

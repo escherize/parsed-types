@@ -263,7 +263,7 @@
 
 (deftest a-hand-made-draft-type-is-refused-test
   (testing "a deftype written by hand has no plan, so it parses to nothing"
-    (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-draft, :got "parsed_types.core_test.LyingDraft"}
+    (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-draft, :fn "pt/parse", :got "parsed_types.core_test.LyingDraft"}
            (thrown-data #(pt/parse (->LyingDraft 5)))))))
 
 (pt/defparsed Closure [a]

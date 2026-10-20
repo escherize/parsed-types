@@ -413,7 +413,7 @@
   (testing "parse of a value built by hand says it has no proof, and to build a draft"
     (let [{:keys [rule message]} (error #(pt/parse (Debit. 1 2 30M nil)))]
       (is (= :parsed-types.rule/not-a-draft rule))
-      (is (str/includes? message "It is a Debit that pt/parse did not issue: a value with no proof. Build a draft and parse that, as in (pt/parse (->DebitDraft ...))."))
+      (is (str/includes? message "It is a Debit that pt/parse did not issue: a value with no proof. Build a draft and pass that, as in (pt/parse (->DebitDraft ...))."))
       (is (not (str/includes? message "already parsed")))))
   (testing "a type or sum named by something other than a symbol: each fix the message names compiles"
     (doseq [[form fixed?] [['(pt/draft "Credit" {:amount 1}) #(instance? CreditDraft %)]
@@ -431,6 +431,20 @@
           (is (= :parsed-types.rule/match-not-a-type rule))
           (is (str/includes? message (str "Write Debit for " (pr-str clause) ", naming one of [Debit Credit].")))))
       (is (fn? ((compiling '(fn [x] (pt/match Txn x Debit d 1 Credit c 2))))))))
+  (testing "a fn that takes a draft names itself, and its fix calls it"
+    (doseq [[thunk fn-name fix] [[#(pt/declaration nil) "pt/declaration" "(pt/declaration (->DebitDraft ...))"]
+                                 [#(pt/declaration real) "pt/declaration" "(pt/declaration (pt/draft-of x))"]
+                                 [#(pt/parse-all [5]) "pt/parse-all" "(pt/parse-all [(->DebitDraft ...)])"]
+                                 [#(pt/parse 5) "pt/parse" "(pt/parse (->DebitDraft ...))"]]]
+      (let [{:keys [rule message]} (error thunk)]
+        (is (= :parsed-types.rule/not-a-draft rule))
+        (is (str/starts-with? message (str fn-name " got ")) message)
+        (is (str/includes? message fix) message)))
+    (is (= Debit (:parses-to (let [x real] (pt/declaration (pt/draft-of x))))) "and the fix works"))
+  (testing "draft-of of a value built by hand names the value's own type"
+    (let [message (:message (error #(pt/draft-of (Credit. 1 nil))))]
+      (is (str/includes? message "as in (->CreditDraft ...), or with (pt/draft Credit {...})") message)
+      (is (instance? CreditDraft (pt/draft Credit {:amount 1})))))
   (testing "parse of a value parse issued says it is already parsed"
     (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
 
