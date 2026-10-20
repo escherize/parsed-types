@@ -652,3 +652,45 @@
           flag? (Thread/interrupted)]
       (is (instance? InterruptedException e))
       (is (true? flag?) "the flag is set again; Thread/interrupted cleared it"))))
+
+;;; Immutable JDK values
+
+(defn- refusal-message [v]
+  (try (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title v})) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))
+
+(deftest immutable-jdk-values-are-accepted-test
+  (testing "URI, Locale, Currency, a Path of the default file system, enum constants and an Optional of one pass"
+    (doseq [v [(java.net.URI. "https://example.com/a?b=1") java.util.Locale/US (java.util.Currency/getInstance "EUR")
+               (java.nio.file.Path/of "tmp" (into-array String ["a.txt"])) java.util.concurrent.TimeUnit/SECONDS
+               java.math.RoundingMode/HALF_UP (java.util.Optional/empty) (java.util.Optional/of 1)
+               (java.util.Optional/of [1 {:a (java.util.Optional/of "x")}]) {:at (java.net.URI. "urn:a")}]]
+      (is (some? (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title v}))) (pr-str v))))
+  (testing "an Optional's value is walked"
+    (is (= {:type ::pt/bad-input, :field :title, :path '[<value>], :got "clojure.lang.Atom"}
+           (refusal (java.util.Optional/of (atom 1)))))
+    (is (= '[:k <value> 1] (:path (refusal {:k (java.util.Optional/of [1 (int-array 1)])})))))
+  (testing "a Path of another file system, or a class that only implements Path, is not known to be immutable"
+    (let [jrt (java.nio.file.FileSystems/getFileSystem (java.net.URI. "jrt:/"))]
+      (doseq [v [(.getPath jrt "modules" (make-array String 0)) (reify java.nio.file.Path)]]
+        (is (= :parsed-types.rule/not-known-immutable
+               (:rule (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title v})))))
+            (.getName (class v))))))
+  (testing "a URL is refused, since its equals looks the host up, and the fix the message names parses"
+    (let [url (java.net.URL. "https://example.com/a")]
+      (is (= :parsed-types.rule/url-value (:rule (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title url}))))))
+      (is (str/includes? (refusal-message url) "Use a java.net.URI, as in (.toURI url)."))
+      (is (some? (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (.toURI url)}))))))
+  (testing "any other class is refused as not known to be immutable, never as mutable, and (str x) parses"
+    (doseq [v [(Object.) (java.util.concurrent.atomic.AtomicLong. 1) (transient [])]]
+      (let [message (refusal-message v)]
+        (is (= :parsed-types.rule/not-known-immutable
+               (:rule (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title v}))))))
+        (is (str/includes? message "a value of a class not known to be immutable") message)
+        (is (not (re-find #"\bmutable" message)) message)
+        (is (str/includes? message "as in (str x).") message)
+        (is (some? (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (str v)})))))))
+  (testing "a value known to be mutable keeps its own message"
+    (doseq [[v what] [[(atom 1) "holds an atom"] [(java.util.Date. 0) "holds a mutable date"]
+                      [(java.util.ArrayList.) "holds a mutable Java collection"] [(map inc [1]) "holds a lazy seq"]]]
+      (is (str/includes? (refusal-message v) what))
+      (is (= :parsed-types.rule/mutable-value (:rule (thrown-data #(pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title v})))))))))

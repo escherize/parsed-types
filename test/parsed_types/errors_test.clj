@@ -187,6 +187,12 @@
     "(pt/parse (pt/draft Credit {:amount ...}))"]
    [:mutable-value #(pt/parse (pt/draft Debit {:user-id 1, :account-id 2, :amount (atom 1)})) "the field :amount holds an atom (clojure.lang.Atom)"
     "Deref it, as in @a."]
+   [:not-known-immutable #(pt/parse (pt/draft Credit {:amount (Object.)}))
+    "the field :amount holds a value of a class not known to be immutable (java.lang.Object)"
+    "the classes the library knows to be immutable" "Convert it to a value of an accepted class, as in (str x)."]
+   [:url-value #(pt/parse (pt/draft Credit {:amount (java.net.URL. "https://example.com")}))
+    "the field :amount holds a java.net.URL, whose equals and hashCode look its host up over the network (java.net.URL)"
+    "Use a java.net.URI, as in (.toURI url)."]
    [:value-too-deep #(pt/parse (pt/draft Debit {:user-id 1, :account-id 2, :amount (reduce (fn [x _] [x]) 1 (range 1001))}))
     "the field :amount at [0 0 0 0 0 0 0 0] and 993 levels more holds a value nested deeper than 1000 levels"
     "(vec (flatten v))" "(pr-str v)"]

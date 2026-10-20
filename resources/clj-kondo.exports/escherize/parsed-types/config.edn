@@ -20,6 +20,7 @@
                                  parsed-types.core/compile-plan        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/defclass-once       {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/defdraft-type       {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/default-path-class  {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/defined-in          {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/defparsed-type      {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/describe            {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}

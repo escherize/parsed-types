@@ -17,10 +17,10 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | A type whose `defparsed` stopped after its `deftype`s says so | Its classes are claimed but have no plan, so every use of them throws `type-not-loaded`, saying to fix the error and re-evaluate the `defparsed` | `declaration-errors-at-load-test` |
 | `defparsed` works only at the top level, and says so | Inside another form, the whole form compiles before any of it runs, so the classes would exist before the checks that guard them. `defparsed` throws when it has locals (`&env`) or compiles inside a fn body (`Compiler/METHOD` is bound) | `defparsed-only-at-the-top-level-test` |
 | A parsed value never equals a plain map, its draft, or a value built without the proof | The type's equality checks the class and the proof; it isn't marked map-equivalent, so Clojure's maps refuse it too. So `(contains? #{real} forged)` is false | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test`, `the-proof-is-not-a-key-test` |
-| A parsed value holds only immutable values | `parse` walks every field of the draft, deeply, and accepts only values known to be immutable. Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test` |
+| A parsed value holds only immutable values | `parse` walks every field of the draft, deeply, and accepts only the values listed under "Accepted field values". Anything else throws `::bad-input` with the field, the path inside it, the class and the fix | `mutable-field-values-are-refused-test` |
 | A field holds parsed values, never drafts | The walk refuses a draft anywhere in a field (`draft-in-field`), since no check of this parse looks inside it, and a value of a parsed type that `parse` did not issue (`unissued-in-field`) | `a-field-holds-parsed-values-not-drafts-test` |
 | An issued value in a field is not walked again | It proved its own checks and holds only immutable values, so the walk stops at it | `an-issued-value-in-a-field-is-not-walked-again-test` |
-| A clock is refused, though its class is a final `java.time` class | `java.time.Clock` and `InstantSource` values are refused before the `java.time` rule | `a-clock-is-refused-test` |
+| A clock is refused, though its class is a final `java.time` class | `Clock` and `InstantSource` are checked before the `java.time` rule | `a-clock-is-refused-test` |
 | The walk can't overflow the stack, or skip the depth limit through shared structure | The walk keeps an explicit stack, and records the height of each collection it walked: the most levels below it, a leaf inside counting one. One reached again is skipped when its deepest value is still within the limit from there, and walked again otherwise | `the-walk-keeps-its-own-stack-test`, `shared-structure-is-walked-again-when-reached-deeper-test`, `a-shared-collection-of-leaves-counts-its-leaves-test` |
 | The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test`, `a-shared-collection-of-leaves-is-walked-once-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator, the default methods included, throw `::cannot-change`. So do the mutators of `keySet`, `values` and `entrySet`, of their iterators, and `setValue` on an entry of `entrySet` | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `java-map-interface-test`, `every-java-map-mutator-throws-ex-info-test` |
@@ -86,8 +86,7 @@ pt/parse on it first, as in (pt/parse draft), and pass the result.
 ```
 
 The ex-data holds the same facts as data. When a key is not a field, the message suggests the nearest field, as in
-`Did you mean :account-id?`, and `:suggestion` holds it. Where a fix builds a value, it names `pt/draft` with the type's own fields, as in
-`(pt/parse (pt/draft Debit {:user-id ..., :account-id ..., :amount ...}))`. `parsed-types.errors-test` has an example of every
+`Did you mean :account-id?`, and `:suggestion` holds it. `parsed-types.errors-test` has an example of every
 rule, and fails when `core.clj` has a rule with no example, an `ex-info` without a `:rule`, or a `throw` of anything
 but an `ex-info`. Class names in ex-data are strings, so ex-data can be serialized, but for the exception a `:threw` entry holds.
 
@@ -173,7 +172,8 @@ Parsing (`::bad-input`, `::invalid`, `::bad-fetch`):
 
 - `not-a-draft`: `parse`, `parse-all` or `pt/declaration` got something that isn't a draft. The fix calls that fn.
 - `parse-all-not-a-vector`: `parse-all` got a single draft, a map, or something not sequential.
-- `mutable-value`: a field holds a value not known to be immutable. Fix: the conversion for its class.
+- `mutable-value`, `url-value`, `not-known-immutable`: a field holds a mutable value, a `java.net.URL`, or a value
+  of another class. See "Accepted field values".
 - `value-too-deep`: a field nests deeper than 1000 levels.
 - `draft-in-field`: a field holds a draft. Fix: `(pt/parse d)`, or `(pt/parse-all ds)` for a vector.
 - `unissued-in-field`: a field holds a value of a parsed type that `parse` didn't issue.
@@ -194,14 +194,36 @@ Sinks (`::bad-input`, `::not-parsed`, `::stale-type`):
 ## When each error is caught
 
 `defparsed`, `defsum`, `match` and `pt/draft` throw what they can see when they expand, so the file doesn't
-compile: every declaration and `pt/draft` rule above but `fetch-not-fn` and `type-not-loaded`. `match` reports a type
-that isn't a member before a missing member. A call to `pt/defparsed-type`, `pt/defdraft-type`, `->Name` or
-`->NameDraft` doesn't compile either.
+compile: every declaration and `pt/draft` rule above but `fetch-not-fn` and `type-not-loaded`. A call to
+`pt/defparsed-type`, `pt/defdraft-type`, `->Name` or `->NameDraft` doesn't compile either.
 
-The expansion checks the fetch fns when it loads, before its `deftype`s, so a re-evaluation that fails the check
-leaves the type as it was; a fetch fn therefore can't name the type being defined. An error later in the form, such
-as a check body that doesn't compile, comes after the `deftype`s: its classes then have no plan, and every use of
-them throws `type-not-loaded` until the `defparsed` is fixed and re-evaluated.
+The fetch fns are checked when the form loads, before its `deftype`s, so a refused re-evaluation leaves the type as
+it was, and a fetch fn can't name the type being defined. A later error, such as a check body that doesn't compile,
+leaves classes with no plan, which throw `type-not-loaded` until the `defparsed` is fixed and re-evaluated.
+
+## Accepted field values
+
+`parse` walks every field, map keys and metadata included, and accepts only these values:
+
+- nil; `Boolean`, `Character`, `String`, keywords, symbols, `UUID` and `Pattern`;
+- `Long`, `Integer`, `Short`, `Byte`, `Double`, `Float`, `BigInt`, `Ratio`, and `BigDecimal` and `BigInteger` by
+  exact class, since they can be subclassed;
+- `java.net.URI`, `java.util.Locale`, `java.util.Currency`, and a `java.nio.file.Path` of the default file system,
+  by exact class; a `Path` of another file system is refused;
+- Java enum constants, and classes;
+- a `java.util.Optional`, whose value is walked;
+- final classes of the `java.time` package, but not a `Clock` or `InstantSource`, which reads the time each time it
+  is asked;
+- values `parse` issued, which are not walked again;
+- persistent vectors, maps (records included), sets, lists and queues whose contents pass. A sorted map or set must
+  sort with the default comparator, since a custom one can read state that changes.
+
+Everything else is refused. A mutable value is refused with `mutable-value` and the fix for its class:
+`@a` for an atom, `(into [] a)` for an array, `(vec s)` for a lazy or other seq, since realizing one could run side
+effects or never end, `(.toInstant d)` for a `java.util.Date` or `java.sql.Timestamp`, and `(.toLocalDate d)` or
+`(.toLocalTime d)` for a `java.sql.Date` or `Time`, which throw on `.toInstant`. A `java.net.URL` is refused with
+`url-value`, since its `equals` looks the host up over the network: use `(.toURI url)`. Any other class is refused
+with `not-known-immutable`: convert it to an accepted value, as in `(str x)`.
 
 ## Behavior worth knowing
 
@@ -219,20 +241,8 @@ them throws `type-not-loaded` until the `defparsed` is fixed and re-evaluated.
   later check that shares a field with it runs, unless a check that ran and failed holds it too. When a pure check
   fails, no fetch and no external check of that draft runs. Each external check is listed under `:blocked` of the
   pure checks that ran and failed.
-- **Immutable values only.** Every field is walked, map keys and metadata included. Accepted: nil; `Boolean`,
-  `Character`, `String`, keywords, symbols, `UUID`, `Pattern`; `Long`, `Integer`, `Short`, `Byte`, `Double`,
-  `Float`, `BigInt`, `Ratio`, and `BigDecimal` and `BigInteger` by exact class, since they can be subclassed;
-  classes; final classes of the `java.time` package, but not a `java.time.Clock` or `InstantSource`, which reads the
-  time each time it is asked; values `parse` issued, which are not walked again; and persistent vectors, maps
-  (records included), sets, lists and queues whose contents pass. A sorted map or set must sort with the default
-  comparator: a custom comparator can read state that changes. Refused: drafts, values of a parsed type `parse`
-  didn't issue, and everything else, including lazy and other seqs, since realizing one could run side effects or
-  never end; pass `(vec ...)`. For an array the message names `(into [] a)`. A `java.sql.Date` is refused with
-  `(.toLocalDate d)` as the fix, a `java.sql.Time` with `(.toLocalTime d)`, since both throw on `.toInstant`, and a
-  `java.sql.Timestamp` with `(.toInstant d)`.
-- **Depth.** Nesting deeper than 1000 levels is refused, with the rule `value-too-deep`. The message shows the first
-  8 steps of a longer path, and so does `:path` in the ex-data, with `:depth` for its length. The walk keeps its own
-  stack, so a thread with a small stack gets the same answer.
+- **Depth.** Nesting deeper than 1000 levels is refused (`value-too-deep`). The message and `:path` show the first 8
+  steps of a longer path, and `:depth` its length.
 - **Cost.** The walk costs about 25 us for 1,000 numbers in 100 vectors; an issued value in a field costs one step.
   `clojure -M:bench` prints the current numbers.
 - **Fetch calls.** One call per declaration and fetch for the whole `parse-all`, with each distinct tuple once.

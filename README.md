@@ -190,9 +190,10 @@ the value. Equality reads the proof, so a value built by hand never equals a par
 
 Reading or setting a key that isn't a field throws. A record was rejected, because `assoc` on a record returns
 another record of the same class, which would look like proof. `parse` refuses a field that holds, anywhere inside
-it, a value not known to be immutable, such as an atom or a lazy seq: the accepted classes are
-[listed here](docs/guarantees.md#behavior-worth-knowing). The walk costs about 25 us per 1,000 numbers; an issued
-value in a field is not walked again. `clojure.walk` over a parsed value throws instead of dropping the proof.
+it, a value not known to be immutable, such as an atom or a lazy seq: the accepted classes, JDK values such as `URI`
+and `Locale` included, are [listed here](docs/guarantees.md#accepted-field-values). The walk costs about 25 us per
+1,000 numbers; an issued value in a field is not walked again. `clojure.walk` over a parsed value throws instead of
+dropping the proof.
 
 ### A sum lists its members, and `match` handles each one
 
@@ -231,7 +232,7 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after |
 | `::cannot-change` | code changed a parsed value, or called `dissoc`, `with-meta` or `empty` on a draft |
 | `::no-field` | code read or changed a key that isn't a field |
-| `::bad-input` | a field holds a mutable value, a draft or an unissued value; `pt/draft` got the wrong keys; `parse` got something that isn't a draft |
+| `::bad-input` | a field holds a value not known to be immutable, a draft or an unissued value; `pt/draft` got the wrong keys; `parse` got something that isn't a draft |
 | `::bad-declaration` | a `defparsed`, `defsum` or `match` has an error, or misses an argument, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no map, or no entry for a tuple |
 

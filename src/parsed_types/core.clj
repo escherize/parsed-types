@@ -1196,12 +1196,18 @@
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
+(def ^:private ^Class default-path-class
+  "The class of a `java.nio.file.Path` of the default file system, which the JDK documents as immutable. A `Path` of
+  another file system, such as a zip file's, is tied to a file system that can close, and is not accepted."
+  (class (.getPath (java.nio.file.FileSystems/getDefault) "" (make-array String 0))))
+
 (def ^:private ^java.util.Set immutable-classes
   "Classes whose values never change, by exact class: `BigDecimal` and `BigInteger` can be subclassed, so a subclass is
   not trusted. A `java.util.Set`, whose lookup of a class is the walk's most frequent call."
   (java.util.Set/of (object-array [Boolean Character String clojure.lang.Keyword clojure.lang.Symbol java.util.UUID
                                    java.util.regex.Pattern Long Integer Short Byte Double Float BigDecimal BigInteger
-                                   clojure.lang.BigInt clojure.lang.Ratio])))
+                                   clojure.lang.BigInt clojure.lang.Ratio java.net.URI java.util.Locale
+                                   java.util.Currency default-path-class])))
 
 (def ^:private max-value-depth
   "The most levels of nesting a field's value may have. A deeper one throws `::bad-input`."
@@ -1238,7 +1244,8 @@
 (defn- frames-of
   "`[:walk frames]` for `v`, at `path`: a frame for its metadata, then for each of `items`, the values inside it,
   through their own iterator, so [[add-frame]] is called from one place: a reduce would share its call site with
-  every other reduce in the program. `kind` is `:map`, `:indexed` or `:set`."
+  every other reduce in the program. `kind` is `:map`, `:indexed`, `:set`, or `:value` for the value an `Optional`
+  holds."
   [v ^Iterable items kind path ^longs acc]
   (let [deep? (<= max-value-depth (count path))
         m     (when (instance? clojure.lang.IObj v) (meta v))
@@ -1250,7 +1257,8 @@
                    :map     (let [k (key x)]
                               (-> fs (add-frame k '<key> path acc deep?) (add-frame (val x) k path acc deep?)))
                    :indexed (add-frame fs x i path acc deep?)
-                   :set     (add-frame fs x '<element> path acc deep?))
+                   :set     (add-frame fs x '<element> path acc deep?)
+                   :value   (add-frame fs x '<value> path acc deep?))
                  (inc i)))
         [:walk (persistent! fs)]))))
 
@@ -1289,11 +1297,21 @@
 
       (class? v) [:walk []]
 
+      ;; a constant of a Java enum, as java.util.concurrent.TimeUnit/SECONDS
+      (instance? Enum v) [:walk []]
+
+      (instance? java.util.Optional v)
+      (let [^java.util.Optional o v] (frames-of v (if (.isPresent o) [(.get o)] []) :value path acc))
+
       (some #(.isInstance ^Class % v) clock-classes)
       [:refuse ::rule/mutable-value "a clock, which reads the time each time it is asked"
        "Pass the instant it reads, as in (.instant clock)."]
 
       (java-time-value? c) [:walk []]
+
+      (instance? java.net.URL v)
+      [:refuse ::rule/url-value "a java.net.URL, whose equals and hashCode look its host up over the network"
+       "Use a java.net.URI, as in (.toURI url)."]
 
       :else
       (let [[what fix]
@@ -1314,18 +1332,17 @@
               (instance? clojure.lang.ISeq v)     ["a seq, which may be lazy" "Pass a vector, as in (vec s)."]
 
               (or (instance? java.util.Collection v) (instance? java.util.Map v))
-              ["a mutable Java collection" "Copy it into a Clojure collection, as in (vec c) or (into {} m)."]
-
-              :else
-              ["a value not known to be immutable"
-               (str "Convert it to an immutable value, such as a string, a number, a java.time value or a persistent"
-                    " collection.")])]
-        [:refuse ::rule/mutable-value what fix]))))
+              ["a mutable Java collection" "Copy it into a Clojure collection, as in (vec c) or (into {} m)."])]
+        (if what
+          [:refuse ::rule/mutable-value what fix]
+          [:refuse ::rule/not-known-immutable "a value of a class not known to be immutable"
+           "Convert it to a value of an accepted class, as in (str x)."])))))
 
 (defn- not-immutable
   "nil when `v` is known to be immutable all the way down, else `[rule path what fix class-name]`: the rule, where
-  inside the field the first value that is not is, what it is, the fix, and its class. Accepts nil, the values of
-  [[immutable-classes]], classes, `java.time` values but clocks, values [[parse]] issued, and persistent vectors, maps
+  inside the field the first value that is not is, what it is, the fix, and its class. docs/guarantees.md lists what
+  it accepts. Accepts nil, the values of [[immutable-classes]], classes, Java enum constants, an `Optional` whose
+  value passes, `java.time` values but clocks, values [[parse]] issued, and persistent vectors, maps
   (records included), sets, lists and queues whose contents pass, map keys and metadata included. Refuses a draft,
   which no check of this parse looks inside, and a parsed type's value `parse` did not issue. A sorted
   collection must use the default comparator, since a custom one can read state that changes. Refuses everything
@@ -1397,6 +1414,11 @@
                              "A field holds values pt/parse issued, never drafts: parse checks only the draft it is given."
                              ::rule/unissued-in-field
                              "A field holds values pt/parse issued, and this one carries no proof."
+                             ::rule/url-value
+                             "Parsed values compare with =, and comparing two URLs could wait on the network."
+                             ::rule/not-known-immutable
+                             (str "A parsed value holds only values of the classes the library knows to be immutable,"
+                                  " so what its checks proved stays true.")
                              (str "A parsed value holds only values known to be immutable, so what its checks proved"
                                   " stays true"
                                   (when (= rule ::rule/value-too-deep) ", and proving it walks a bounded depth")
