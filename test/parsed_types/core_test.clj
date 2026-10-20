@@ -76,7 +76,10 @@
       (is (identical? parsed (pt/parsed RenameCard parsed)))
       (is (false? (pt/parsed? RenameCard draft)) "the draft is not the parsed value")
       (testing "it reads as a map and through its fields"
-        (is (= {:user-id 1, :card-id 1, :title "New"} parsed))
+        (is (= {:user-id 1, :card-id 1, :title "New"} (into {} parsed)))
+        (is (not= {:user-id 1, :card-id 1, :title "New"} parsed) "a parsed value never equals a plain map")
+        (is (= parsed (->RenameCard 1 1 "New")) "it equals a value of its type with the same fields, parsed or not")
+        (is (not= parsed (->RenameCardDraft 1 1 "New")) "and not its draft")
         (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
         (is (= 500 (:status-code (thrown-data #(:nope parsed)))) "a key that is not a field throws")
@@ -358,7 +361,7 @@
 (deftest fields-are-read-once-from-the-record-test
   (testing "the checks and the issued value both see the field, not what get answers"
     (let [parsed (pt/parse (->LyingDraft 5))]
-      (is (= {:a 5} parsed)))))
+      (is (= {:a 5} (into {} parsed))))))
 
 (pt/defparsed-type Closure [a])
 
@@ -375,5 +378,5 @@
 
 (deftest a-fetch-may-close-over-a-local-test
   (testing "a fetch reads the world, so it may hold a database handle; only pure checks must close over nothing"
-    (is (= {:a 1} (pt/parse (->ClosureDraft 1))))
+    (is (= {:a 1} (into {} (pt/parse (->ClosureDraft 1)))))
     (is (= 403 (:status-code (thrown-data #(pt/parse (->ClosureDraft 2))))))))

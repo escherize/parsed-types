@@ -156,7 +156,10 @@
            (if (:ok result)
              (let [parsed (pt/parse (fresh draft))]
                (and (pt/parsed? Triple parsed)
-                    (= parsed (into {} draft))
+                    (= (into {} parsed) (into {} draft))
+                    (not= parsed (into {} draft))
+                    (not= (into {} draft) parsed)
+                    (not= parsed draft)
                     (= parsed forged)
                     (not (identical? parsed forged))))
              true)))))

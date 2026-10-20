@@ -39,6 +39,10 @@ Clojure that type, and refuses the rest at run time.
 | Read a field | `(:amount d)`; a key that isn't a field throws | the same; `pt/let` checks keys when compiling |
 | Change it | `assoc`, keeping the passes of checks that don't read the field | throws: `pt/draft-of`, `assoc`, `pt/parse` again |
 | A sink accepts it | no | yes |
+| Equal to | a draft of its type with the same fields | a value of its type with the same fields; never a plain map |
+
+**Proof is `pt/parsed`, never equality.** Equality compares values, and a `Transfer` built by hand has the same value
+as one `parse` made. Never decide "was this checked?" with `=`, a set, or a map lookup.
 
 ## Example: a transfer between accounts
 

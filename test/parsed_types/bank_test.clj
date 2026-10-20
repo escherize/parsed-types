@@ -72,7 +72,7 @@
 (deftest transfer-test
   (testing "a valid transfer parses, and the sink moves the money"
     (let [t (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 30M}))]
-      (is (= {:user-id :ada, :from-id 1, :to-id 2, :amount 30M} t))
+      (is (= {:user-id :ada, :from-id 1, :to-id 2, :amount 30M} (into {} t)))
       (transfer! t)
       (is (= [70M 40M] (map #(get-in @accounts [% :balance]) [1 2])))))
   (testing "malformed input is a 400 with every failure, and nothing is fetched"

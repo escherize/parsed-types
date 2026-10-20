@@ -93,7 +93,7 @@
              (mapv #(dissoc % :f) (:checks decl))))
       (is (= [{:name ::row, :reads [:x]}] (mapv #(dissoc % :f) (:fetches decl))))))
   (testing "and parses with it"
-    (is (= {:x 2, :y 2} (pt/parse (->PointDraft 2 2))))
+    (is (= {:x 2, :y 2} (into {} (pt/parse (->PointDraft 2 2)))))
     (is (= 422 (:status-code (try (pt/parse (->PointDraft 1 :y)) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
 (pt/defparsed-type Other [x z])
@@ -254,7 +254,7 @@
   (testing "a field may be named like any clojure.core function or macro"
     (let [d (->AwkwardDraft 1 2 3 4 5 6 7 8 9 10)
           p (pt/parse d)]
-      (is (= {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10} p))
+      (is (= {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10} (into {} p)))
       (is (= 10 (count p) (count d)))
       (is (contains? p :map))
       (is (= [:count 1] (first (seq p))))

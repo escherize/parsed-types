@@ -127,8 +127,8 @@
                      kws     (mapv keyword fields)
                      lookup  (fn [missing] `(case ~k ~@(mapcat (fn [fld] [(keyword fld) fld]) fields) ~missing))
                      entries `[~@(map (fn [fld] `(clojure.lang.MapEntry/create ~(keyword fld) ~fld)) fields)]]
-    `[clojure.lang.MapEquivalence
-      clojure.lang.IPersistentMap
+    ;; not MapEquivalence: like a record, a value is equal only to a value of its own type, never to a plain map
+    `[clojure.lang.IPersistentMap
       (~'assoc [~this ~k ~v] ~assoc-form)
       (~'assocEx [~this ~k ~v] (~final-name ~this "assocEx"))
       (~'without [~this ~k] (~final-name ~this "dissoc"))
@@ -141,7 +141,8 @@
                                               ~this
                                               (if (clojure.core/map? ~o) ~o (clojure.core/some-> ~o clojure.core/vector))))
       (~'empty [~this] {})
-      (~'equiv [~this ~o] (clojure.lang.APersistentMap/mapEquals ~this ~o))
+      (~'equiv [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
+                                             (clojure.lang.APersistentMap/mapEquals ~this ~o)))
       (~'seq [~this] (clojure.core/seq ~entries))
       (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
       (~'valAt [~this ~k] ~(lookup `(no-field! ~this ~k)))
@@ -178,7 +179,8 @@
 
       Object
       (~'hashCode [~this] (clojure.lang.APersistentMap/mapHash ~this))
-      (~'equals [~this ~o] (clojure.lang.APersistentMap/mapEquals ~this ~o))
+      (~'equals [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
+                                              (clojure.lang.APersistentMap/mapEquals ~this ~o)))
       (~'toString [~this] (clojure.core/str (clojure.core/into {} ~this)))]))
 
 (defn- check-field-names!

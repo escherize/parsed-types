@@ -9,6 +9,7 @@ The README covers how to use the library; this page covers what it promises and 
 |---|---|---|
 | `pt/parsed` accepts only values `parse` made | `parse` records each value in a weak identity map, compared with `identical?` | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed` |
 | A parsed value means its draft type's checks passed | One draft type may parse to each parsed type | `one-draft-type-per-parsed-type-test` |
+| A parsed value never equals a plain map or its draft | The type's equality checks the class; it isn't marked map-equivalent, so Clojure's maps refuse it too | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parse-test` |
 | A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator throw | `a-parsed-value-cannot-be-changed` |
 | A misspelled key fails, never reads `nil` | Drafts, parsed values and the children a parent check sees have fixed fields; `pt/let` and literal `pt/draft` check keys when compiling | `unknown-keys-test`, `a-parent-check-cannot-read-a-key-a-child-lacks-test`, `let-compile-errors-test`, `let-checks-every-binding-test`, `draft-test` |
 | Any field name works, except special forms | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `special-form-field-names-test` |
@@ -56,8 +57,10 @@ destructuring. `match` refuses a missing member, a type that isn't a member, and
 
 - **Reading unknown keys.** A one-argument lookup throws: `(:k x)`, `(get x :k)`, `(x :k)` and destructuring. With a
   default, `(get x :k ::none)` returns it. `contains?` is false, `find` is nil, and `select-keys` leaves the key out.
-- **Equality.** Drafts, parsed values and plain maps with the same entries are `=` and hash the same, so a set of
-  parsed values doesn't tell a forged one apart. Proof is `pt/parsed`, never `=`.
+- **Equality.** Like a record, a value equals only a value of its own type with the same fields: a parsed value never
+  equals a plain map or its draft. A `Transfer` built by hand still equals one `parse` made, because they hold the
+  same value, so a set of parsed values can't tell a forgery apart. Proof is `pt/parsed`, never `=`. From Java,
+  `HashMap.equals` still compares contents, since `java.util.Map` knows nothing of Clojure types.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` with a map built at run time.** Missing fields are nil, and a key that isn't a field is a 400: the map
   is usually a request.
