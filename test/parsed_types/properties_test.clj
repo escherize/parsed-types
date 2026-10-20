@@ -86,7 +86,7 @@
 
 (defspec parse-issues-a-new-equal-value-and-nothing-else-is-parsed 300
   (prop/for-all [draft gen-draft]
-    (let [forged (->Triple (:user-id draft) (:a draft) (:b draft) (:c draft))
+    (let [forged (Triple. (:user-id draft) (:a draft) (:b draft) (:c draft) nil)
           result (outcome #(pt/parse draft))]
       (and (not (pt/parsed? Triple forged))
            (not (pt/parsed? Triple draft))
@@ -332,7 +332,7 @@
   (prop/for-all [[kind d] gen-candidate]
     (let [x      (case kind
                    :parsed (pt/parse d)
-                   :forged (->Triple (:user-id d) (:a d) (:b d) (:c d))
+                   :forged (Triple. (:user-id d) (:a d) (:b d) (:c d) nil)
                    :draft  d
                    :other  (try (pt/parse d) (catch clojure.lang.ExceptionInfo _ d)))
           result (try (which x) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))]

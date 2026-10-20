@@ -293,19 +293,19 @@
 
 (deftest equality-test
   (testing "like a record: fields compare with =, so numbers of different classes but equal value are equal"
-    (is (= (->Money 1.0M (int 2)) (->Money 1.00M 2)))
-    (is (= (hash (->Money 1.0M (int 2))) (hash (->Money 1.00M 2))))
-    (is (= (->Money [1N] 2) (->Money [1] 2))))
+    (is (= (Money. 1.0M (int 2) nil) (Money. 1.00M 2 nil)))
+    (is (= (hash (Money. 1.0M (int 2) nil)) (hash (Money. 1.00M 2 nil))))
+    (is (= (Money. [1N] 2 nil) (Money. [1] 2 nil))))
   (testing "a value equals only a value of its own type"
-    (is (not= (->Money 1M 2) (->Money 1M 3)) "every field is compared, not only the first")
-    (is (not= (->Money 1M 2) (->OtherMoney 1M 2)))
-    (is (not= (->Money 1M 2) (->MoneyDraft 1M 2)))
-    (is (not= (->Money 1M 2) {:amount 1M, :count 2}))
-    (is (not= {:amount 1M, :count 2} (->Money 1M 2)))
-    (is (not (.equals (->Money 1M 2) {:amount 1M, :count 2})))))
+    (is (not= (Money. 1M 2 nil) (Money. 1M 3 nil)) "every field is compared, not only the first")
+    (is (not= (Money. 1M 2 nil) (OtherMoney. 1M 2 nil)))
+    (is (not= (Money. 1M 2 nil) (->MoneyDraft 1M 2)))
+    (is (not= (Money. 1M 2 nil) {:amount 1M, :count 2}))
+    (is (not= {:amount 1M, :count 2} (Money. 1M 2 nil)))
+    (is (not (.equals (Money. 1M 2 nil) {:amount 1M, :count 2})))))
 
 (deftest java-map-interface-test
-  (let [m ^java.util.Map (->Money 1M 2)]
+  (let [m ^java.util.Map (Money. 1M 2 nil)]
     (is (= 1M (.get m :amount)))
     (is (nil? (.get m :nope)) "java.util.Map.get returns null for a missing key, as the interface says")
     (is (.containsKey m :count))
@@ -339,5 +339,7 @@
 (deftest field-name-limits-test
   (doseq [[fields re] [['[a.b] #"cannot contain a dot"]
                        ['[a-b a_b] #"compile to the same Java name"]
-                       ['[__meta] #"deftype reserves these field names"]]]
+                       ['[__meta] #"deftype reserves these field names"]
+                       ['[parse-proof] #"reserves the field name parse-proof"]
+                       ['[parse_proof] #"reserves the field name parse-proof"]]]
     (is (re-find re (str (compile-error (list 'pt/defparsed 'Limits fields)))))))

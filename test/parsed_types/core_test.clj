@@ -59,7 +59,7 @@
       (testing "it reads as a map and through its fields"
         (is (= {:user-id 1, :card-id 1, :title "New"} (into {} parsed)))
         (is (not= {:user-id 1, :card-id 1, :title "New"} parsed) "a parsed value never equals a plain map")
-        (is (= parsed (->RenameCard 1 1 "New")) "it equals a value of its type with the same fields, parsed or not")
+        (is (= parsed (RenameCard. 1 1 "New" nil)) "it equals a value of its type with the same fields, parsed or not")
         (is (not= parsed (->RenameCardDraft 1 1 "New")) "and not its draft")
         (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
@@ -123,7 +123,7 @@
       (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
              (runs #(pt/parse (assoc draft :title "Newer"))))))
     (testing "draft-of refuses anything parse did not issue"
-      (is (= ::pt/not-parsed (:type (thrown-data #(pt/draft-of (->RenameCard 1 1 "New")))))))))
+      (is (= ::pt/not-parsed (:type (thrown-data #(pt/draft-of (RenameCard. 1 1 "New" nil)))))))))
 
 (deftest batching-test
   (testing "parse-all calls each fetch once, with each distinct tuple once"
@@ -154,8 +154,9 @@
     (doseq [[label x] [["nil" nil]
                        ["a plain map" {:user-id 1, :card-id 3, :title "pwned"}]
                        ["the draft" (->RenameCardDraft 1 1 "New")]
-                       ["a parsed type built with its constructor" (->RenameCard 1 3 "pwned")]
-                       ["a value equal to a parsed one, built by hand" (->RenameCard 1 1 "New")]
+                       ["a parsed type built with its constructor" (RenameCard. 1 3 "pwned" nil)]
+                       ["a value equal to a parsed one, built by hand" (RenameCard. 1 1 "New" nil)]
+                       ["a value built with a proof of its own" (RenameCard. 1 1 "New" (Object.))]
                        ["a parsed value of another type" (pt/parse (->OtherDraft 1 3 "pwned"))]
                        ["an edn round trip" (edn/read-string {:default (fn [_ m] m)} (pr-str real))]]]
       (testing label
@@ -163,6 +164,28 @@
                (thrown-data #(pt/parsed RenameCard x))))
         (is (false? (pt/parsed? RenameCard x)))))
     (is (true? (pt/parsed? RenameCard real)))))
+
+(deftest the-proof-is-not-a-key-test
+  (let [real (pt/parse (->RenameCardDraft 1 1 "New"))]
+    (testing "the hidden parse-proof field is not part of the map"
+      (is (= [:user-id :card-id :title] (keys real)))
+      (is (= 3 (count real) (count (seq real)) (.size ^java.util.Map real)))
+      (is (false? (contains? real :parse-proof)))
+      (is (= ::none (get real :parse-proof ::none)))
+      (is (= ::pt/no-field (:type (thrown-data #(:parse-proof real))))))
+    (testing "equality, hash and print ignore it, so a forgery is equal: proof is pt/parsed, never ="
+      (is (= real (RenameCard. 1 1 "New" nil)))
+      (is (= (hash real) (hash (RenameCard. 1 1 "New" nil))))
+      (is (= (pr-str real) (pr-str (RenameCard. 1 1 "New" nil))))
+      (is (not (re-find #"proof" (pr-str real)))))))
+
+(deftest the-positional-factory-is-removed-test
+  (testing "->Name of a parsed type does not exist, here or anywhere; ->NameDraft does"
+    (is (nil? (ns-resolve 'parsed-types.core-test '->RenameCard)))
+    (is (some? (ns-resolve 'parsed-types.core-test '->RenameCardDraft)))
+    (is (re-find #"Unable to resolve symbol: ->RenameCard"
+                 (try (binding [*ns* (the-ns 'parsed-types.core-test)] (eval '(->RenameCard 1 1 "New"))) nil
+                      (catch Throwable e (ex-message (or (ex-cause e) e))))))))
 
 (deftest a-parsed-value-cannot-be-changed-test
   (let [real (pt/parse (->RenameCardDraft 1 1 "New"))]
@@ -205,7 +228,7 @@
            (message #(assoc real :title "x"))))
     (is (= (str "Expected a parsed RenameCard, got a RenameCard that parse did not issue. Build a RenameCardDraft and"
                 " call pt/parse.")
-           (message #(pt/parsed RenameCard (->RenameCard 1 1 "New")))))
+           (message #(pt/parsed RenameCard (RenameCard. 1 1 "New" nil)))))
     (is (= "Expected a parsed RenameCard, got a RenameCardDraft. Call pt/parse on it first."
            (message #(pt/parsed RenameCard (->RenameCardDraft 1 1 "New")))))
     (is (= "RenameCard has no field :nope. Use one of its fields [:user-id :card-id :title], or give get a default."

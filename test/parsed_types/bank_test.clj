@@ -99,7 +99,7 @@
     (is (= {::funds-available {:doc "The source account holds the amount.", :returned false}}
            (:failures (thrown-data #(pt/parse (->TransferDraft :bob 2 1 41M)))))))
   (testing "the sink refuses a transfer built by hand"
-    (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (->Transfer :ada 1 2 1000M))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (Transfer. :ada 1 2 1000M nil))))))
     (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (->TransferDraft :ada 1 2 1000M))))))))
 
 ;;; A payroll: one account pays several people, parsed with its transfers in one call
@@ -274,7 +274,7 @@
     (pay! (pt/parse (payroll :ada 1  2 5M  3 5M)))
     (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3]))))
   (testing "match refuses anything parse did not issue, member type or not"
-    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (->Transfer :ada 1 2 1000M))))))
+    (is (= ::pt/not-parsed (:type (thrown-data #(pay! (Transfer. :ada 1 2 1000M nil))))))
     (is (= ::pt/not-parsed (:type (thrown-data #(pay! (->TransferDraft :ada 1 2 1M))))))
     (is (= ::pt/not-parsed (:type (thrown-data #(pay! (pt/parse (budget "b" 1M)))))))
     (is (= [85M 20M 5M] (map #(get-in @accounts [% :balance]) [1 2 3])) "nothing moved"))
@@ -298,6 +298,21 @@
   (let [chain (fn [levels] (reduce (fn [c _] (->ChainDraft c)) (->ChainDraft nil) (range (dec levels))))]
     (is (pt/parsed? Chain (pt/parse (chain 1000))) "1000 levels, counting the root, parse")
     (is (= ::pt/bad-input (:type (thrown-data #(pt/parse (chain 1001))))) "1001 do not")))
+
+;;; What a parent check sees of its children
+
+(pt/defparsed Watcher [transfers]
+  (children transfers Transfer)
+  (pure ::children-unproven "Inside a check, no child is parsed yet."
+        [transfers]
+        (not-any? #(pt/parsed? Transfer %) transfers)))
+
+(deftest a-check-sees-children-without-the-proof-test
+  (let [w (pt/parse (->WatcherDraft [(->TransferDraft :ada 1 2 1M) (->TransferDraft :ada 1 3 1M)]))]
+    (testing "the check passed, so pt/parsed refused every child while it ran"
+      (is (pt/parsed? Watcher w)))
+    (testing "once the tree passed, the issued root holds issued children"
+      (is (every? #(pt/parsed? Transfer %) (:transfers w))))))
 
 ;;; A parent check that misspells a child's field
 

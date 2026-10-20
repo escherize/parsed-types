@@ -43,7 +43,13 @@
 
 (set! *warn-on-reflection* true)
 
-(definterface ParsedValue)
+(definterface ParsedValue
+  (parseProof []))
+
+;; The proof that [[parse]] issued a value: a parsed value is parsed exactly when its hidden `parse-proof` field holds
+;; this object. Only `parse` builds a value with it. `defonce`, so reloading this namespace keeps the values already
+;; issued parsed.
+(defonce ^:private parse-token (Object.))
 
 (definterface DraftValue)
 
@@ -183,7 +189,10 @@
     (when-let [clash (seq (for [[_ fs] (group-by #(munge (name %)) fields) :when (< 1 (count fs))] fs))]
       (refuse! (str "these fields compile to the same Java name: " (vec (first clash)) ". Rename one of them.")))
     (when-let [reserved (seq (filter '#{__meta __extmap __hash __hasheq} fields))]
-      (refuse! (str "deftype reserves these field names: " (vec reserved) ". Rename them.")))))
+      (refuse! (str "deftype reserves these field names: " (vec reserved) ". Rename them.")))
+    (when-let [reserved (seq (filter #(= "parse_proof" (munge (name %))) fields))]
+      (refuse! (str "parsed-types reserves the field name parse-proof for the proof a parsed value carries: "
+                    (vec reserved) ". Rename it.")))))
 
 (defn- print-method-form [name]
   ;; `#ns.Type{...}`, like a record, so a value is told apart from a plain map at the REPL. The reader cannot build one
@@ -195,13 +204,19 @@
 (defn- defparsed-type
   "The form that defines `name`, a bare parsed type with `fields`: a map that only [[parse]] issues. `assoc`, `dissoc`
   and `with-meta` throw, and so does reading a key that is not a field. Only [[defparsed]] calls this, when it
-  expands: it is private, so a parsed type cannot be defined apart from its draft and its checks."
+  expands: it is private, so a parsed type cannot be defined apart from its draft and its checks.
+
+  The type has one more field, `parse-proof`, which is not a key: it is not in the map's keys, seq, count, equality,
+  hash or printed form. [[parse]] sets it to the proof; any other constructor call leaves it something else. The
+  positional factory `->Name` is removed, so code outside this library has no plain function that builds one."
   [name fields]
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
     `(do
-       (deftype ~name [~@fields]
+       (deftype ~name [~@fields ~'parse-proof]
          parsed_types.core.ParsedValue
+         (~'parseProof [~this] ~'parse-proof)
          ~@(map-type-methods fields this k v `(final! ~this "assoc") `final!))
+       (ns-unmap *ns* '~(symbol (str "->" name)))
        ~(print-method-form name))))
 
 (defn- defdraft-type
@@ -428,13 +443,6 @@
        ~parsed-name)))
 
 ;;; ------------------------------------------------ State ------------------------------------------------
-
-;; Every value [[parse]] issued -> the plan of the draft it came from, by identity: Guava's weak keys compare with
-;; `identical?`, not `=`, so an equal value built with the constructor is not in here. A secret in a field or in
-;; metadata would not do: either can be read out of one parsed value and put into a forged one. Weak, so a parsed value
-;; is garbage collected like any other.
-(defonce ^:private ^Map issued
-  (.makeMap (.weakKeys (MapMaker.))))
 
 ;; Draft type -> its plan, and parsed type -> the same plan, by identity. Written once per class, when its `defparsed`
 ;; loads. Weak, so the classes a REPL replaces can be collected.
@@ -725,21 +733,26 @@
 (defn- run-pure [st bad]
   (run-checks st (get-in st [:plan :pure]) bad))
 
-(declare construct)
+(declare build-parsed)
+
+(defn- child-inputs
+  "The node's field values, with each child field holding `(built path)` for the path of each of its children."
+  [{:keys [plan values child-paths]} built]
+  (reduce-kv (fn [m field paths]
+               (assoc m field (if (= :one (get-in plan [:children field :kind]))
+                                (built (first paths))
+                                (mapv built paths))))
+             values child-paths))
 
 (defn- pure-phase
-  "Run every node's pure checks, children before parents, and build each node's value: a value of its parsed type,
-  holding its children's values. A parent's checks see each child as that value, which is closed like any parsed
-  value, and is the one [[parse]] issues if the tree passes. A node is bad when it, or anything under it, failed."
+  "Run every node's pure checks, children before parents, and build each node's view: a value of its parsed type,
+  without the proof, holding its children's views. A parent's checks see each child as its view, which is closed like
+  any parsed value, and which `pt/parsed` refuses. A node is bad when it, or anything under it, failed."
   [nodes]
-  (first (reduce (fn [[out bad views] {:keys [tree path child-paths plan values], :as st}]
-                   (let [inputs (reduce-kv (fn [m field paths]
-                                             (assoc m field (if (= :one (get-in plan [:children field :kind]))
-                                                              (views [tree (first paths)])
-                                                              (mapv #(views [tree %]) paths))))
-                                           values child-paths)
-                         view   (construct (:parses-to plan) (:fields plan) inputs)
-                         st     (run-pure (assoc st :inputs inputs, :view view) bad)
+  (first (reduce (fn [[out bad views] {:keys [tree path child-paths plan], :as st}]
+                   (let [inputs (child-inputs st #(views [tree %]))
+                         view   (build-parsed plan inputs nil)
+                         st     (run-pure (assoc st :inputs inputs) bad)
                          bad?   (or (seq (:failed st)) (some #(bad [tree %]) (apply concat (vals child-paths))))]
                      [(conj out st) (cond-> bad bad? (conj [tree path])) (assoc views [tree path] view)]))
                  [[] #{} {}]
@@ -835,12 +848,21 @@
 (defn- construct ^Object [^Class cls fields values]
   (Reflector/invokeConstructor cls (object-array (map #(get values %) fields))))
 
+(defn- build-parsed
+  "A value of the parsed type of `plan` with the fields in `values`, holding `proof`."
+  ^Object [plan values proof]
+  (Reflector/invokeConstructor (:parses-to plan)
+                               (object-array (concat (map #(get values %) (:fields plan)) [proof]))))
+
 (defn- issue-tree
-  "The parsed root of the tree: every node's value, built in the pure phase, remembered as issued."
+  "The parsed root of the tree that passed: every node rebuilt with the proof, children before parents, so each parent
+  holds its children's issued values. The checks saw the same fields, in values built without it."
   [nodes]
-  (doseq [{:keys [view plan]} nodes]
-    (.put issued view plan))
-  (:view (peek nodes)))
+  (let [issued (reduce (fn [built {:keys [path plan], :as st}]
+                         (assoc built path (build-parsed plan (child-inputs st built) parse-token)))
+                       {}
+                       nodes)]
+    (get issued [])))
 
 (defn- invalid! [what names nodes data]
   (throw (ex-info (str "Invalid " what ": " (clojure.string/join ", " names) " failed. Change the draft so these checks"
@@ -905,12 +927,18 @@
                 {:draft (.getName (class draft)), :failures failures}))
     (issue-tree nodes)))
 
+(defn- issued?
+  "Whether `x` is a parsed value that holds the proof: one [[parse]] built."
+  [x]
+  (and (instance? ParsedValue x) (identical? parse-token (.parseProof ^ParsedValue x))))
+
 (defn parsed?
-  "Whether `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`."
+  "Whether `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`: a value of
+  the type whose hidden proof field holds the proof only `parse` sets."
   [parsed-type x]
   (and (some? x)
        (member? parsed-type (class x))
-       (.containsKey issued x)))
+       (issued? x)))
 
 (defn- build-hint
   "How to get a parsed value of `type`, for an error message."
@@ -950,7 +978,7 @@
 (defn draft-of
   "A draft with the fields of `parsed`, a value [[parse]] issued. Child fields hold drafts of the children. Throws `::not-parsed` for any other value."
   [parsed]
-  (let [plan (.get issued parsed)]
+  (let [plan (when (issued? parsed) (.get registry (class parsed)))]
     (when-not plan
       (throw (ex-info (if (instance? DraftValue parsed)
                         (str "pt/draft-of takes a value pt/parse issued, got " (describe parsed) ", which is already a"

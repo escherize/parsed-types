@@ -1,3 +1,8 @@
-{:lint-as {parsed-types.core/defsum clojure.core/def}
- :hooks   {:macroexpand {parsed-types.core/defparsed hooks.parsed-types/defparsed
-                         parsed-types.core/match     hooks.parsed-types/match}}}
+{:lint-as     {parsed-types.core/defsum clojure.core/def}
+ :hooks       {:macroexpand {parsed-types.core/defparsed hooks.parsed-types/defparsed
+                             parsed-types.core/match     hooks.parsed-types/match}}
+ ;; The proof a parsed value carries, and the fn that records a plan. Naming either outside parsed-types.core is how a
+ ;; value is forged, so it should stand out in review.
+ :linters     {:discouraged-var {parsed-types.core/parse-token {:message "parse-token is the proof only pt/parse may set. Build a draft and call pt/parse."}
+                                 parsed-types.core/register!   {:message "register! is called by defparsed. Define the type with pt/defparsed."}}}
+ :config-in-ns {parsed-types.core {:linters {:discouraged-var {:level :off}}}}}
