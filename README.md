@@ -123,8 +123,8 @@ Three more rules hold:
 - **A walk fails loudly.** `empty` throws, so `clojure.walk` over a parsed value throws instead of dropping the
   proof. Use `(into {} x)` for a plain map.
 - **A REPL reload just works.** Parsed types compare by class name. After you re-evaluate a `defparsed`, parent
-  types, sums and compiled sinks accept values of the new class. A check that calls `instance?` holds the old class,
-  so re-evaluate it too.
+  types, sums and compiled sinks accept values of the new class. Inside a check, ask a child's type with `pt/is?`,
+  which compares by name too; `instance?` would hold the old class.
 
 ## Parse spends each check once, and touches the world last
 
@@ -161,8 +161,8 @@ A failure reports every check by name. `:blocked` names the checks that didn't r
         (every? #(= user-id (:user-id %)) lines))
   (pure ::balanced "The debits and the credits add up to the same amount."
         [lines]
-        (= (reduce + 0M (map :amount (filter #(instance? Debit %) lines)))
-           (reduce + 0M (map :amount (filter #(instance? Credit %) lines))))))
+        (= (reduce + 0M (map :amount (filter #(pt/is? Debit %) lines)))
+           (reduce + 0M (map :amount (filter #(pt/is? Credit %) lines))))))
 
 (defn post-entry! [entry]
   (run! transact! (:lines (pt/parsed JournalEntry entry))))
@@ -224,9 +224,11 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
   with it. The shipped clj-kondo config flags this.
 - **`with-redefs`.** Rebinding a library fn changes what the library checks.
 - **Reader syntax fails closed.** `#bank.Debit[...]` builds a value without the proof, and `pt/parsed` refuses it.
+- **`in-ns` can redefine a type.** Code that switches into a namespace can re-evaluate its `defparsed` with other
+  checks. That is how a REPL reload works. Another namespace can't take the name: that throws when it loads.
 - **External checks can go stale.** A balance that passed at `parse` can change later. Parse right before you act.
 
-## The API is ten names
+## The API is eleven names
 
 | Name | Does |
 |---|---|
@@ -234,6 +236,7 @@ The library has no HTTP status codes. A handler maps `:type` to its own response
 | `draft` | builds a draft from a map; a literal map must name every field, and only fields |
 | `parse`, `parse-all` | checks drafts and returns parsed values, or throws with every failure |
 | `parsed`, `parsed?` | returns or tests a value `parse` made |
+| `is?` | tests a value's type, ignoring the proof; for checks, not sinks |
 | `draft-of` | turns a parsed value back into a draft |
 | `defsum`, `match` | a closed set of parsed types, and a branch over every member |
 | `declaration` | returns the declaration `defparsed` wrote, as data |
