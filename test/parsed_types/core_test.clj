@@ -117,62 +117,32 @@
     (is (= [::card-id-positive ::title-not-blank]
            (runs #(pt/check (->RenameCardDraft 1 1 " ") nil))))))
 
-(deftest remembered-passes-test
+(deftest check-test
   (let [draft (->RenameCardDraft 1 1 "New")]
-    (testing "check runs what it names and what that waits on, and remembers the pure checks that passed"
-      (is (true? (pt/check draft [::title-not-the-card-id])))
-      (is (= #{::card-id-positive ::title-not-blank ::title-not-the-card-id}
-             (pt/passed-checks draft))))
-    (testing "parse runs only what is not known to pass; external checks run every time"
-      (is (= [[::card [[1]]] ::may-write-card]
+    (testing "check runs what it names and what that waits on"
+      (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id]
+             (runs #(is (true? (pt/check draft [::title-not-the-card-id])))))))
+    (testing "a check issues nothing: parse runs every check again"
+      (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
              (runs #(pt/parse draft)))))
-    (testing "assoc keeps the passes of the checks that do not read the field it writes"
+    (testing "assoc builds a new draft"
       (let [renamed (assoc draft :title "Newer")]
-        (is (= #{::card-id-positive} (pt/passed-checks renamed)))
-        (is (= [::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
-               (runs #(pt/parse renamed))))))
+        (is (= (->RenameCardDraft 1 1 "Newer") renamed))
+        (is (= "New" (:title draft)))))
     (testing "assoc refuses a key that is not a field, and dissoc any key"
       (is (= ::pt/no-field (:type (thrown-data #(assoc draft :titel "x")))))
-      (is (= ::pt/cannot-change (:type (thrown-data #(dissoc draft :title))))))
-    (testing "a failure is not remembered"
-      (let [bad (->RenameCardDraft 1 1 " ")]
-        (pt/check bad nil)
-        (is (not (contains? (pt/passed-checks bad) ::title-not-blank)))
-        (is (= [::title-not-blank] (runs #(pt/check bad [::title-not-blank]))))))))
+      (is (= ::pt/cannot-change (:type (thrown-data #(dissoc draft :title))))))))
 
 (deftest draft-of-test
   (let [parsed (pt/parse (->RenameCardDraft 1 1 "New"))
         draft  (pt/draft-of parsed)]
-    (testing "a parsed value goes back to a draft that is known to pass every pure check"
-      (is (= (->RenameCardDraft 1 1 "New") draft))
-      (is (= #{::card-id-positive ::title-not-blank ::title-not-the-card-id} (pt/passed-checks draft))))
-    (testing "editing it reruns only the checks that read the field, and the external checks"
-      (is (= [::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
+    (testing "a parsed value goes back to a draft with the same fields"
+      (is (= (->RenameCardDraft 1 1 "New") draft)))
+    (testing "editing it and parsing again runs every check"
+      (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
              (runs #(pt/parse (assoc draft :title "Newer"))))))
     (testing "draft-of refuses anything parse did not issue"
       (is (= ::pt/not-parsed (:type (thrown-data #(pt/draft-of (->RenameCard 1 1 "New")))))))))
-
-(pt/defparsed-type Moded [user-id card-id title])
-
-(def ^:private lax-declaration
-  {:parses-to Moded
-   :checks    [{:name ::lax, :doc "Any title.", :kind :pure, :reads [:title], :f (fn [_] true)}]})
-
-(def ^:private strict-declaration
-  {:parses-to Moded
-   :checks    [{:name ::strict, :doc "A positive card id.", :kind :pure, :reads [:card-id], :f pos-int?}]})
-
-(pt/defdraft-type ModedDraft [user-id card-id title]
-  (if (= :strict user-id) strict-declaration lax-declaration))
-
-(deftest remembered-passes-belong-to-a-plan-test
-  (testing "passes remembered under one declaration are not read under another"
-    (let [lax (->ModedDraft :lax -1 "t")]
-      (pt/check lax nil)
-      (is (= #{::lax} (pt/passed-checks lax)))
-      (let [strict (assoc lax :user-id :strict)]
-        (is (= #{} (pt/passed-checks strict)))
-        (is (= #{:pure} (:failed-kinds (thrown-data #(pt/parse strict)))))))))
 
 (deftest batching-test
   (testing "parse-all calls each fetch once, with each distinct tuple once"
@@ -237,11 +207,6 @@
               {:parses-to BadParsed, :checks [], :children {:b {:kind :many, :type BadParsed}}}]
              ["a child that is not {:kind :type}"
               {:parses-to BadParsed, :checks [], :children {:a {:kind :lots, :type BadParsed}}}]
-             ["more than 64 pure checks"
-              {:parses-to BadParsed
-               :checks    (vec (for [i (range 65)]
-                                 {:name (keyword "parsed-types.core-test" (str "c" i)), :doc "d", :kind :pure,
-                                  :reads [], :f (fn [] true)}))}]
              ["a check built with memoize"
               {:parses-to BadParsed, :checks [{:name ::c, :doc "d", :kind :pure, :reads [:a], :f (memoize pos-int?)}]}]
              ["a field the draft does not have"

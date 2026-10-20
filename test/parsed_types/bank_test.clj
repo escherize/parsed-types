@@ -172,11 +172,8 @@
   (let [p      (pt/parse (payroll :ada 1  2 10M  3 20M))
         draft  (pt/draft-of p)
         edited (assoc-in draft [:transfers 1] (->TransferDraft :ada 1 3 25M))]
-    (testing "draft-of goes back down the tree: the children are drafts again, known to pass"
-      (is (every? #(instance? TransferDraft %) (:transfers draft)))
-      (is (contains? (pt/passed-checks (first (:transfers draft))) ::amount-positive)))
-    (testing "after editing one transfer, the parent's checks over transfers forget their passes"
-      (is (not (contains? (pt/passed-checks edited) ::one-source))))
+    (testing "draft-of goes back down the tree: the children are drafts again"
+      (is (every? #(instance? TransferDraft %) (:transfers draft))))
     (is (= 25M (:amount (second (:transfers (pt/parse edited))))))))
 
 ;;; A budget: a tree of one type

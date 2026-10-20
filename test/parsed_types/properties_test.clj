@@ -68,8 +68,6 @@
 
 (def ^:private pure-names #{::a-int ::b-string ::c-int ::b-short ::a-below-c})
 
-(def ^:private check-names (conj pure-names ::may-use-row ::user-known))
-
 (def ^:private touches-world? #{::may-use-row ::user-known ::row})
 
 (def ^:private gen-value
@@ -93,14 +91,8 @@
   "Half malformed and half well-formed, so the pure, the external and the passing paths are all exercised."
   (gen/one-of [gen-any-draft gen-well-formed-draft]))
 
-(def ^:private gen-edit
-  (gen/one-of
-   [(gen/fmap (fn [names] [:check names]) (gen/vector (gen/elements (vec check-names)) 0 3))
-    (gen/fmap (fn [[f v]] [:assoc f v]) (gen/tuple (gen/elements fields) gen-value))
-    (gen/return [:round-trip])]))
-
 (defn- fresh
-  "A draft with the same fields as `draft` and nothing remembered."
+  "A new draft with the same fields as `draft`."
   [draft]
   (->TripleDraft (:user-id draft) (:a draft) (:b draft) (:c draft)))
 
@@ -112,31 +104,6 @@
       {:ok (if (vector? x) (mapv #(into {} %) x) (into {} x))})
     (catch clojure.lang.ExceptionInfo e
       (select-keys (ex-data e) [:type :failed-kinds :failures]))))
-
-(defn- edit [draft [op x y]]
-  (case op
-    :check       (do (pt/check draft x) draft)
-    :assoc       (assoc draft x y)
-    :round-trip  (try (pt/draft-of (pt/parse draft))
-                      (catch clojure.lang.ExceptionInfo _ draft))))
-
-(defspec remembered-passes-never-change-the-outcome 300
-  (prop/for-all [draft gen-draft
-                 edits (gen/vector gen-edit 0 8)]
-    (let [edited (reduce edit draft edits)]
-      (= (outcome #(pt/parse (fresh edited)))
-         (outcome #(pt/parse edited))))))
-
-(defspec assoc-keeps-only-passes-of-checks-that-do-not-read-the-field 300
-  (prop/for-all [draft gen-draft
-                 names (gen/vector (gen/elements (vec check-names)) 0 4)
-                 field (gen/elements fields)
-                 v     gen-value]
-    (pt/check draft names)
-    (let [before   (pt/passed-checks draft)
-          readers  (into #{} (comp (filter #(some #{field} (:reads %))) (map :name)) (:checks triple-declaration))
-          after    (pt/passed-checks (assoc draft field v))]
-      (= after (set/difference before readers)))))
 
 (defspec nothing-touches-the-world-until-every-pure-check-passes 300
   (prop/for-all [draft gen-draft]
@@ -179,15 +146,11 @@
 
 (defspec draft-of-round-trips 200
   (prop/for-all [draft gen-valid-draft]
-    (let [parsed (pt/parse draft)
-          again  (pt/draft-of parsed)]
-      (reset! ran [])
-      (let [reparsed (pt/parse again)]
-        (and (= pure-names (pt/passed-checks again))
-             (= parsed reparsed)
-             (not (identical? parsed reparsed))
-             (pt/parsed? Triple reparsed)
-             (not-any? pure-names @ran))))))
+    (let [parsed   (pt/parse draft)
+          reparsed (pt/parse (pt/draft-of parsed))]
+      (and (= parsed reparsed)
+           (not (identical? parsed reparsed))
+           (pt/parsed? Triple reparsed)))))
 
 (defspec parse-all-agrees-with-parse 300
   (prop/for-all [drafts (gen/vector gen-draft 0 8)]
@@ -290,36 +253,6 @@
                 :failed-kinds (apply set/union (keep :failed-kinds each))
                 :failures     failures})))))
 
-(defspec parse-all-after-edits-agrees-with-fresh-drafts 200
-  (prop/for-all [drafts (gen/vector (gen/tuple gen-draft (gen/vector gen-edit 0 4)) 0 6)]
-    (let [edited (mapv (fn [[d edits]] (reduce edit d edits)) drafts)]
-      (= (outcome #(pt/parse-all (mapv fresh edited)))
-         (outcome #(pt/parse-all edited))))))
-
-;;; A declaration replaced after its passes were remembered
-
-(pt/defparsed-type Swapped [a])
-
-(def ^:private int-declaration
-  {:parses-to Swapped, :checks [{:name ::s, :doc "a is an integer.", :kind :pure, :reads [:a], :f (fn [a] (int? a))}]})
-
-(def ^:private pos-declaration
-  {:parses-to Swapped, :checks [{:name ::s, :doc "a is positive.", :kind :pure, :reads [:a], :f (fn [a] (pos-int? a))}]})
-
-(def ^:private current-declaration (atom int-declaration))
-
-(pt/defdraft-type SwapDraft [a]
-  @current-declaration)
-
-(defspec passes-are-not-read-under-a-replaced-declaration 200
-  (prop/for-all [a gen/small-integer]
-    (reset! current-declaration int-declaration)
-    (let [draft (->SwapDraft a)]
-      (pt/check draft nil)
-      (reset! current-declaration pos-declaration)
-      (= (outcome #(pt/parse (->SwapDraft a)))
-         (outcome #(pt/parse draft))))))
-
 ;;; Trees: a node holds child nodes, and one parse covers them all
 
 (pt/defparsed-type Node [v kids])
@@ -400,7 +333,7 @@
              (some #(= 13 (:v %)) (nodes-of tree)))))))
 
 (defn- fresh-tree
-  "The same tree, every node a new draft with nothing remembered."
+  "The same tree, every node a new draft."
   [node]
   (->NodeDraft (:v node) (mapv fresh-tree (:kids node))))
 
@@ -414,17 +347,6 @@
         (= all {:type         ::pt/invalid
                 :failed-kinds (apply set/union (keep :failed-kinds each))
                 :failures     failures})))))
-
-(defspec remembered-passes-never-change-a-tree-outcome 200
-  (prop/for-all [tree   (gen/one-of [gen-tree gen-ordered-tree])
-                 picks  (gen/vector gen/nat 0 6)
-                 edit-v (gen/one-of [gen/small-integer (gen/return nil)])]
-    (let [nodes   (vec (nodes-of tree))
-          _       (doseq [i picks] (pt/check (nth nodes (mod i (count nodes))) nil))
-          ;; and one edit through assoc, on the root
-          edited  (assoc tree :v edit-v)]
-      (and (= (outcome #(pt/parse (fresh-tree tree))) (outcome #(pt/parse tree)))
-           (= (outcome #(pt/parse (fresh-tree edited))) (outcome #(pt/parse edited)))))))
 
 (defspec draft-of-round-trips-a-tree 200
   (prop/for-all [tree gen-ordered-tree]

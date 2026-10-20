@@ -186,7 +186,7 @@
     (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
     (let [new-kid ((resolve 'parsed-types.defparsed-test/->KidDraft) 2)]
       (testing "after the child type is re-evaluated, the parent says it is stale, for the old child and the new"
-        (doseq [[label thunk] [["the old child, remembered" #(pt/parse parent)]
+        (doseq [[label thunk] [["the old child" #(pt/parse parent)]
                                ["the new child" #(pt/parse ((resolve 'parsed-types.defparsed-test/->ParentDraft)
                                                             [new-kid]))]
                                ["check" #(pt/check parent nil)]]]
@@ -214,30 +214,6 @@
                 " Members, then the defparsed for Holder.")
            (first (thrown #(pt/parse ((resolve 'parsed-types.defparsed-test/->HolderDraft)
                                       ((resolve 'parsed-types.defparsed-test/->MemberDraft) 1)))))))))
-
-;;; Concurrent first use
-
-(pt/defparsed-type Raced [a])
-
-(def ^:private raced-declaration (atom nil))
-
-(pt/defdraft-type RacedDraft [a]
-  @raced-declaration)
-
-(defn- raced-a-int [a] (int? a))
-
-(deftest concurrent-first-use-test
-  (testing "threads that plan a declaration at once all keep their remembered passes"
-    (dotimes [_ 20]
-      (reset! raced-declaration {:parses-to Raced
-                                 :checks    [{:name ::a-int, :doc "a is an integer.", :kind :pure, :reads [:a]
-                                              :f raced-a-int}]})
-      (let [drafts (vec (repeatedly 16 #(->RacedDraft 1)))
-            start  (promise)
-            fs     (mapv (fn [d] (future @start (pt/check d nil))) drafts)]
-        (deliver start true)
-        (run! deref fs)
-        (is (every? #(= #{::a-int} (pt/passed-checks %)) drafts))))))
 
 ;;; Field names
 

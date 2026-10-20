@@ -21,15 +21,13 @@
   A check receives exactly the fields in its argument vector, then the fetches it binds. It passes when it returns
   exactly `true`; anything else is the failure, reported under its name.
 
-  A `pure` check reads only its arguments, and its pass is remembered for the draft. An `external` one reads the
-  world, and runs on every call. Nothing fetches and no external check runs until every pure check in the tree
-  passes.
+  A `pure` check reads only its arguments. An `external` one reads the world. Nothing fetches and no external check
+  runs until every pure check in the tree passes.
 
   A field declared with `children` or `child` holds drafts, and one [[parse]] parses the whole tree.
 
   Drafts and parsed values are maps with fixed fields: reading a key that is not a field throws. A parsed value cannot
-  change: to change one, take [[draft-of]] it, `assoc`, and [[parse]] again. `assoc` on a draft keeps the remembered
-  passes of the checks that do not read the field it sets.
+  change: to change one, take [[draft-of]] it, `assoc`, and [[parse]] again.
 
   Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (checks
   failed), `::not-parsed`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration`, `::bad-fetch` or
@@ -56,13 +54,11 @@
     other draft type may parse to it.
 
     A check is `{:name :doc :kind :reads :fetches :f}`. `:kind` is `:pure`, for a check that reads only its
-    arguments, whose pass is remembered, or `:external`, for one that reads the world, which runs on every call. Only
-    an external check may name `:fetches`.
+    arguments, or `:external`, for one that reads the world. Only an external check may name `:fetches`.
 
-    A pure check's pass is remembered for the draft, so the fields it reads must be immutable values, and its `:f`
-    must not read a global that can change, such as an atom. The check that an `:f` closes over no locals does not see
-    globals. It also refuses `constantly`, `partial`, `comp`, `memoize` and `with-meta` on a fn, which close over
-    their arguments: write a `fn`.
+    A pure check's `:f` must close over no locals, so that it reads only what it declares. This refuses `constantly`,
+    `partial`, `comp`, `memoize` and `with-meta` on a fn, which close over their arguments: write a `fn`. It does not
+    see globals: a pure check must not read one that can change, such as an atom.
 
     A fetch is `{:name :reads :f}`. Its `:f` takes every distinct tuple of the fields it reads, across all the drafts
     with this declaration in the call, and returns a map from each tuple to what it fetched.
@@ -235,8 +231,7 @@
 
 (defmacro defdraft-type
   "Define `name`, a bare draft type with `fields` and the declaration `declaration-expr`, evaluated with the fields in
-  scope. `assoc` sets a field and keeps the remembered passes of the checks that do not read it; `dissoc` and
-  `with-meta` throw, and so do reading or setting a key that is not a field. [[defparsed]] calls this; use it
+  scope. `assoc` sets a field; `dissoc` and `with-meta` throw, and so do reading or setting a key that is not a field. [[defparsed]] calls this; use it
   directly only with a declaration written by hand."
   [name fields declaration-expr]
   (check-field-names! &form fields)
@@ -476,12 +471,6 @@
 (defonce ^:private ^Map issued
   (.makeMap (.weakKeys (MapMaker.))))
 
-;; Draft -> `[plan mask]`: the pure checks it passed, one bit per check of that plan, by identity. Out of the draft so
-;; it cannot be forged, and lost on a plain `assoc`, which makes every check run again. The plan is kept so the bits
-;; are read only against the plan that set them.
-(defonce ^:private ^Map passed
-  (.makeMap (.weakKeys (MapMaker.))))
-
 ;; Parsed type -> the name of the one draft class that may parse to it. By name, not identity, so re-evaluating a
 ;; `defrecord` at a REPL does not lock its parsed type away; another class with that name can only come from the same
 ;; namespace.
@@ -587,9 +576,9 @@
                                            ". Declare them under :fetches.")
                           {:name n, :unknown-fetches unknown}))
       (when-let [locals (and check? (= :pure kind) (seq (closed-over-locals f)))]
-        (bad-declaration! draft-class (str "the pure check " n " closes over locals " (vec locals) ". It must read"
-                                           " only its arguments, so that its pass can be remembered. Read the value"
-                                           " from a field, or write a fn in place of constantly, partial, comp or"
+        (bad-declaration! draft-class (str "the pure check " n " closes over locals " (vec locals) ". A pure check"
+                                           " reads only the fields it names. Read the value from a field, make the"
+                                           " check external, or write a fn in place of constantly, partial, comp or"
                                            " memoize.")
                           {:name n, :locals locals})))))
 
@@ -657,20 +646,13 @@
                         {:parses-to (.getName ^Class parses-to), :owner claimed})))
   (let [shape     (into {} (map (fn [[field child]] [field (child-shape-check parses-to field child)])) children)
         pure      (into (vec (vals shape)) (filter #(= :pure (:kind %))) checks)
-        _         (when (< 64 (count pure))
-                    (bad-declaration! draft-class (str "more than 64 pure checks, counting one per child field. Combine"
-                                                       " some checks, or split the type.")
-                                      {}))
         external  (filterv #(= :external (:kind %)) checks)
-        bit       (zipmap (map :name pure) (range))
         waits-on  (fn [pred] (into #{} (comp (filter pred) (map :name)) pure))
         all-pure  (waits-on any?)
         shapes-of (fn [c] (into #{} (keep #(:name (get shape %))) (:reads c)))
         pure'     (for [c pure
                         :let [rs (reads-set c)]]
                     (assoc c
-                           :pure?   true
-                           :bit     (bit (:name c))
                            :prereqs (-> (waits-on #(and (not= (:name %) (:name c))
                                                         (set/subset? (reads-set %) rs)
                                                         (not= (reads-set %) rs)))
@@ -688,12 +670,7 @@
      :fetches         (vec fetches')
      :external        (vec external')
      :checks-by-name  (into {} (map (juxt :name identity)) (concat pure' external'))
-     :fetches-by-name (into {} (map (juxt :name identity)) fetches')
-     :all-pure-mask   (reduce #(bit-set %1 (:bit %2)) 0 pure')
-     :field-mask      (reduce (fn [m {:keys [reads], b :bit}]
-                                (reduce #(update %1 %2 (fnil bit-or 0) (bit-set 0 b)) m reads))
-                              {}
-                              pure')}))
+     :fetches-by-name (into {} (map (juxt :name identity)) fetches')}))
 
 (defn- describe
   "`x` for an error message: nil, a plain map, or a value of its type."
@@ -717,7 +694,7 @@
                      (let [m (.makeMap (.weakKeys (MapMaker.)))]
                        (or (.putIfAbsent plans decl m) m)))]
     (or (.get ^ConcurrentMap by-class cls)
-        ;; two threads may compile the same plan; both keep the one that won, so neither loses its remembered passes
+        ;; two threads may compile the same plan; both keep the one that won
         (let [plan (compile-plan cls decl)]
           (or (.putIfAbsent ^ConcurrentMap by-class cls plan) plan)))))
 
@@ -741,12 +718,6 @@
           (recur (into (vec more) (:prereqs x)) (conj seen n))))
       seen)))
 
-(defn- remembered-mask
-  "The pure checks `draft` is known to pass under `plan`, one bit each."
-  [draft plan]
-  (let [[remembered-plan mask] (.get passed draft)]
-    (if (identical? plan remembered-plan) (long mask) 0)))
-
 (defn- read-fields
   "The draft's field values, read once from its Java fields, not through `get`, which a type could make answer
   differently on each call."
@@ -760,7 +731,6 @@
      :values  (read-fields draft (:fields plan))
      :plan    plan
      :needed  (needed plan (or names (keys (:checks-by-name plan))))
-     :mask    (remembered-mask draft plan)
      :fetched {}
      :failed  {}     ; check name -> failure entry
      :order   []     ; failed check names, in the order they failed
@@ -816,23 +786,13 @@
 (defn- run-check [st {n :name, :keys [prereqs f doc reads fetches], :as c}]
   (if-let [roots (roots-of st prereqs)]
     (block st n roots true)
-    ;; a shape check always runs: a child's declaration can change under a remembered pass, at a REPL
-    (let [remembered? (and (:pure? c) (not (:shape? c)) (bit-test (:mask st) (:bit c)))
-          result      (if remembered?
-                        true
-                        (apply f (concat (map #(get (if (:shape? c) (:values st) (:inputs st)) %) reads)
-                                         (map #(get-in st [:fetched %]) fetches))))]
-      (cond
-        (not (true? result))
+    (let [result (apply f (concat (map #(get (if (:shape? c) (:values st) (:inputs st)) %) reads)
+                                  (map #(get-in st [:fetched %]) fetches)))]
+      (if (true? result)
+        st
         (-> st
             (assoc-in [:failed n] {:doc doc, :returned result})
-            (update :order conj n))
-
-        (:pure? c)
-        (update st :mask bit-set (:bit c))
-
-        :else
-        st))))
+            (update :order conj n))))))
 
 (defn- failed-children
   "The paths of the children in the fields `c` reads that failed, or have a failure under them, in this phase. A shape
@@ -920,11 +880,6 @@
      ;; one call per fetch per plan: the same fetch name in two declarations is two fetches
      (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)]) wanted))))
 
-(defn- remember! [{:keys [draft plan mask]}]
-  (if (zero? mask)
-    (.remove passed draft)
-    (.put passed draft [plan mask])))
-
 (defn- run-all
   "Run the checks of every draft, and of every draft under it, and return one vector of nodes per draft."
   [drafts names]
@@ -939,7 +894,6 @@
         nodes        (fetch-phase nodes)
         nodes        (external-phase nodes)
         by-tree      (group-by :tree nodes)]
-    (run! remember! nodes)
     (mapv #(get by-tree % []) (range (count drafts)))))
 
 (defn- tree-failures
@@ -994,8 +948,8 @@
   "Run the checks named in `names` (nil for all) against each draft, with what they wait on, and every pure check of
   every draft under it. A tree fetches and runs external checks only when every pure check in it ran and passed, so
   with a subset of `names` the children's external checks may not run. Returns a vector aligned with `drafts`: `true`,
-  or the failures, shaped like the tree. Each fetch is called once per declaration for all the drafts. A pure check
-  that passed is remembered for that draft."
+  or the failures, shaped like the tree. Each fetch is called once per declaration for all the drafts. Issues
+  nothing: a pass here is not proof, so [[parse]] runs every check again."
   [drafts names]
   (mapv #(or (tree-failures %) true) (run-all drafts names)))
 
@@ -1004,26 +958,13 @@
   [draft names]
   (first (check-all [draft] names)))
 
-(defn passed-checks
-  "The names of the pure checks `draft` is known to pass."
-  [draft]
-  (let [{:keys [pure], :as plan} (plan-for draft)
-        mask                     (remembered-mask draft plan)]
-    (into #{} (comp (filter #(bit-test mask (:bit %))) (map :name)) pure)))
-
 (defn assoc-draft
-  "`draft` with `field` set to `v`, keeping any pass remembered for the checks that do not read `field`. This is what
-  `assoc` on a draft does; call `assoc`."
+  "`draft` with `field` set to `v`: a new draft. This is what `assoc` on a draft does; call `assoc`."
   [draft field v]
-  (let [{:keys [fields field-mask draft-class], :as plan} (plan-for draft)]
+  (let [{:keys [fields draft-class]} (plan-for draft)]
     (when-not (some #{field} fields)
       (no-field! draft field))
-    (let [result (construct draft-class fields (assoc (read-fields draft fields) field v))
-          mask   (bit-and-not (remembered-mask draft plan) (long (get field-mask field 0)))]
-      ;; a declaration may vary with a field: the result's plan may not be the one these bits were set under
-      (when (and (not (zero? mask)) (identical? plan (plan-for result)))
-        (.put passed result [plan mask]))
-      result)))
+    (construct draft-class fields (assoc (read-fields draft fields) field v))))
 
 (defn parse-all
   "Parse each draft and the drafts under it. Returns a vector of parsed values aligned with `drafts`, or throws
@@ -1042,7 +983,7 @@
     (mapv issue-tree trees)))
 
 (defn parse
-  "Parse `draft` and the drafts under it, skipping pure checks already known to pass. Returns a new value of its parsed
+  "Parse `draft` and the drafts under it, running every check. Returns a new value of its parsed
   type, whose child fields hold parsed values. When a check fails, throws `::invalid` with:
 
   - `:failures`: every failure, shaped like the tree: the root's checks at the top, and each child's under its field
@@ -1102,8 +1043,7 @@
   x)
 
 (defn draft-of
-  "A draft with the fields of `parsed`, a value [[parse]] issued, known to pass every pure check. Child fields hold
-  drafts of the children, known to pass theirs. Throws `::not-parsed` for any other value."
+  "A draft with the fields of `parsed`, a value [[parse]] issued. Child fields hold drafts of the children. Throws `::not-parsed` for any other value."
   [parsed]
   (let [plan (.get issued parsed)]
     (when-not plan
@@ -1117,11 +1057,8 @@
     (let [values (reduce-kv (fn [vs field {:keys [kind]}]
                               (update vs field #(if (= :one kind) (some-> % draft-of) (mapv draft-of %))))
                             (into {} (map (fn [f] [f (get parsed f)])) (:fields plan))
-                            (:children plan))
-          draft  (construct (:draft-class plan) (:fields plan) values)]
-      (when-not (zero? (long (:all-pure-mask plan)))
-        (.put passed draft [plan (:all-pure-mask plan)]))
-      draft)))
+                            (:children plan))]
+      (construct (:draft-class plan) (:fields plan) values))))
 
 ;;; ------------------------------------------------ Building and reading ------------------------------------------------
 

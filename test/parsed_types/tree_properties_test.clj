@@ -234,7 +234,7 @@
        (every? #(pt/parsed? Leaf %) (:leaves c))))
 
 (defn- fresh
-  "The same tree, every draft new, with nothing remembered."
+  "The same tree, every draft new."
   [x]
   (cond
     (instance? CrateDraft x) (->CrateDraft (:total x) (fresh (:boxes x)) (fresh (:leaves x)))
@@ -301,15 +301,10 @@
                     crate))
     :round-trip (try (pt/draft-of (pt/parse crate)) (catch clojure.lang.ExceptionInfo _ crate))))
 
-(defspec remembered-passes-never-change-a-tree-outcome-under-edits 300
+(defspec edits-to-child-fields-match-the-tree-model 300
   (prop/for-all [crate gen-any-crate
-                 edits (gen/vector gen-edit 0 6)
-                 warm  (gen/vector gen/boolean 0 6)]
-    (let [edited (reduce (fn [c [e w]]
-                           (when w (pt/check c nil))
-                           (edit c e))
-                         crate
-                         (map vector edits (concat warm (repeat false))))
+                 edits (gen/vector gen-edit 0 6)]
+    (let [edited   (reduce edit crate edits)
           expected (model edited)
           actual   (parse-outcome edited)]
       (if (= :ok expected)
