@@ -62,8 +62,11 @@
   "Throws `::cannot-change`: a parsed value cannot be changed. Called by the parsed types [[defparsed]] defines."
   [parsed op]
   (let [n (.getSimpleName (class parsed))]
-    (throw (ex-info (if (= "with-meta" op)
-                      (str n " is a parsed value and cannot carry metadata. Keep the metadata beside it, not on it.")
+    (throw (ex-info (case op
+                      "with-meta" (str n " is a parsed value and cannot carry metadata. Keep the metadata beside it,"
+                                       " not on it.")
+                      "empty"     (str n " has fixed fields, so it has no empty version. Use (into {} x) for a plain"
+                                       " map.")
                       (str n " is a parsed value and cannot be changed with " op ". Use (pt/draft-of x), assoc, then"
                            " pt/parse."))
                     {:type ::cannot-change, :parsed (.getName (class parsed)), :op op}))))
@@ -77,6 +80,8 @@
                                        " field to nil.")
                       "with-meta" (str n " is a draft and cannot carry metadata. Keep the metadata beside it, not on"
                                        " it.")
+                      "empty"     (str n " has fixed fields, so it has no empty version. Use (into {} x) for a plain"
+                                       " map.")
                       (str n " has fixed fields and cannot be changed with " op ". Use assoc."))
                     {:type ::cannot-change, :draft (.getName (class draft)), :op op}))))
 
@@ -132,7 +137,9 @@
                                                              (.getValue ^java.util.Map$Entry e#)))
                               ~this
                               (clojure.core/seq ~o))))
-      (~'empty [~this] {})
+      ;; no empty version, so code that rebuilds a map through `empty`, such as clojure.walk, throws instead of
+      ;; dropping the type and the proof
+      (~'empty [~this] (~final-name ~this "empty"))
       ;; like defrecord: the same class, and each field `=`, so 1.0M equals 1.00M and an Integer equals a Long
       (~'equiv [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
                                              ~@(map (fn [fld] `(clojure.core/= ~fld (.valAt ~(with-meta o {:tag 'clojure.lang.ILookup})

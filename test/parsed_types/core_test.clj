@@ -3,6 +3,7 @@
    [clojure.edn :as edn]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
+   [clojure.walk :as walk]
    [parsed-types.core :as pt]))
 
 (set! *warn-on-reflection* true)
@@ -221,6 +222,17 @@
     (is (= {:a 1} (into {} (pt/parse (->ClosureDraft 1)))))
     (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (->ClosureDraft 2))))))))
 
+(deftest empty-throws-test
+  (let [real  (pt/parse (->RenameCardDraft 1 1 "New"))
+        draft (->RenameCardDraft 1 1 "New")]
+    (testing "a parsed value and a draft have no empty version"
+      (doseq [x [real draft]]
+        (is (= {:type ::pt/cannot-change, :op "empty"}
+               (select-keys (thrown-data #(empty x)) [:type :op])))))
+    (testing "so a walk over a structure holding a parsed value throws, never drops the proof"
+      (is (= ::pt/cannot-change (:type (thrown-data #(walk/postwalk identity {:rename [real]})))))
+      (is (= ::pt/cannot-change (:type (thrown-data #(walk/prewalk identity [real]))))))))
+
 (deftest error-messages-name-the-fix-test
   (let [real    (pt/parse (->RenameCardDraft 1 1 "New"))
         message (fn [thunk] (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))]
@@ -231,6 +243,8 @@
            (message #(pt/parsed RenameCard (RenameCard. 1 1 "New" nil)))))
     (is (= "Expected a parsed RenameCard, got a RenameCardDraft. Call pt/parse on it first."
            (message #(pt/parsed RenameCard (->RenameCardDraft 1 1 "New")))))
+    (is (= "RenameCard has fixed fields, so it has no empty version. Use (into {} x) for a plain map."
+           (message #(empty real))))
     (is (= "RenameCard has no field :nope. Use one of its fields [:user-id :card-id :title], or give get a default."
            (message #(:nope real))))
     (is (str/starts-with? (message #(pt/parse (->RenameCardDraft 1 -1 " ")))

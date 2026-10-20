@@ -314,7 +314,7 @@
     (is (= #{:amount :count} (set (.keySet m))))
     (is (= #{[:amount 1M] [:count 2]} (set (map (fn [^java.util.Map$Entry e] [(.getKey e) (.getValue e)]) (.entrySet m)))))
     (is (thrown? UnsupportedOperationException (.put m :amount 2M)))
-    (is (= {} (empty m)))
+    (is (= ::pt/cannot-change (try (empty m) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))
     (is (= [[:amount 1M] [:count 2]] (reduce-kv (fn [acc k v] (conj acc [k v])) [] m)) "kvreduce in field order")))
 
 (deftest conj-test
