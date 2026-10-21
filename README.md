@@ -2,8 +2,9 @@
 
 Clojure code often checks a map, then passes the same map along. Nothing ties the check to the code that relies on
 it. Code can check one id and use another, skip the check, or change the map after it. How does a value prove it
-was checked? In parsed-types, each thing has two types: a draft that any code can build, and a parsed type that only
-`parse` can make. The parsed value carries its own proof, and a sink such as `place-order!` refuses anything else.
+was checked? In parsed-types, each kind of checked data gets two types: a draft that any code can build, and a
+parsed type that only `parse` can make. The parsed value carries its own proof. A function that acts on checked data,
+such as `place-order!`, takes only the parsed type and refuses anything else.
 Three values decide each choice the library makes. Explicitness: what you read in the source is what runs. Clarity:
 one name per thing, and the type says what is passed around. Good for agents: mistakes fail at compile or load time
 where they can, and every error the library throws states the fix as code.
@@ -13,16 +14,39 @@ The idea is the smart constructor, or
 
 ## Install it as a git dependency
 
-parsed-types needs Clojure 1.11 or later. Add it to `deps.edn`:
+parsed-types needs Clojure 1.11 or later, and is tested on JDK 21. Add it to `deps.edn`:
 
 ```edn
 {:deps {io.github.escherize/parsed-types {:git/tag "v0.1.0" :git/sha "SHA"}}}
 ```
 
+The API may change before 1.0. Report bugs and questions at
+[GitHub issues](https://github.com/escherize/parsed-types/issues).
+
 ## Only `parse` turns a draft into a parsed value
 
-`defparsed` defines `Order`, the parsed type, and `OrderDraft`, its draft. An order holds order lines that are
-already parsed.
+`defparsed` defines `Quantity`, the parsed type, and `QuantityDraft`, its draft. `restock!` takes only a `Quantity`:
+
+```clojure
+(ns warehouse
+  (:require [parsed-types.core :as pt]))
+
+(pt/defparsed Quantity [n]
+  (pure ::positive "The quantity is a positive integer."
+        [n]
+        (pos-int? n)))
+
+(defn restock! [quantity]
+  (let [{:keys [n]} (pt/parsed Quantity quantity)]
+    [:restocked n]))
+
+(restock! (pt/parse (pt/draft Quantity {:n 3}))) ;; => [:restocked 3]
+(pt/parse (pt/draft Quantity {:n 0}))            ;; throws ::pt/invalid
+(restock! {:n 3})                                ;; throws ::pt/not-parsed
+```
+
+A check passes only when its body returns exactly `true`. `nil`, a seq or a number fails, so wrap a truthy body in
+`(boolean ...)`.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/lifecycle-dark.svg">
@@ -31,12 +55,17 @@ already parsed.
 
 ## A shop declares its checks once, and `place-order!` accepts only a parsed order
 
+A real order also checks the world: each product exists, and each price is the catalog's. An order holds order lines
+that are already parsed. `shop.db` stands in for your store ([test/shop/db.clj](test/shop/db.clj)): product 7 costs
+5M and product 8 costs 3M, customer 1 may order and customer 2 may not, and writes return a keyword.
+
 ```clojure
 (ns shop
   (:require [parsed-types.core :as pt]
             [shop.db :as db]))
 
-;; your lookups: a map from each tuple to its result, nil when nothing exists
+;; your lookups: a map from each tuple to its result, nil when nothing exists.
+;; Each is called once per parse-all with every tuple, so a real store runs one query here.
 (defn products-by-id [tuples]
   (into {} (map (fn [[id :as t]] [t (db/product id)])) tuples))
 
@@ -76,6 +105,7 @@ already parsed.
 
 (defn place-order! [order]
   (let [{:keys [customer-id lines subtotal]} (pt/parsed Order order)]
+    ;; plain maps for the store
     (db/insert-order! customer-id (mapv #(into {} %) lines) subtotal)))
 
 (defn handle-order [{:keys [customer-id body]}]
@@ -94,30 +124,9 @@ already parsed.
 ```
 
 A check's argument vector names the fields it reads. An `external` check also binds fetches, as in
-`[product ::product]`. A clause is `pure`, `external` or `fetch`; `(doc pt/defparsed)` has the details.
-
-A payment is a card charge or an invoice, and nothing else:
-
-```clojure
-(pt/defparsed Card [card-token amount]
-  (pure ::amount-positive "The amount is a positive decimal."
-        [amount]
-        (and (decimal? amount) (pos? amount))))
-
-(pt/defparsed Invoice [customer-id amount]
-  (pure ::amount-positive "The amount is a positive decimal."
-        [amount]
-        (and (decimal? amount) (pos? amount))))
-
-(pt/defsum Payment [Card Invoice])
-
-(defn pay! [payment]
-  (pt/match Payment payment
-    Card    card    (db/charge-card! (:card-token card) (:amount card))
-    Invoice invoice (db/send-invoice! (:customer-id invoice) (:amount invoice))))
-
-(pay! (pt/parse (pt/draft Card {:card-token "tok_1", :amount 13M}))) ;; => :charged
-```
+`[product ::product]`. `(fetch ::product [product-id] f)` calls `f` once with every distinct `[product-id]` tuple,
+such as `[[7] [8]]`. `f` returns a map from each tuple to its row, or to nil when none exists. A clause is `pure`,
+`external` or `fetch`; `(doc pt/defparsed)` has the details.
 
 ## A value built any other way fails at the sink
 
@@ -125,11 +134,13 @@ A payment is a card charge or an invoice, and nothing else:
 (def line (pt/parse (pt/draft OrderLine {:product-id 7, :quantity 2, :unit-price 5M})))
 
 (line-total line)                                     ;; => 10M
+;; the 4th argument is the hidden proof field: only parse fills it
 (= line (OrderLine. 7 2 5M nil))                      ;; => false
 (place-order! {:customer-id 1, :lines [line], :subtotal 10M})                ;; throws ::pt/not-parsed
 (place-order! (pt/draft Order {:customer-id 1, :lines [line], :subtotal 10M})) ;; throws ::pt/not-parsed
 (place-order! (Order. 1 [line] 10M nil))              ;; throws ::pt/not-parsed
 (assoc line :quantity 3)                              ;; throws ::pt/cannot-change
+;; misspelled
 (:quantty line)                                       ;; throws ::pt/no-field
 ```
 
@@ -138,7 +149,8 @@ A payment is a card charge or an invoice, and nothing else:
 ### Checks run in the order written, on the fields they name
 
 A body that uses a field its argument vector doesn't name doesn't compile. Pure checks run in the order written. A
-pure check that fails holds every later check that shares a field with it, and a held check holds nothing:
+pure check that fails holds every later pure check that shares a field with it, and every external check. A held
+check holds nothing:
 
 ```clojure
 (pt/parse (pt/draft Order {:customer-id 1, :lines [line], :subtotal 12M}))
@@ -194,7 +206,7 @@ not checked again, but never a draft: `parse` throws `::bad-input` and names `(p
 There are no child clauses: a parent holds parsed values, and parse-all batches the children's fetches. Child clauses
 that parsed a whole tree in one call were rejected: they doubled the library and its edge cases to save one call.
 
-### Nothing is remembered between parses, and no type is bound late
+### Nothing is cached between parses, and types match by class, not by name
 
 `parse` runs every check every time. A cache of passed checks was rejected: it is hidden state beside the value.
 Types compare by class identity, like records. Matching types by name was rejected: it let a class of the same name,
@@ -214,14 +226,35 @@ the value. Equality reads the proof, so a value built by hand never equals a par
 Reading or setting a key that isn't a field throws. A record was rejected, because `assoc` on a record returns
 another record of the same class, which would look like proof. `parse` refuses a field that holds, anywhere inside
 it, a value not known to be immutable, such as an atom or a lazy seq: the accepted classes, JDK values such as `URI`
-and `Locale` included, are [listed here](docs/guarantees.md#accepted-field-values). The walk costs about 25 us per
-1,000 numbers; an issued value in a field is not walked again. `clojure.walk` over a parsed value throws instead of
+and `Locale` included, are [listed here](docs/guarantees.md#accepted-field-values). The walk costs about 25 microseconds
+for 1,000 numbers in 100 vectors; an issued value in a field is not walked again. `clojure.walk` over a parsed value throws instead of
 dropping the proof.
 
 ### A sum lists its members, and `match` handles each one
 
 `defsum` names a closed set of parsed types. A `match` that leaves out a member doesn't compile, so adding a member
-to the sum breaks every `match` that misses it.
+to the sum breaks every `match` that misses it. A payment is a card charge or an invoice, and nothing else:
+
+```clojure
+(pt/defparsed Card [card-token amount]
+  (pure ::amount-positive "The amount is a positive decimal."
+        [amount]
+        (and (decimal? amount) (pos? amount))))
+
+(pt/defparsed Invoice [customer-id amount]
+  (pure ::amount-positive "The amount is a positive decimal."
+        [amount]
+        (and (decimal? amount) (pos? amount))))
+
+(pt/defsum Payment [Card Invoice])
+
+(defn pay! [payment]
+  (pt/match Payment payment
+    Card    card    (db/charge-card! (:card-token card) (:amount card))
+    Invoice invoice (db/send-invoice! (:customer-id invoice) (:amount invoice))))
+
+(pay! (pt/parse (pt/draft Card {:card-token "tok_1", :amount 13M}))) ;; => :charged
+```
 
 ## Good for agents: a mistake fails early, and its error states the fix
 
@@ -232,7 +265,8 @@ wrong order, a check that uses a field it doesn't name, and a `defparsed` that i
 namespace. A fetch that isn't a fn or a var holding one throws when the file loads. The library ships a clj-kondo
 config, so the editor flags a check that uses a field it didn't name. Install it with:
 
-```
+```sh
+mkdir -p .clj-kondo
 clj-kondo --lint "$(clojure -Spath)" --dependencies --copy-configs --skip-lint
 ```
 
@@ -250,13 +284,13 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 
 | `:type` | Thrown when |
 |---|---|
-| `::invalid` | a check failed or threw; `:failures` has each one, and `:threw` names those that threw |
+| `::invalid` | a check failed or threw. `:failures` has each one, `:threw` names those that threw, and `:failed-kinds` is a set of `:pure` and `:external`, the kinds that failed |
 | `::not-parsed` | a sink, `match` or `draft-of` got a value `parse` didn't make |
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after |
 | `::cannot-change` | code changed a parsed value, or called `dissoc`, `with-meta` or `empty` on a draft |
 | `::no-field` | code read or changed a key that isn't a field |
-| `::bad-input` | a field holds a value not known to be immutable, a draft or an unissued value; `pt/draft` got the wrong keys; `parse` got something that isn't a draft |
-| `::bad-declaration` | a `defparsed`, `defsum` or `match` has an error, or misses an argument, found when it expands or loads |
+| `::bad-input` | a field holds a value not known to be immutable, a draft or an unissued value; `pt/draft` got the wrong keys; a library fn got an argument of the wrong kind |
+| `::bad-declaration` | a `defparsed`, `defsum` or `match` is malformed, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no map, or no entry for a tuple |
 
 `:threw` names the checks whose body threw, so a handler can send a bug in a check to its 500 before it reads
@@ -285,16 +319,19 @@ world, so the handler names no check.
 
 ### Nothing fails silently
 
-A key that isn't a field throws instead of reading nil, and so does a lookup with a default, such as `(get x :k d)`
-or `:or`: a misspelled key never reads the default. Probe with `contains?` or `find`. `java.util.Map.get` and
-`getOrDefault` keep Java's contract, null or the default: the one silent path, kept for Java interop. A check passes
-only on exactly `true`; for a truthy result such as `(seq xs)`, the message says to wrap the body in `(boolean ...)`.
-An external check gets nil when a fetch found nothing. The first check over a fetch tests for that, as
-`::product-exists` does, and holds the rest when it fails. A check body that
-throws is recorded under `:threw`, and its exception is the cause; the other checks of its phase still run. An
-exception from a fetch propagates. There is no `check` or `check-all`, because each returned a truthy value whether
-the checks passed or failed. A test stubs a fetch declared through its var, as `#'customers-by-id` is, with
-`(with-redefs [customers-by-id stub] ...)`.
+- **A key that isn't a field throws** instead of reading nil, and so does a lookup with a default, such as
+  `(get x :k d)` or `:or`: a misspelled key never reads the default. Probe with `contains?` or `find`.
+  `java.util.Map.get` and `getOrDefault` keep Java's contract, null or the default: the one silent path, kept for
+  Java interop.
+- **A check passes only on exactly `true`.** For a truthy result such as `(seq xs)`, the message says to wrap the
+  body in `(boolean ...)`.
+- **An external check gets nil when a fetch found nothing.** The first check over a fetch tests for that, as
+  `::product-exists` does, and holds the rest when it fails.
+- **A check body that throws is recorded** under `:threw`, and its exception is the cause. The other checks of its
+  phase still run. An exception from a fetch propagates.
+- **There is no boolean `valid?`.** A caller can ignore a boolean, but not a throw.
+- **A test stubs a fetch through its var.** `#'customers-by-id` is declared as a var, so
+  `(with-redefs [customers-by-id stub] ...)` reaches it.
 
 ### Types reload like records, and `::stale-type` names what to re-evaluate
 
