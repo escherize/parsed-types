@@ -11,7 +11,7 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | A hand-written type is refused, even with the same name | `pt/parsed` requires the class `defparsed` registered, by identity | `a-hand-written-class-with-the-same-name-is-refused-test` |
 | A `defparsed` can't redefine another's classes | Each class name is claimed with its role, parsed or draft, by the namespace whose `defparsed` first defined it. A `defparsed` whose classes would take a name claimed by another namespace (`my_app.bank` for `my-app.bank`), or a name in the other role (a type `FooDraft` beside `Foo`'s draft), throws `::bad-declaration` before its `deftype`s | `a-class-name-belongs-to-one-namespace-test`, `a-class-name-has-one-role-test` |
 | Neither type has a positional constructor fn | `defparsed` removes `->Name` and `->NameDraft`. `pt/draft` builds a draft from a literal map that names every field, so reordering a type's fields swaps no value. `(Debit. ...)` compiles, and `pt/parsed` refuses what it builds | `the-positional-factories-are-removed-test`, `parsed-refuses-anything-parse-did-not-issue-test` |
-| The proof is not part of the map | `parse-proof` isn't a key, and isn't in `seq`, `count`, equality, hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
+| The proof is not a field | `parse-proof` isn't in what `pt/parsed` returns, equality, the hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
 | A parsed value means its draft type's checks passed | Only `defparsed` defines types. It defines the draft type and the parsed type together, so one draft type parses to each parsed type. `defparsed-type` and `defdraft-type` are private, and a hand-made type that implements `DraftValue` has no plan | `only-defparsed-makes-types-test`, `a-draft-must-be-a-draft-type-test`, `a-hand-made-draft-type-is-refused-test` |
 | A declaration error is found when the `defparsed` loads, at the latest, and a refused one changes nothing | The macro refuses what it can see when it expands. The expansion is a top-level `do`, which runs each form before it compiles the next; its first form checks the fetch fns before any class is defined | `compile-errors-test`, `declaration-errors-at-load-test` |
 | A type whose `defparsed` stopped after its `deftype`s says so | Its classes are claimed but have no plan, so every use of them throws `type-not-loaded`, saying to fix the error and re-evaluate the `defparsed` | `declaration-errors-at-load-test` |
@@ -25,8 +25,8 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test`, `a-shared-collection-of-leaves-is-walked-once-test` |
 | A parsed value can't change | `assoc`, `conj`, `with-meta` and `empty` throw `::cannot-change`. The type is not a `java.util.Map` or an `IPersistentMap`, so `dissoc` and Java mutators don't apply to it | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `not-a-map-test` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `not-a-map-test` |
-| A parsed value is read only through `pt/parsed`, and a draft not at all | Every Clojure read, as `(:k x)`, `get`, destructuring, `contains?`, `count` or `seq`, throws `::must-unwrap`, with the `pt/parsed` call to write. So a sink that skips `pt/parsed` throws on the first parsed value or draft. A literal `pt/draft` checks keys when compiling | `every-read-throws-must-unwrap-test`, `a-sink-that-skips-parsed-fails-on-real-values-test`, `parsed-returns-a-plain-map-test`, `draft-test` |
-| A field may be named like any `clojure.core` function | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
+| A parsed value is read only through `pt/parsed`, and a draft has no read path | Every Clojure read, as `(:k x)`, `get`, destructuring, `contains?`, `count` or `seq`, throws `::must-unwrap`, with the `pt/parsed` call to write. So a sink that skips `pt/parsed` throws on the first parsed value or draft. A literal `pt/draft` checks keys when compiling | `every-read-throws-must-unwrap-test`, `a-sink-that-skips-parsed-fails-on-real-values-test`, `parsed-returns-a-plain-map-test`, `draft-test` |
+| A field may be named like any `clojure.core` function | The types' methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on each library interface print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to which check fails first and what it returned |
@@ -230,8 +230,13 @@ with `not-known-immutable`: convert it to an accepted value, as in `(str x)`.
 
 ## Behavior worth knowing
 
-- **Java interop reads fields.** A `deftype` field is public, so `(.-amount ^Debit x)` reads a parsed value or a
-  draft without `pt/parsed`. It names the class and the field on purpose, so it is not a mistake the library guards.
+- **Java interop and printing show fields.** A `deftype` field is public, so `(.-amount ^Debit x)` reads a parsed
+  value or a draft without `pt/parsed`. It names the class and the field on purpose, so it is not a mistake the
+  library guards. `pr-str`, `str` and `pprint` print the fields too, for people reading logs; reading them back out
+  of the printed text is not a mistake either.
+- **A few reads throw a JDK exception, not `::must-unwrap`.** `nth`, sequential destructuring and `vec` throw
+  `UnsupportedOperationException` or `RuntimeException`; `dissoc`, `peek` and `iterator-seq` throw
+  `ClassCastException`. Each fails loudly, but without the fix in its message.
 - **Drafts and parsed values are not maps.** `map?` is false, and every read throws `::must-unwrap`. `pt/parsed`
   returns a plain map of a parsed value's fields, where a misspelled key reads nil, as in any map. A plain map passed
   to a sink that skips `pt/parsed` still passes: nothing stops code from destructuring a map. `dissoc` throws a

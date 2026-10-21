@@ -242,6 +242,7 @@
                                   ["get" "get" :x #(get x :x)]
                                   ["get-in" "get" :x #(get-in x [:x])]
                                   ["invoke" "get" :x #(x :x)]
+                                  ["invoke, no argument" "invoke" nil #(x)]
                                   ["destructuring" "get" :x #(let [{:keys [x]} x] x)]
                                   ["get with a default" "get" :z #(get x :z ::none)]
                                   ["keyword with a default" "get" :x #(:x x ::none)]
@@ -292,6 +293,18 @@
       (is (identical? a (:from m)))
       (is (pt/parsed? Point (:to m)))
       (is (= ::pt/must-unwrap (:type (thrown #(:x (:from m)))))))))
+
+(pt/defparsed Pair [a b]
+  (pure ::a-is-x "a's x is 1." [a] (= 1 (:x a))))
+
+(deftest a-check-that-skips-parsed-names-the-fix-test
+  (let [e (thrown #(pt/parse (pt/draft Pair {:a (pt/parse (pt/draft Point {:x 1, :y 1})), :b nil})))]
+    (is (= ::pt/invalid (:type e)))
+    (is (= ::pt/must-unwrap (:type (ex-data (:threw e)))))
+    (is (str/includes? (:message e) "read a draft or parsed value without pt/parsed"))
+    (is (str/includes? (:message e) "(pt/parsed Point x)"))
+    (is (not (str/includes? (:message e) "Guard its input")) "no guard advice: the input is fine")
+    (is (not (re-find #"[^.]\.\.(?!\.)" (:message e))) "no doubled period")))
 
 ;;; REPL reloads
 

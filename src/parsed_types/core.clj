@@ -31,7 +31,8 @@
 
   Drafts and parsed values are not maps. [[parsed]] is the only way to read a parsed value: it checks the proof and
   returns the fields as a plain map. Any other read, as `(:amount x)` or destructuring, throws `::must-unwrap`, so a
-  sink that skips [[parsed]] fails on the first real value. A draft is not read at all. A parsed value cannot change:
+  sink that skips [[parsed]] fails on the first real value. A draft has no read path. Printing either shows its
+  fields, for people, not code. A parsed value cannot change:
   to change one, take [[draft-of]] it, `assoc`, and [[parse]] again.
 
   A parsed value carries its proof: a hidden field that only [[parse]] sets. So [[parsed]] needs no registry of
@@ -277,7 +278,7 @@
 (defn- must-unwrap!
   "Throws `::must-unwrap`: `op` read `x`, a draft or parsed value, which is not a map. `k` is the key read, or nil. A
   parsed value is read only through [[parsed]], which checks its proof, so a sink that reads without it fails on the
-  first real value instead of also accepting a plain map. A draft is unchecked, so it is not read at all. Called by the
+  first real value instead of also accepting a plain map. A draft is unchecked, so it has no read path. Called by the
   types [[defparsed]] defines."
   [x op k]
   (library-value! "parsed-types.core/must-unwrap!" x)
@@ -341,6 +342,7 @@
       clojure.lang.Counted
 
       clojure.lang.IFn
+      (~'invoke [~this] ~(refuse "invoke" nil))
       (~'invoke [~this ~k] ~(refuse "get" k))
       (~'invoke [~this ~k ~nf] ~(refuse "get" k))
       (~'applyTo [~this args#] (clojure.lang.AFn/applyToHelper ~this args#))
@@ -420,12 +422,12 @@
       :read-parsed (fn [~p] ~(into {} (map (fn [f] [(keyword f) `(. ~p ~(symbol (str "-" f)))])) fields))}))
 
 (defn- defparsed-type
-  "The form that defines `name`, a bare parsed type with `fields`: a map that only [[parse]] issues. `assoc`, `dissoc`
-  and `with-meta` throw, and so does reading a key that is not a field. Only [[defparsed]] calls this, when it
-  expands: it is private, so a parsed type cannot be defined apart from its draft and its checks.
+  "The form that defines `name`, a bare parsed type with `fields`, which only [[parse]] issues. It is not a map: every
+  read throws `::must-unwrap`, and `assoc`, `conj` and `with-meta` throw `::cannot-change`. Only [[defparsed]] calls
+  this, when it expands: it is private, so a parsed type cannot be defined apart from its draft and its checks.
 
-  The type has one more field, `parse-proof`, which is not a key: it is not in the map's keys, seq, count, equality,
-  hash or printed form. [[parse]] sets it to the proof; any other constructor call leaves it something else. The field
+  The type has one more field, `parse-proof`, which is not a field of the type: [[parsed]] does not return it, and it
+  is not in equality, the hash or the printed form. [[parse]] sets it to the proof; any other constructor call leaves it something else. The field
   is `volatile-mutable`, which Clojure compiles to a field that is not public, so interop cannot read it, and nothing
   sets it after the constructor: code outside the type can only ask `issuedWith` whether it holds a given object.
   The positional factory `->Name` is removed, so code outside this library has no plain function that builds one."
@@ -443,8 +445,8 @@
        (ns-unmap *ns* '~(symbol (str "->" name))))))
 
 (defn- defdraft-type
-  "The form that defines `name`, a bare draft type with `fields`. `assoc` sets a field; `dissoc` and `with-meta` throw,
-  and so do reading or setting a key that is not a field. The positional factory `->NameDraft` is removed: [[draft]]
+  "The form that defines `name`, a bare draft type with `fields`. It is not a map: every read throws `::must-unwrap`.
+  `assoc` sets a field, and throws for a key that is not one; `conj` and `with-meta` throw. The positional factory `->NameDraft` is removed: [[draft]]
   builds a draft, naming every field. Only [[defparsed]] calls this, when it expands."
   [name fields]
   (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
@@ -1450,8 +1452,11 @@
                            (when (= "pt/parse-all" fn-name) (str ", the draft at index " index " of pt/parse-all")))]
     (throw (ex-info (str what ": the check " n " (" doc ")"
                          (if threw
-                           (str " threw " (.getSimpleName (class threw)) ": " (ex-message threw) ". A check that"
-                                " throws met input that no check before it refused." (threw-fix check))
+                           (if (= ::must-unwrap (:type (ex-data threw)))
+                             (str " read a draft or parsed value without pt/parsed: " (ex-message threw)
+                                  " A field may hold parsed values, and a check reads one through pt/parsed too.")
+                             (str " threw " (.getSimpleName (class threw)) ": " (ex-message threw) ". A check that"
+                                  " throws met input that no check before it refused." (threw-fix check)))
                            (str " failed" (truthy-hint returned)
                                 ;; a fact, not a fix: true whether or not this is the check that tests for the row
                                 (when found-nothing
