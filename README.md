@@ -86,13 +86,13 @@ that are already parsed. `shop.db` stands in for your store ([test/shop/db.clj](
   (pure ::unit-price-positive "The unit price is a positive decimal."
         [unit-price]
         (and (decimal? unit-price) (pos? unit-price)))
+  (fetch ::product [product-id] products-by-id)
   (external ::product-exists "The product is in the catalog."
             [] [product ::product]
             (some? product))
   (external ::price-matches "The unit price is the catalog's price."
             [unit-price] [product ::product]
-            (= unit-price (:price product)))
-  (fetch ::product [product-id] products-by-id))
+            (= unit-price (:price product))))
 
 (defn line-total [line]
   (let [{:keys [quantity unit-price]} (pt/parsed OrderLine line)]
@@ -105,11 +105,11 @@ that are already parsed. `shop.db` stands in for your store ([test/shop/db.clj](
   (pure ::subtotal-adds-up "The subtotal is the sum of the line totals."
         [lines subtotal]
         (= subtotal (reduce + 0M (map line-total lines))))
+  ;; through the var, so a test can stub it
+  (fetch ::customer [customer-id] #'customers-by-id)
   (external ::customer-can-order "The customer exists and may order."
             [] [customer ::customer]
-            (true? (:can-order? customer)))
-  ;; through the var, so a test can stub it
-  (fetch ::customer [customer-id] #'customers-by-id))
+            (true? (:can-order? customer))))
 
 (defn place-order! [order]
   (let [{:keys [customer-id lines subtotal]} (pt/parsed Order order)]
@@ -156,9 +156,10 @@ missing from the map throws `::bad-fetch`. A clause is `pure`,
 
 ### Checks run in the order written, and the first failure stops the parse
 
-A body that uses a field its argument vector doesn't name doesn't compile. Checks run in the order written: pure
-checks, then fetches, then external checks. The first check that fails, or throws, stops the parse, and `::invalid`
-names it:
+A body that uses a field its argument vector doesn't name doesn't compile. Pure checks run first, then fetches,
+then external checks, each in the order written. A pure check written after an external check doesn't compile, so
+the source shows that order; a fetch may be written anywhere, and reads best before the checks that use it. The
+first check that fails, or throws, stops the parse, and `::invalid` names it:
 
 ```clojure
 (pt/parse Order {:customer-id 1, :lines [line], :subtotal 12M})
@@ -185,7 +186,8 @@ that the caller may see it, before the checks that read the row:
 
 ### The map to parse names every field, and only fields
 
-A missing or unknown key throws `::bad-input`, with "did you mean", so a misspelled key never parses as nil. Write
+A missing or unknown key throws `::bad-input`, and an unknown key names the field it is close to, so a misspelled key
+never parses as nil. Write
 nil for a field you mean to leave empty. A literal map in `(pt/parse Order {...})` is checked when the call compiles;
 any other map when it runs:
 
@@ -302,7 +304,7 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 
 | `:type` | Thrown when |
 |---|---|
-| `::invalid` | the first check that failed or threw: `:check`, `:doc`, `:kind` (`:pure` or `:external`), and `:returned` or `:threw`; from `parse-all`, also the map's `:index` |
+| `::invalid` | the first check that failed or threw: `:check`, `:doc`, `:kind` (`:pure` or `:external`), and `:threw` or, for a pure check, `:returned`; from `parse-all`, also the map's `:index` |
 | `::not-parsed` | a sink or `match` got a value `parse` didn't make |
 | `::must-unwrap` | code read a parsed value without `pt/parsed` |
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after |
@@ -335,14 +337,16 @@ caller no more than that:
 ```
 
 Never show the caller which external check failed. If a check that reads private data is written before the
-permission check, its failure reveals that data.
+permission check, its failure reveals that data. The library keeps what an external check returned out of the
+ex-data and the message, which names only its class, so a logged error holds no fetched data.
 
 ### Nothing fails silently
 
 - **A read without `pt/parsed` throws.** `(:k x)`, `get`, destructuring, `seq` and `count` on a parsed value throw
   `::must-unwrap`, so a sink can't skip the proof check. `pt/parsed` returns a plain map, where a misspelled key reads
   nil, as in any map.
-- **A missing or unknown key in the map to parse throws,** with "did you mean", instead of parsing as nil.
+- **A missing or unknown key in the map to parse throws,** instead of parsing as nil. An unknown key names the field
+  it is close to.
 - **A check passes only on exactly `true`.** For a truthy result such as `(seq xs)`, the message says to wrap the
   body in `(boolean ...)`.
 - **An external check gets nil when a fetch found nothing.** The first check over a fetch tests for that, as
@@ -356,13 +360,16 @@ permission check, its failure reveals that data.
 ### Types reload like records, and `::stale-type` names what to re-evaluate
 
 Re-evaluating a `defparsed` makes new classes, as for a `defrecord`. Where a class doesn't match but its name does,
-the library throws `::stale-type` with the command that fixes it, such as `(require 'shop :reload)`.
+the library throws `::stale-type`, naming what to re-evaluate or build again, such as `(require 'shop :reload)`.
 
 ## The library stops mistakes, not attackers or races
 
 - **Code that sets out to forge can**, with reflection, a private var of `parsed-types.core`, or `with-redefs`.
 - **A pure check can call the world.** The library can't stop a check body from calling a database.
-- **`vec` of a Java array can share it.** Use `(into [] a)`, which copies.
+- **A collection built over a Java array can share it.** `vec` of an array and Java constructors such as
+  `PersistentArrayMap.` keep the array. Use `(into [] a)`, which copies.
+- **Evaluate a `defparsed` on one thread at a time.** Two evaluations at once fail closed: the type is unloaded, or
+  the second throws `fetches-not-staged`. Neither registers a type without its fetches.
 - **External checks can go stale.** A price that matched at `parse` can change later. Parse right before you act.
 
 ## The API is eight names
@@ -374,7 +381,7 @@ the library throws `::stale-type` with the command that fixes it, such as `(requ
 | `parsed` | returns the fields of a value `parse` made, as a plain map: the only way to read one |
 | `parsed?` | tests whether `parse` made a value |
 | `defsum`, `match` | a closed set of parsed types, and a branch over every member |
-| `declaration` | returns the declaration `defparsed` wrote, as data |
+| `declaration` | returns the declaration `defparsed` wrote: its checks and fetches, each with its compiled fn |
 
 `defparsed` defines a class, not a var. Another namespace requires the namespace that defines them, then imports them,
 in that order. A sum is a var:

@@ -27,7 +27,7 @@
   input passes.
 
   A field may hold values [[parse]] issued: parse the parts first, then the whole, as in
-  `(pt/parse Order {:customer-id c, :lines (pt/parse-all OrderLine lines)})`.
+  `(pt/parse Order {:customer-id c, :lines (pt/parse-all OrderLine lines), :subtotal s})`.
 
   A parsed value is not a map. [[parsed]] is the only way to read one: it checks the proof and returns the fields as a
   plain map. Any other read, as `(:amount x)` or destructuring, throws `::must-unwrap`, so a sink that skips
@@ -799,10 +799,10 @@
       (pure ::lines-parsed \"Every line is a parsed OrderLine.\"
             [lines]
             (and (vector? lines) (every? #(pt/parsed? OrderLine %) lines)))
+      (fetch ::customer [customer-id] customers-by-id)
       (external ::customer-can-order \"The customer exists and may order.\"
                 [] [customer ::customer]
-                (true? (:can-order? customer)))
-      (fetch ::customer [customer-id] customers-by-id))
+                (true? (:can-order? customer))))
 
   Clauses:
 
@@ -815,10 +815,15 @@
 
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
 
-  Checks run in the order written: every pure check, then the fetches, then every external check. The first check
-  that does not return exactly `true`, or throws, stops the parse, so nothing runs after a failed permission check. A
-  pure check written before one that reads a proper subset of its fields is a compile error: move the smaller one
-  first, so the check that fails first names the root cause.
+  Every pure check runs, in the order written, then every fetch, in the order written, then every external check, in
+  the order written. A pure check written after an external check is a compile error, so the source shows the order
+  the checks run in; a fetch may be written anywhere, and reads best just before the checks that bind it. The first
+  check that does not return exactly `true`, or throws, stops the parse, so nothing runs after a failed permission
+  check. A pure check written before one that reads a proper subset of its fields is a compile error: move the
+  smaller one first, so the check that fails first names the root cause.
+
+  Evaluate a `defparsed` on one thread at a time. Two evaluations at once throw `fetches-not-staged` or leave the
+  type unloaded; they never register a type without its fetches.
 
   A field may hold values [[parse]] issued, which are not checked again: parse the parts first.
 
@@ -1052,8 +1057,8 @@
         (fail rule message more)))))
 
 (defn declaration
-  "The declaration `defparsed` wrote for the parsed type `type`: `{:parses-to :checks :fetches}`, as data. Throws
-  `::bad-input` for anything but a parsed type."
+  "The declaration `defparsed` wrote for the parsed type `type`: `{:parses-to :checks :fetches}`, a map whose checks
+  and fetches each hold their compiled fn under `:f`. Throws `::bad-input` for anything but a parsed type."
   [type]
   (:declaration (plan-of "pt/declaration" type)))
 

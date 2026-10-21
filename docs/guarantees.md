@@ -9,7 +9,7 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | `pt/parsed` accepts only values `parse` made | A parsed value has a hidden `parse-proof` field. `parse` sets it to a private token. `pt/parsed` first checks that the value's class is one `defparsed` registered, by identity, then asks the value `(issuedWith token)`, which compares inside the type | `parse-issues-a-new-equal-value-and-nothing-else-is-parsed`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The token never leaves the value | The field is `volatile-mutable`, which Clojure compiles to a non-public field that interop can't read, and nothing sets it after the constructor. No public method returns it. A hand-written class is refused before it is asked, so it never sees the token | `the-proof-never-leaves-the-value-test` |
 | A hand-written type is refused, even with the same name | `pt/parsed` requires the class `defparsed` registered, by identity | `a-hand-written-class-with-the-same-name-is-refused-test` |
-| A `defparsed` can't redefine another's class | Each class name is claimed by the namespace whose `defparsed` first defined it. A `defparsed` whose class would take a name claimed by another namespace (`my_app.bank` for `my-app.bank`) throws `::bad-declaration` before its `deftype`. `defparsed` defines one class, so `Foo` and `FooDraft` are two unrelated types | `a-class-name-belongs-to-one-namespace-test`, `defparsed-defines-one-class-test` |
+| A `defparsed` can't redefine another's class | Each class name is claimed by the namespace whose `defparsed` first defined it. A `defparsed` whose class would take a name claimed by another namespace (`my_app.bank` for `my-app.bank`) throws `::bad-declaration` before its `deftype`. `defparsed` defines one class | `a-class-name-belongs-to-one-namespace-test`, `defparsed-defines-one-class-test` |
 | The type has no positional constructor fn | `defparsed` removes `->Name`. `pt/parse` takes a map that names every field, so reordering a type's fields swaps no value. `(Debit. ...)` compiles, and `pt/parsed` refuses what it builds | `the-positional-factories-are-removed-test`, `parsed-refuses-anything-parse-did-not-issue-test` |
 | The map to parse names every field, and only fields | A literal map in `(pt/parse T {...})` is checked when the call compiles, through `parse`'s `:inline`; any other map, and every map of `parse-all`, when it runs. A missing or unknown key throws `::bad-input` with the nearest field, so a misspelled key never parses as nil | `parse-checks-a-literal-map-when-it-compiles-test`, `parse-checks-any-map-when-it-runs-test`, `parse-all-checks-each-map-test` |
 | The proof is not a field | `parse-proof` isn't in what `pt/parsed` returns, equality, the hash or the printed form. A field may not be named `parse-proof` | `the-proof-is-not-a-key-test`, `field-name-limits-test` |
@@ -26,12 +26,12 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test`, `a-shared-collection-of-leaves-is-walked-once-test` |
 | A parsed value can't change | `assoc`, `conj`, `with-meta` and `empty` throw `::cannot-change`. The type is not a `java.util.Map` or an `IPersistentMap`, so `dissoc` and Java mutators don't apply to it | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `not-a-map-test` |
 | A walk over a parsed value throws, and never drops the proof | `empty` on a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `not-a-map-test` |
-| A parsed value is read only through `pt/parsed` | Every Clojure read, as `(:k x)`, `get`, destructuring, `contains?`, `count` or `seq`, throws `::must-unwrap`, with the `pt/parsed` call to write. So a sink that skips `pt/parsed` throws on the first parsed value | `every-read-throws-must-unwrap-test`, `a-sink-that-skips-parsed-fails-on-real-values-test`, `parsed-returns-a-plain-map-test` |
+| A parsed value is read only through `pt/parsed` | Every Clojure map read, as `(:k x)`, `get`, destructuring, `contains?`, `count` or `seq`, throws `::must-unwrap`, with the `pt/parsed` call to write. So a sink that skips `pt/parsed` throws on the first parsed value | `every-read-throws-must-unwrap-test`, `a-sink-that-skips-parsed-fails-on-real-values-test`, `parsed-returns-a-plain-map-test` |
 | A field may be named like any `clojure.core` function | The types' methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on the library interface `ParsedValue` print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to which check fails first and what it returned |
-| Checks run in the order written, and the first failure stops the parse | Pure checks run in the order written, then the fetches, then external checks in the order written. The first check that returns anything but `true`, or throws, stops the parse: no check after it runs, so nothing runs after a failed permission check. `defparsed` refuses a pure check written before one on a proper subset of its fields, so the check that fails first names the root cause | `pure-checks-run-in-the-order-written-test`, `order-test`, `transfer-test`, `parse-matches-the-model` |
+| Checks run in the order written, and the first failure stops the parse | Pure checks run in the order written, then the fetches in the order written, then external checks in the order written. A pure check written after an external check doesn't compile (`pure-after-external`), so the source shows the order; a fetch may be written anywhere. The first check that returns anything but `true`, or throws, stops the parse: no check after it runs, so nothing runs after a failed permission check. `defparsed` refuses a pure check written before one on a proper subset of its fields, so the check that fails first names the root cause | `pure-checks-run-in-the-order-written-test`, `order-test`, `transfer-test`, `parse-matches-the-model`, `fetches-run-in-the-order-written-test`, `a-pure-check-after-an-external-check-does-not-compile-test` |
 | A check body that throws stops the parse as a failure does | Each `Exception` a pure or external check's body throws is reported as that check's failure: `:threw` holds it, and it is the cause. An exception the library throws inside a check body, such as `::must-unwrap` for a read of a parsed value without `pt/parsed`, is that check's `:threw` too. An exception from a fetch or from the library outside a check body, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-stops-the-parse-test`, `what-a-check-throws-that-is-not-recorded-test` |
 | Malformed input never reaches a fetch or an external check | A pure check that fails stops the parse before any fetch. `parse-all` runs every map's pure checks before any fetch, so one malformed map fetches nothing for the batch | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test`, `batching-test` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | `parse-all` gathers the tuples of every map in the call, per fetch, and deduplicates them; a missing answer throws `::bad-fetch`. So a parent built from `(pt/parse-all Part parts)` costs one call per fetch, not one per part | `parse-all-fetches-once-with-each-distinct-tuple`, `batching-test`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
@@ -59,9 +59,20 @@ The proof stops accidents, not forgers. These ways around it, and these gaps, ar
 - **`with-redefs` on library fns.** Rebinding `pt/parsed?` or a private fn changes what the library checks.
 - **Reader syntax fails closed.** `#ns.Debit[...]` calls the constructor, so it builds a value without the proof.
   `pt/parsed` refuses it.
-- **The walk trusts a class's interfaces.** A type that implements `IPersistentVector` mutably passes.
-- **`vec` of a Java array can share it.** `(vec a)` of 32 or fewer elements wraps the array itself, and the walk
-  can't tell that vector from another. Use `(into [] a)`, which copies; the message for an array names it.
+- **The walk trusts a class's interfaces.** A type that implements `IPersistentVector` mutably passes, and so does
+  `(bean x)`, a proxy map that reads `x` each time. A Java enum constant is accepted without looking at its fields,
+  so an enum with mutable fields passes too.
+- **A collection built over a Java array can share it.** `(vec a)` of 32 or fewer elements wraps the array itself,
+  and so does `(clojure.lang.PersistentArrayMap. a)`; the walk can't tell them from others. Use `(into [] a)`, which
+  copies; the message for an array names it.
+- **Two evaluations of one `defparsed` at once fail closed.** The type is left unloaded (`type-not-loaded`), or the
+  second throws `fetches-not-staged`. Neither registers a type without its fetches. Evaluate a `defparsed` on one
+  thread at a time.
+- **The compile-time key check ignores locals.** `:inline` sees the type symbol, not the locals, so
+  `(let [Box Other] (pt/parse Box {...}))` checks the keys against the class `Box`.
+- **Under AOT the top-level check can miss a `defparsed` inside another form.** `compile` leaves
+  `Compiler/METHOD` unbound, so the form fails with an unrelated "Unable to resolve symbol" instead of
+  `defparsed-not-top-level`. It still does not load.
 - **A sum can be built with its constructor.** `(parsed_types.core.Sum. 'S members)` builds one, so every use
   checks the members again. One built that way with real members is the same as one `defsum` builds.
 - **`in-ns` can redefine a namespace's types**, with whatever checks it writes, as a REPL reload does.
@@ -95,12 +106,12 @@ holds.
 
 | `:type` | Thrown when | Other ex-data |
 |---|---|---|
-| `::invalid` | `parse` or `parse-all` ran a check that failed or threw, and stopped there. The message names the check, its doc and what it returned or threw, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:check`, `:doc`, `:kind`, `:returned` or `:threw`, `:parsed`, and `:index` from `parse-all` |
+| `::invalid` | `parse` or `parse-all` ran a check that failed or threw, and stopped there. The message names the check, its doc and what it threw or, for a pure check, returned; for a result that is truthy but not `true`, it says to wrap the body in `(boolean ...)`, naming only the class of an external check's result | `:check`, `:doc`, `:kind`, `:threw` or (pure checks) `:returned`, `:parsed`, and `:index` from `parse-all` |
 | `::not-parsed` | `pt/parsed` or `match` got a value `parse` didn't issue | `:expected`, `:got` |
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed` | `:class`, and `:ns` where it applies |
 | `::must-unwrap` | a read of a parsed value without `pt/parsed`: `(:k x)`, `(x :k)`, `get`, destructuring, `contains?`, `find`, `count` or `seq`. The message is the `pt/parsed` call to write | `:parsed`, `:op`, `:key` when a key was read |
 | `::cannot-change` | `assoc`, `conj`, `with-meta` or `empty` on a parsed value | `:parsed`, `:op`, `:key` |
-| `::no-field` | `assoc` of a key that isn't a field. It is reported before the change is refused, so the fix names a field | `:parsed`, `:key`, `:fields`, `:suggestion` when a field is close |
+| `::no-field` | `assoc` of a key that isn't a field. It is reported before the change is refused, so the fix names a field | `:parsed`, `:op`, `:key`, `:fields`, `:suggestion` when a field is close |
 | `::bad-input` | the map to parse is not a map, is already parsed, or has a missing or unknown key; a field holds a value that is not known to be immutable, or an unissued value; a library fn got the wrong kind of argument | `:parsed`, `:index` from `parse-all`; `:unknown`, `:missing`, `:fields`, `:suggestion` for keys; `:field`, `:path`, `:got` for a field's value |
 | `::bad-declaration` | a declaration error, when `defparsed`, `defsum` or `match` expands or loads, or a type whose `defparsed` stopped after its `deftype` | `:parsed` when found at load; `:class` and `:ns` for `type-not-loaded` |
 | `::bad-fetch` | a fetch returned no entry for some tuples, or no map | `:fetch`, `:missing` |
@@ -111,8 +122,9 @@ For `::invalid`:
   `true`, in the order the checks ran.
 - `:kind` is `:pure` or `:external`. A pure failure means the input is malformed. An external one means a check of
   the world refused it.
-- `:returned` is what the check returned. A check whose body threw has `:threw`, the exception, instead, which is
-  also the cause. A check that threw has a bug; the input may be fine.
+- `:returned` is what a pure check returned. An external check's result is left out, and the message names only its
+  class: it can hold fetched data the caller may not see. A check whose body threw has `:threw`, the exception,
+  instead, which is also the cause. A check that threw has a bug; the input may be fine.
 - `:parsed` is the name of the parsed type's class. From `parse-all`, `:index` is the index of its map.
 
 ### Every rule
@@ -153,10 +165,13 @@ Declarations (`::bad-declaration`):
 - `fetch-no-fn`: a fetch with no function.
 - `name-used-twice`: a check or fetch name used twice.
 - `pure-check-order`: a pure check written before one on a proper subset of its fields.
+- `pure-after-external`: a pure check written after an external check.
 - `defparsed-not-top-level`: a `defparsed` inside another form.
 - `class-name-taken`: a class name another namespace claimed.
 - `fetch-not-fn`: a fetch that is not a fn or a var holding one, found when it loads.
 - `type-not-loaded`: a type whose `defparsed` stopped after its `deftype`.
+- `fetches-not-staged`: a type whose fetch fns were lost between staging and registering, when one `defparsed` is
+  evaluated on two threads at once.
 - `bad-sum-members`: a `defsum` whose members aren't distinct parsed types.
 - `match-not-a-sum`, `match-clause-shape`, `match-not-a-type`, `match-not-a-member`, `match-missing-member`,
   `match-member-twice`: a `match` that names no sum, has a clause that isn't a type, binding and expression, names
@@ -179,8 +194,9 @@ Parsing (`::bad-input`, `::invalid`, `::bad-fetch`):
 
 Sinks (`::bad-input`, `::not-parsed`, `::stale-type`):
 
-- `not-a-parsed-type`: `pt/parsed`, `pt/parsed?` or `pt/declaration` got a type argument that is neither a parsed
-  type nor a sum, or `parse` got a sum.
+- `not-a-parsed-type`: `pt/parsed`, `pt/parsed?`, `pt/declaration`, `pt/parse` or `pt/parse-all` got a type argument
+  that is not a parsed type, or a sum where a single type is needed: `pt/parse`, `pt/parse-all` and `pt/declaration`
+  take one type, and `pt/parsed` and `pt/parsed?` take a type or a sum.
 - `got-unparsed`: a sink got nil, a plain map, a value built by hand, or a value of another type. Fix:
   `(pt/parse T {...})`.
 - `match-compiled-before-member`: a `match` compiled before a member joined its sum.
@@ -189,7 +205,8 @@ Sinks (`::bad-input`, `::not-parsed`, `::stale-type`):
 ## When each error is caught
 
 `defparsed`, `defsum` and `match` throw what they can see when they expand, so the file doesn't compile: every
-declaration rule above but `fetch-not-fn` and `type-not-loaded`. So does `pt/parse` with a literal map whose keys
+declaration rule above but `fetch-not-fn`, `type-not-loaded`, `fetches-not-staged` and `bad-sum-members`, which are
+found when the form loads. So does `pt/parse` with a literal map whose keys
 are not exactly the fields. A call to `pt/defparsed-type` or `->Name` doesn't compile either. Each reaches a `try` as a
 `CompilerException`, with the `ex-info` as its cause.
 
@@ -230,7 +247,7 @@ with `not-known-immutable`: convert it to an accepted value, as in `(str x)`.
 - **A few reads throw a JDK exception, not `::must-unwrap`.** `nth`, sequential destructuring and `vec` throw
   `UnsupportedOperationException` or `RuntimeException`; `dissoc`, `peek` and `iterator-seq` throw
   `ClassCastException`. Each fails loudly, but without the fix in its message.
-- **A parsed value is not a map.** `map?` is false, and every read throws `::must-unwrap`. `pt/parsed`
+- **A parsed value is not a map.** `map?` is false, and every map read throws `::must-unwrap`. `pt/parsed`
   returns a plain map of a parsed value's fields, where a misspelled key reads nil, as in any map. A plain map passed
   to a sink that skips `pt/parsed` still passes: nothing stops code from destructuring a map. `dissoc` throws a
   `ClassCastException`, since the type is not an `IPersistentMap`. There is no `java.util.Map` interop.
@@ -270,7 +287,7 @@ one namespace.
 
 ## Tests
 
-`clojure -X:test` runs `bank-test` (an in-memory bank), `readme-test` (every README block), `core-test` (each
+`clojure -X:test` runs `bank-test` (an in-memory bank), `readme-test` (every Clojure block of the README), `core-test` (each
 behavior, the proof, mutable values, and known ways to forge or change a value), `defparsed-test` (compile and load
 errors, unknown keys, field names, and REPL reloads, applying each reload command a message prints),
 `properties-test` (`test.check` properties against a model written by hand), and `errors-test` (an example of every

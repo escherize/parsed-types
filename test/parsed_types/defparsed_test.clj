@@ -219,10 +219,12 @@
                  (str (compile-error '(pt/parse Point {:x 1, :yy 2})))))
     (is (= {:rule :parsed-types.rule/input-unknown-keys, :unknown [:yy], :suggestion :y}
            (select-keys (thrown #(eval-here '(pt/parse Point {:x 1, :yy 2}))) [:rule :unknown :suggestion]))))
+  (testing "the check runs when the call compiles: compiling a fn runs none of its body"
+    (is (re-find #"Point needs every field; missing \[:y\]" (str (compile-error '(fn [] (pt/parse Point {:x 1})))))))
   (testing "a map that is not literal compiles, and is checked when it runs"
     (is (nil? (compile-error '(fn [m] (pt/parse Point m)))))))
 
-;; found in review of the draft removal
+;; input maps at the edges: keys that are expressions, sorted maps, many keys, other parsed types
 (pt/defparsed Pair2 [n m])
 (pt/defparsed Other2 [z])
 ;; public: the quoted forms below name it, which clj-kondo does not see
@@ -656,7 +658,8 @@
 
 ;;; Found in review of v0.3.1
 
-(defn- staged-rows [tuples] (into {} (map (fn [t] [t :row])) tuples))
+;; public: the quoted defparsed forms below name it, which clj-kondo does not see
+(defn staged-rows [tuples] (into {} (map (fn [t] [t :row])) tuples))
 
 (deftest two-evaluations-of-one-defparsed-never-lose-its-fetches-test
   ;; Two threads evaluating one defparsed run the forms of its expansion interleaved. Run them in that order on one
@@ -711,10 +714,10 @@
   (external ::leaky "Returns the row in a seq." [] [row ::row] (seq [row]))
   (fetch ::row [id] (fn [ts] (into {} (map (fn [t] [t (get secret-rows t)])) ts))))
 
-(def ^:private realized? (atom false))
+(def ^:private lazy-realized (atom false))
 
 (pt/defparsed Lazy [x]
-  (pure ::lazy "Returns a lazy seq." [x] (map (fn [y] (reset! realized? true) y) [x])))
+  (pure ::lazy "Returns a lazy seq." [x] (map (fn [y] (reset! lazy-realized true) y) [x])))
 
 (deftest a-failure-message-shows-no-external-data-and-realizes-nothing-test
   (testing "an external check's result: only its class, in the message and the ex-data"
@@ -723,10 +726,10 @@
       (is (str/includes? (:message e) "which returned a clojure.lang."))
       (is (not (contains? e :returned)))))
   (testing "a lazy seq a check returned is not realized to print it"
-    (reset! realized? false)
+    (reset! lazy-realized false)
     (let [e (thrown #(pt/parse Lazy {:x 1}))]
       (is (str/includes? (:message e) "a clojure.lang.LazySeq"))
-      (is (false? @realized?)))))
+      (is (false? @lazy-realized)))))
 
 (def ^:private branches-run (atom []))
 
@@ -735,7 +738,7 @@
   (reset! branches-run [])
   (let [forged (Point. 1 1 nil)
         e      (thrown #(pt/match Shape forged
-                          Point p (swap! branches-run conj :point)
-                          Other o (swap! branches-run conj :other)))]
+                          Point _p (swap! branches-run conj :point)
+                          Other _o (swap! branches-run conj :other)))]
     (is (= ::pt/not-parsed (:type e)))
     (is (= [] @branches-run))))

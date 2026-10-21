@@ -301,7 +301,8 @@
 
 (deftest no-other-throws-test
   (testing "core.clj throws only ex-info: no Java exception escapes without a :type and a :rule"
-    (is (nil? (re-seq #"\(throw \((?!ex-info)[^\s)]*" source)))))
+    ;; any whitespace after throw, a newline too; the one exception is rethrowing what a catch bound as e
+    (is (nil? (re-seq #"\(throw\s+(?!\(ex-info\b|e\))\S*" source)))))
 
 (deftest the-type-argument-is-checked-test
   (doseq [[label thunk] [["nil" #(pt/parsed nil real)] ["a keyword" #(pt/parsed? :x real)]
@@ -337,7 +338,7 @@
 (deftest library-fns-refuse-what-is-not-a-library-value-test
   (doseq [[label thunk] [["final! of nil" #(#'pt/final! nil "assoc" nil)]
                          ["final! of a number" #(#'pt/final! 5 "assoc" :k)]
-                         ["no-field! of nil" #(#'pt/no-field! nil :k "read")]]]
+                         ["no-field! of nil" #(#'pt/no-field! nil :k "assoc")]]]
     (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-library-value}
            (select-keys (ex-data (try (thunk) nil (catch clojure.lang.ExceptionInfo e e))) [:type :rule]))
         label)))
