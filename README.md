@@ -4,7 +4,7 @@ Clojure code often checks a map, then passes the same map along. Nothing ties th
 it. Code can check one id and use another, skip the check, or change the map after it. How does a value prove it
 was checked? In parsed-types, each kind of checked data gets two types: a draft that any code can build, and a
 parsed type that only `parse` can make. The parsed value carries its own proof. A function that acts on checked data,
-such as `place-order!`, takes only the parsed type and refuses anything else.
+such as `place-order!`, takes only the parsed type, reads it only through `pt/parsed`, and refuses anything else.
 Three values decide each choice the library makes. Explicitness: what you read in the source is what runs. Clarity:
 one name per thing, and the type says what is passed around. Good for agents: mistakes fail at compile or load time
 where they can, and every error the library throws states the fix as code.
@@ -44,6 +44,22 @@ The API may change before 1.0. Report bugs and questions at
 (pt/parse (pt/draft Quantity {:n 0}))            ;; throws ::pt/invalid
 (restock! {:n 3})                                ;; throws ::pt/not-parsed
 ```
+
+`pt/parsed` checks the proof and returns the fields as a plain map. It is the only way to read a parsed value, so a
+sink that skips it fails on the first real value:
+
+```clojure
+(defn restock-bad! [quantity]
+  ;; reads without pt/parsed
+  (let [{:keys [n]} quantity]
+    [:restocked n]))
+
+(restock-bad! (pt/parse (pt/draft Quantity {:n 3})))  ;; throws ::pt/must-unwrap
+(restock-bad! (pt/draft Quantity {:n 3}))             ;; throws ::pt/must-unwrap
+```
+
+A plain map still passes `restock-bad!`, since nothing stops code from destructuring a map. Real callers pass parsed
+values, though, so the first test with one fails.
 
 A check passes only when its body returns exactly `true`. `nil`, a seq or a number fails, so wrap a truthy body in
 `(boolean ...)`.
@@ -87,8 +103,9 @@ that are already parsed. `shop.db` stands in for your store ([test/shop/db.clj](
             (= unit-price (:price product)))
   (fetch ::product [product-id] products-by-id))
 
-(defn line-total [{:keys [quantity unit-price]}]
-  (* quantity unit-price))
+(defn line-total [line]
+  (let [{:keys [quantity unit-price]} (pt/parsed OrderLine line)]
+    (* quantity unit-price)))
 
 (pt/defparsed Order [customer-id lines subtotal]
   (pure ::lines-parsed "The order has lines, and each is a parsed OrderLine."
@@ -106,7 +123,7 @@ that are already parsed. `shop.db` stands in for your store ([test/shop/db.clj](
 (defn place-order! [order]
   (let [{:keys [customer-id lines subtotal]} (pt/parsed Order order)]
     ;; plain maps for the store
-    (db/insert-order! customer-id (mapv #(into {} %) lines) subtotal)))
+    (db/insert-order! customer-id (mapv #(pt/parsed OrderLine %) lines) subtotal)))
 
 (defn handle-order [{:keys [customer-id body]}]
   (let [line-drafts (mapv (fn [l] (pt/draft OrderLine {:product-id (:product l)
@@ -140,8 +157,8 @@ such as `[[7] [8]]`. `f` returns a map from each tuple to its row, or to nil whe
 (place-order! (pt/draft Order {:customer-id 1, :lines [line], :subtotal 10M})) ;; throws ::pt/not-parsed
 (place-order! (Order. 1 [line] 10M nil))              ;; throws ::pt/not-parsed
 (assoc line :quantity 3)                              ;; throws ::pt/cannot-change
-;; misspelled
-(:quantty line)                                       ;; throws ::pt/no-field
+;; read only through pt/parsed
+(:quantity line)                                      ;; throws ::pt/must-unwrap
 ```
 
 ## Explicitness: what you read in the declaration is what runs
@@ -220,7 +237,7 @@ the value. Equality reads the proof, so a value built by hand never equals a par
 
 ### Fields are fixed, and values never change
 
-Reading or setting a key that isn't a field throws. A record was rejected, because `assoc` on a record returns
+Setting a key that isn't a field throws. A record was rejected, because `assoc` on a record returns
 another record of the same class, which would look like proof. `parse` refuses a field that holds, anywhere inside
 it, a value not known to be immutable, such as an atom or a lazy seq: the accepted classes, JDK values such as `URI`
 and `Locale` included, are [listed here](docs/guarantees.md#accepted-field-values). The walk costs about 25 microseconds
@@ -247,8 +264,10 @@ to the sum breaks every `match` that misses it. A payment is a card charge or an
 
 (defn pay! [payment]
   (pt/match Payment payment
-    Card    card    (db/charge-card! (:card-token card) (:amount card))
-    Invoice invoice (db/send-invoice! (:customer-id invoice) (:amount invoice))))
+    Card    card    (let [{:keys [card-token amount]} (pt/parsed Card card)]
+                      (db/charge-card! card-token amount))
+    Invoice invoice (let [{:keys [customer-id amount]} (pt/parsed Invoice invoice)]
+                      (db/send-invoice! customer-id amount))))
 
 (pay! (pt/parse (pt/draft Card {:card-token "tok_1", :amount 13M}))) ;; => :charged
 ```
@@ -273,8 +292,8 @@ Each error is an `ex-info`. Its ex-data has a `:type` in `parsed-types.core` and
 The message states what happened, the rule, and the fix as code:
 
 ```
-OrderLine has no field :quantty. Did you mean :quantity? A key that is not a field throws, never reads nil. Read one
-of its fields [:product-id :quantity :unit-price], as in (:quantity x).
+get :quantity on an OrderLine: a parsed value is read only through pt/parsed, which checks the proof. Write (let
+[{:keys [product-id quantity unit-price]} (pt/parsed OrderLine x)] ...).
 ```
 
 In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
@@ -283,9 +302,10 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 |---|---|
 | `::invalid` | the first check that failed or threw: `:check`, `:doc`, `:kind` (`:pure` or `:external`), and `:returned` or `:threw`; from `parse-all`, also the draft's `:index` |
 | `::not-parsed` | a sink, `match` or `draft-of` got a value `parse` didn't make |
+| `::must-unwrap` | code read a parsed value without `pt/parsed`, or read a draft |
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after |
-| `::cannot-change` | code changed a parsed value, or called `dissoc`, `with-meta` or `empty` on a draft |
-| `::no-field` | code read or changed a key that isn't a field |
+| `::cannot-change` | code changed a parsed value, or called `conj`, `with-meta` or `empty` on a draft |
+| `::no-field` | code set a key that isn't a field |
 | `::bad-input` | a field holds a value not known to be immutable, a draft or an unissued value; `pt/draft` got the wrong keys; a library fn got an argument of the wrong kind |
 | `::bad-declaration` | a `defparsed`, `defsum` or `match` is malformed, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no map, or no entry for a tuple |
@@ -317,10 +337,9 @@ permission check, its failure reveals that data.
 
 ### Nothing fails silently
 
-- **A key that isn't a field throws** instead of reading nil, and so does a lookup with a default, such as
-  `(get x :k d)` or `:or`: a misspelled key never reads the default. Probe with `contains?` or `find`.
-  `java.util.Map.get` and `getOrDefault` keep Java's contract, null or the default: the one silent path, kept for
-  Java interop.
+- **A read without `pt/parsed` throws.** `(:k x)`, `get`, destructuring, `seq` and `count` on a parsed value or a
+  draft throw `::must-unwrap`, so a sink can't skip the proof check. `pt/parsed` returns a plain map, where a
+  misspelled key reads nil, as in any map.
 - **A check passes only on exactly `true`.** For a truthy result such as `(seq xs)`, the message says to wrap the
   body in `(boolean ...)`.
 - **An external check gets nil when a fetch found nothing.** The first check over a fetch tests for that, as
@@ -350,7 +369,8 @@ the library throws `::stale-type` with the command that fixes it, such as `(requ
 | `defparsed` | defines `Name`, `NameDraft`, and the checks between them |
 | `draft` | builds a draft from a literal map that names every field, and only fields |
 | `parse`, `parse-all` | checks drafts and returns parsed values, or throws for the first check that fails |
-| `parsed`, `parsed?` | returns or tests a value `parse` made |
+| `parsed` | returns the fields of a value `parse` made, as a plain map: the only way to read one |
+| `parsed?` | tests whether `parse` made a value |
 | `draft-of` | turns a parsed value back into a draft |
 | `defsum`, `match` | a closed set of parsed types, and a branch over every member |
 | `declaration` | returns the declaration `defparsed` wrote, as data |

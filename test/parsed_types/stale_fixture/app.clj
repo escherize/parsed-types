@@ -7,4 +7,6 @@
   (:import
    (parsed_types.stale_fixture.types Credit Debit)))
 
-(defn transact [x] (pt/match Txn x Debit d [:debit (:amount d)] Credit c [:credit (:amount c)]))
+(defn transact [x] (pt/match Txn x
+                     Debit d [:debit (:amount (pt/parsed Debit d))]
+                     Credit c [:credit (:amount (pt/parsed Credit c))]))

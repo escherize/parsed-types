@@ -23,15 +23,15 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | A clock is refused, though its class is a final `java.time` class | `Clock` and `InstantSource` are checked before the `java.time` rule | `a-clock-is-refused-test` |
 | The walk can't overflow the stack, or skip the depth limit through shared structure | The walk keeps an explicit stack, and records the height of each collection it walked: the most levels below it, a leaf inside counting one. One reached again is skipped when its deepest value is still within the limit from there, and walked again otherwise | `the-walk-keeps-its-own-stack-test`, `shared-structure-is-walked-again-when-reached-deeper-test`, `a-shared-collection-of-leaves-counts-its-leaves-test` |
 | The walk costs each collection's size once, however many depths it is reached at | The same heights: a 100,000-element vector reached at each of 990 levels is walked once | `a-collection-reached-at-many-depths-is-walked-once-test`, `shared-structure-is-walked-once-test`, `a-shared-collection-of-leaves-is-walked-once-test` |
-| A parsed value can't change | `assoc`, `dissoc`, `with-meta` and every `java.util.Map` mutator, the default methods included, throw `::cannot-change`. So do the mutators of `keySet`, `values` and `entrySet`, of their iterators, and `setValue` on an entry of `entrySet` | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `java-map-interface-test`, `every-java-map-mutator-throws-ex-info-test` |
-| A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `java-map-interface-test` |
-| A misspelled key fails, never reads `nil` or a default | Drafts and parsed values have fixed fields; a literal `pt/draft` checks keys when compiling | `unknown-keys-test`, `draft-test` |
+| A parsed value can't change | `assoc`, `conj`, `with-meta` and `empty` throw `::cannot-change`. The type is not a `java.util.Map` or an `IPersistentMap`, so `dissoc` and Java mutators don't apply to it | `a-parsed-value-cannot-be-changed-test`, `a-parsed-value-cannot-be-changed`, `not-a-map-test` |
+| A walk over a parsed value throws, and never drops the proof | `empty` on a draft or a parsed value throws `::cannot-change`, so `clojure.walk` can't rebuild it as a plain map | `empty-throws-test`, `not-a-map-test` |
+| A parsed value is read only through `pt/parsed`, and a draft not at all | Every Clojure read, as `(:k x)`, `get`, destructuring, `contains?`, `count` or `seq`, throws `::must-unwrap`, with the `pt/parsed` call to write. So a sink that skips `pt/parsed` throws on the first parsed value or draft. A literal `pt/draft` checks keys when compiling | `every-read-throws-must-unwrap-test`, `a-sink-that-skips-parsed-fails-on-real-values-test`, `parsed-returns-a-plain-map-test`, `draft-test` |
 | A field may be named like any `clojure.core` function | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on each library interface print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to which check fails first and what it returned |
 | Checks run in the order written, and the first failure stops the parse | Pure checks run in the order written, then the fetches, then external checks in the order written. The first check that returns anything but `true`, or throws, stops the parse: no check after it runs, so nothing runs after a failed permission check. `defparsed` refuses a pure check written before one on a proper subset of its fields, so the check that fails first names the root cause | `pure-checks-run-in-the-order-written-test`, `order-test`, `transfer-test`, `parse-matches-the-model` |
-| A check body that throws stops the parse as a failure does | Each `Exception` a pure or external check's body throws is reported as that check's failure: `:threw` holds it, and it is the cause. An exception the library throws inside a check body, such as `::no-field` for a misspelled key, is that check's `:threw` too. An exception from a fetch or from the library outside a check body, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-stops-the-parse-test`, `what-a-check-throws-that-is-not-recorded-test` |
+| A check body that throws stops the parse as a failure does | Each `Exception` a pure or external check's body throws is reported as that check's failure: `:threw` holds it, and it is the cause. An exception the library throws inside a check body, such as `::must-unwrap` for a read of a parsed value without `pt/parsed`, is that check's `:threw` too. An exception from a fetch or from the library outside a check body, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-stops-the-parse-test`, `what-a-check-throws-that-is-not-recorded-test` |
 | Malformed input never reaches a fetch or an external check | A pure check that fails stops the parse before any fetch. `parse-all` runs every draft's pure checks before any fetch, so one malformed draft fetches nothing for the batch | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test`, `batching-test` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | `parse-all` gathers the tuples of every draft in the call, per declaration and fetch, and deduplicates them; a missing answer throws `::bad-fetch`. So a parent built from `(pt/parse-all parts)` costs one call per fetch, not one per part | `parse-all-fetches-once-with-each-distinct-tuple`, `batching-test`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Each draft's checks see only that draft | `parse-all-agrees-with-parse`, `parse-all-agrees-with-parse-across-declarations` |
@@ -97,8 +97,9 @@ holds.
 | `::invalid` | `parse` or `parse-all` ran a check that failed or threw, and stopped there. The message names the check, its doc and what it returned or threw, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:check`, `:doc`, `:kind`, `:returned` or `:threw`, `:draft`, and `:index` from `parse-all` |
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed` | `:class`, and `:ns` where it applies |
-| `::cannot-change` | a change to a parsed value, a `dissoc`, `with-meta` or `empty` on a draft, or a `java.util.Map` mutator on either | `:parsed` or `:draft`, `:op`, `:key` |
-| `::no-field` | reading a key that isn't a field, with a default too, or changing one. A key that isn't a field is reported before a change is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
+| `::must-unwrap` | a read of a parsed value without `pt/parsed`, or any read of a draft: `(:k x)`, `(x :k)`, `get`, destructuring, `contains?`, `find`, `count` or `seq`. The message is the `pt/parsed` call to write | `:parsed` or `:draft`, `:op`, `:key` when a key was read |
+| `::cannot-change` | a change to a parsed value, or `conj`, `with-meta` or `empty` on a draft | `:parsed` or `:draft`, `:op`, `:key` |
+| `::no-field` | `assoc` of a key that isn't a field. It is reported before a change to a parsed value is refused, so the fix names a field | `:parsed` or `:draft`, `:key`, `:fields`, `:suggestion` when a field is close |
 | `::bad-input` | a field holds a value that is not known to be immutable, a draft, or an unissued value; `pt/draft` got the wrong keys or no literal map; a library fn got the wrong kind of argument | `:draft`, `:field`, `:path`, `:got` for a field's value |
 | `::bad-declaration` | a declaration error, when `defparsed`, `defsum` or `match` expands or loads, or a type whose `defparsed` stopped after its `deftype`s | `:draft` when found at load; `:class` and `:ns` for `type-not-loaded` |
 | `::bad-fetch` | a fetch returned no entry for some tuples, or no map | `:fetch`, `:missing` |
@@ -115,14 +116,18 @@ For `::invalid`:
 
 ### Every rule
 
+Reading values (`::must-unwrap`):
+
+- `read-through-parsed`: a read of a parsed value. Fix: `(let [{:keys [...]} (pt/parsed T x)] ...)`.
+- `draft-not-readable`: a read of a draft. Fix: `(pt/parsed T (pt/parse d))`.
+
 Changing values (`::cannot-change`, `::no-field`, `::bad-input`):
 
 - `parsed-value-is-final`: a change to a parsed value. Fix: `(pt/parse (assoc (pt/draft-of x) :k v))`.
-- `draft-fields-are-fixed`: `dissoc` or a mutator on a draft. Fix: `(assoc d :k nil)`.
+- `draft-fields-are-fixed`: `conj` on a draft. Fix: `(assoc d :k v)`.
 - `no-metadata`: `with-meta` on either. Fix: keep it beside, as in `{:value x, :meta m}`.
-- `no-empty`: `empty` on either. Fix: `(into {} x)`.
-- `no-such-field-read`, `no-such-field-assoc`: a key that isn't a field. Fix: one of its fields, as named.
-- `conj-not-a-pair`: `conj` of a vector that isn't `[k v]`.
+- `no-empty`: `empty` on either. Fix: `(pt/parsed T x)` for a plain map of a parsed value's fields.
+- `no-such-field-assoc`: `assoc` of a key that isn't a field. Fix: one of its fields, as named.
 - `not-a-library-value`: a private fn the types call got another value.
 
 Field names (`::bad-declaration`):
@@ -225,16 +230,14 @@ with `not-known-immutable`: convert it to an accepted value, as in `(str x)`.
 
 ## Behavior worth knowing
 
-- **Reading unknown keys.** A Clojure lookup throws, with a default too: `(:k x)`, `(get x :k)`, `(x :k)`,
-  `(get x :k d)`, `(get-in x [:k] d)`, `(:k x d)`, `(x :k d)` and destructuring, `:or` included. A field read with a
-  default reads its value, nil too. To probe, `contains?` is false, `find` is nil, and `select-keys` leaves the key
-  out. `java.util.Map.get` returns null and `getOrDefault` the default, as Java's contract says: the one silent
-  path, kept for Java code that probes keys.
-- **Java `.equals` is one-sided.** A `HashMap`'s or a Clojure map's `.equals` compares contents and says true for a
-  parsed value with the same entries, while the value's own `.equals` says false. So a Java `HashSet` holding a
-  parsed value can report that it contains an equal plain map.
+- **Java interop reads fields.** A `deftype` field is public, so `(.-amount ^Debit x)` reads a parsed value or a
+  draft without `pt/parsed`. It names the class and the field on purpose, so it is not a mistake the library guards.
+- **Drafts and parsed values are not maps.** `map?` is false, and every read throws `::must-unwrap`. `pt/parsed`
+  returns a plain map of a parsed value's fields, where a misspelled key reads nil, as in any map. A plain map passed
+  to a sink that skips `pt/parsed` still passes: nothing stops code from destructuring a map. `dissoc` throws a
+  `ClassCastException`, since the types are not `IPersistentMap`. There is no `java.util.Map` interop.
 - **No empty version.** `empty` throws, and so does anything built on `(into (empty x) ...)`, such as
-  `clojure.walk`. Use `(into {} x)` for a plain map.
+  `clojure.walk`. Use `(pt/parsed T x)` for a plain map.
 - **Depth.** Nesting deeper than 1000 levels is refused (`value-too-deep`). The message and `:path` show the first 8
   steps of a longer path, and `:depth` its length.
 - **Cost.** The walk costs about 25 us for 1,000 numbers in 100 vectors; an issued value in a field costs one step.

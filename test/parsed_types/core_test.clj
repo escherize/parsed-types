@@ -56,19 +56,16 @@
     (let [draft  (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"})
           parsed (pt/parse draft)]
       (is (instance? RenameCard parsed))
-      (is (identical? parsed (pt/parsed RenameCard parsed)))
+      (is (= {:user-id 1, :card-id 1, :title "New"} (pt/parsed RenameCard parsed)))
       (is (false? (pt/parsed? RenameCard draft)) "the draft is not the parsed value")
-      (testing "it reads as a map and through its fields"
-        (is (= {:user-id 1, :card-id 1, :title "New"} (into {} parsed)))
+      (testing "it reads only through pt/parsed, and compares like a record"
         (is (not= {:user-id 1, :card-id 1, :title "New"} parsed) "a parsed value never equals a plain map")
         (is (= parsed (pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"}))) "it equals another parsed value with the same fields")
         (is (not= parsed (RenameCard. 1 1 "New" nil)) "and never a value of its type built without the proof")
         (is (not= parsed (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"})) "and not its draft")
-        (is (= 1 (:card-id parsed)))
         (is (= 1 (.-card-id ^RenameCard parsed)))
-        (is (= ::pt/no-field (:type (thrown-data #(:nope parsed)))) "a key that is not a field throws")
-        (is (= ::pt/no-field (:type (thrown-data #(get parsed :nope ::none)))) "with a default too")
-        (is (not (contains? parsed :nope))))
+        (is (= ::pt/must-unwrap (:type (thrown-data #(:card-id parsed)))) "a keyword read throws, for a field")
+        (is (= ::pt/must-unwrap (:type (thrown-data #(get parsed :nope ::none)))) "and for any other key, with a default too"))
       (testing "it prints with its type, and so do str, toString and pprint, which never show the proof"
         (doseq [shown [(pr-str parsed) (str parsed) (.toString ^Object parsed) (str/trim (with-out-str (binding [pprint/*print-right-margin* 200] (pprint/pprint parsed))))]]
           (is (= "#parsed_types.core_test.RenameCard{:user-id 1, :card-id 1, :title \"New\"}" shown)))
@@ -146,10 +143,10 @@
     (testing "assoc builds a new draft"
       (let [renamed (assoc draft :title "Newer")]
         (is (= (pt/draft RenameCard {:user-id 1, :card-id 1, :title "Newer"}) renamed))
-        (is (= "New" (:title draft)))))
-    (testing "assoc refuses a key that is not a field, and dissoc any key"
+        (is (= (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"}) draft) "the draft it came from is unchanged")))
+    (testing "assoc refuses a key that is not a field; a draft is not a map, so dissoc throws"
       (is (= ::pt/no-field (:type (thrown-data #(assoc draft :titel "x")))))
-      (is (= ::pt/cannot-change (:type (thrown-data #(dissoc draft :title))))))))
+      (is (thrown? ClassCastException (dissoc draft :title))))))
 
 (deftest draft-of-test
   (let [parsed (pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"}))
@@ -214,12 +211,9 @@
 
 (deftest the-proof-is-not-a-key-test
   (let [real (pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"}))]
-    (testing "the hidden parse-proof field is not part of the map"
-      (is (= [:user-id :card-id :title] (keys real)))
-      (is (= 3 (count real) (count (seq real)) (.size ^java.util.Map real)))
-      (is (false? (contains? real :parse-proof)))
-      (is (= ::pt/no-field (:type (thrown-data #(get real :parse-proof ::none)))))
-      (is (= ::pt/no-field (:type (thrown-data #(:parse-proof real))))))
+    (testing "the hidden parse-proof field is not a field: pt/parsed returns only the fields"
+      (is (= [:user-id :card-id :title] (keys (pt/parsed RenameCard real))))
+      (is (= ::pt/must-unwrap (:type (thrown-data #(:parse-proof real))))))
     (testing "equality holds the proof: a value parse issued never equals one built without it"
       (is (not= real (RenameCard. 1 1 "New" nil)))
       (is (not= (RenameCard. 1 1 "New" nil) real))
@@ -266,13 +260,15 @@
 (deftest a-parsed-value-cannot-be-changed-test
   (let [real (pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"}))]
     (doseq [[label thunk] [["assoc" #(assoc real :card-id 3)]
-                           ["dissoc" #(dissoc real :card-id)]
                            ["merge" #(merge real {:card-id 3})]
-                           ["update" #(update real :card-id inc)]
                            ["with-meta" #(with-meta real {:x 1})]
                            ["vary-meta" #(vary-meta real assoc :x 1)]]]
       (testing label
         (is (= ::pt/cannot-change (:type (thrown-data thunk))))))
+    (testing "update reads the field first, so it throws ::must-unwrap"
+      (is (= ::pt/must-unwrap (:type (thrown-data #(update real :card-id inc))))))
+    (testing "dissoc: a parsed value is not a map"
+      (is (thrown? ClassCastException (dissoc real :card-id))))
     (testing "the draft type is a record, and the parse is still the only way to the parsed one"
       (is (= ::pt/cannot-change (:type (thrown-data #(assoc real :card-id 3))))))))
 
@@ -294,7 +290,7 @@
 
 (deftest a-fetch-may-close-over-a-local-test
   (testing "a fetch reads the world, so it may hold a database handle"
-    (is (= {:a 1} (into {} (pt/parse (pt/draft Closure {:a 1})))))
+    (is (= {:a 1} (pt/parsed Closure (pt/parse (pt/draft Closure {:a 1})))))
     (is (= :external (:kind (thrown-data #(pt/parse (pt/draft Closure {:a 2}))))))))
 
 (defn- rows-by-id [tuples] (into {} (map (fn [t] [t {:id (first t)}])) tuples))
@@ -387,7 +383,7 @@
           fixed (into [] a)
           p     (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title fixed}))]
       (aset a 0 :mutated)
-      (is (= [1 2] (:title p)))))
+      (is (= [1 2] (:title (pt/parsed Other p))))))
   (testing "while vec, which the message no longer names, shares a small array"
     (let [a (object-array [1 2]), v (vec a)]
       (aset a 0 :mutated)
@@ -529,8 +525,8 @@
               :depth 1001}
              (select-keys data [:type :rule :field :path :depth]))))
     (testing "and each fix the message names parses"
-      (is (= [1] (:title (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (vec (flatten nested))})))))
-      (is (string? (:title (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (pr-str nested)}))))))))
+      (is (= [1] (:title (pt/parsed Other (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (vec (flatten nested))}))))))
+      (is (string? (:title (pt/parsed Other (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (pr-str nested)})))))))))
 
 (deftest java-sql-dates-test
   (testing "java.sql.Date and java.sql.Time throw on .toInstant, so each message names a conversion that works"

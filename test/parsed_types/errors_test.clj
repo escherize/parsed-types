@@ -71,17 +71,17 @@
   [;; changing values
    [:parsed-value-is-final #(assoc real :amount 5) "assoc :amount on a Debit" "(pt/parse (assoc (pt/draft-of x) :amount v))"]
    [:no-metadata #(with-meta real {}) "with-meta on a Debit" "{:value x, :meta m}"]
-   [:no-empty #(empty real) "Debit has fixed fields" "(into {} x)"]
-   [:draft-fields-are-fixed #(dissoc draft :amount) "dissoc :amount on a DebitDraft" "(assoc d :amount nil)"]
+   [:no-empty #(empty real) "Debit has fixed fields" "(pt/parsed Debit x)"]
+   [:draft-fields-are-fixed #(conj draft [:amount 1]) "conj on a DebitDraft" "(assoc d :field v)"]
    [:no-metadata #(with-meta draft {}) "with-meta on a DebitDraft" "{:value x, :meta m}"]
-   [:no-empty #(empty draft) "DebitDraft has fixed fields" "(into {} x)"]
-   [:conj-not-a-pair #(conj draft [:amount 1 2]) "conj of [:amount 1 2] on a DebitDraft" "has 3 elements"
-    "(conj x [k v]), or (assoc x k v)"]
-   [:not-a-library-value #(#'pt/no-field! 5 :k "read") "parsed-types.core/no-field! got 5" "(get m k default)"]
-   [:no-such-field-read #(:amont real) "Debit has no field :amont" "Did you mean :amount?"
-    "[:user-id :account-id :amount]" "(:amount x)"]
-   [:no-such-field-read #(get real :amont 0) "Debit has no field :amont" "Did you mean :amount?"
-    "even read with a default" "(contains? x :amont)" "(find x :amont)"]
+   [:no-empty #(empty draft) "DebitDraft has fixed fields" "pt/draft, naming every field"]
+   [:not-a-library-value #(#'pt/no-field! 5 :k "assoc") "parsed-types.core/no-field! got 5" "(get m k default)"]
+   ;; reading
+   [:read-through-parsed #(:amount real) "get :amount on a Debit" "(pt/parsed Debit x)"
+    "{:keys [user-id account-id amount]}"]
+   [:read-through-parsed #(get real :amont 0) "get :amont on a Debit" "Debit has no field :amont" "Did you mean :amount?"]
+   [:draft-not-readable #(:amount draft) "get :amount on a DebitDraft" "a draft is unchecked input"
+    "(pt/parsed Debit (pt/parse d))"]
    [:no-such-field-assoc #(assoc draft :acount-id 1) "DebitDraft has no field :acount-id" "Did you mean :account-id?"
     "(assoc d :account-id v)"]
    ;; field names
@@ -326,12 +326,6 @@
       (is (= (if (= "a bare Sum" label) nil :parsed-types.rule/not-a-parsed-type) (:rule (error thunk))))))
   (is (str/includes? (:message (error #(pt/parsed DebitDraft real))) "pass its parsed type, as in (pt/parsed Debit x)")))
 
-(deftest the-java-map-mutators-throw-ex-info-test
-  (doseq [[op thunk] [["put" #(.put ^java.util.Map real :amount 1)] ["clear" #(.clear ^java.util.Map draft)]]]
-    (is (= ::pt/cannot-change (:type (error thunk))) op))
-  (is (str/includes? (:message (error #(.clear ^java.util.Map draft))) "clear on a DebitDraft"))
-  (is (str/includes? (:message (error #(.clear ^java.util.Map draft))) "(assoc d :field v)")))
-
 (pt/defparsed Truthy [k]
   (pure ::returns "Returns the value k names." [k]
         (get {:seq (seq [1 2]), :num 3, :lazy (range), :nil nil, :false false, :str "too long", :map {:length 9}} k)))
@@ -379,8 +373,6 @@
 
 (deftest every-suggested-fix-applies-test
   (testing "a type with no fields says to add one, rather than naming a field it does not have"
-    (is (= "Unit has no field :x: it has no fields at all, so every key read throws, with a default too. Add the field to its defparsed, as in (defparsed Unit [x])."
-           (:message (error #(:x (pt/parse (pt/draft Unit {})))))))
     (is (str/includes? (:message (error #(assoc (pt/draft Unit {}) :x 1))) "(defparsed Unit [x])")))
   (testing "a key that is not a field, on a parsed value, is reported first, so the fix names a field"
     (let [{:keys [type message]} (error #(assoc real :acount-id 1))]
@@ -389,8 +381,6 @@
                   " changes. Change one of [:user-id :account-id :amount] on a copy, as in (pt/parse (assoc"
                   " (pt/draft-of x) :account-id v)).")
              message)))
-    (is (= ::pt/no-field (:type (error #(dissoc real :bogus)))))
-    (is (= ::pt/no-field (:type (error #(dissoc draft :bogus)))))
     (testing "and the fix it names parses"
       (is (some? (pt/parse (assoc (pt/draft-of real) :account-id 3))))))
   (testing "a check that uses a field it does not name: each fix the message offers compiles and passes"
@@ -540,9 +530,9 @@
       (is (= #{} (set/difference cited tests)) "cited in docs/guarantees.md, but no such test"))))
 
 (deftest suggestions-are-data-too-test
-  (is (= :amount (:suggestion (ex-data (try (:amont real) (catch clojure.lang.ExceptionInfo e e))))))
+  (is (= :amount (:suggestion (ex-data (try (assoc draft :amont 1) (catch clojure.lang.ExceptionInfo e e))))))
   (is (= :amount (:suggestion (ex-data (try ((compiling '(pt/draft Debit {:user-id 1, :account-id 2, :amont 3}))) nil
                                              (catch Exception e (ex-cause e)))))))
   (testing "no suggestion when nothing is close, or the key is short"
-    (is (not (contains? (ex-data (try (:zzzzzz real) (catch clojure.lang.ExceptionInfo e e))) :suggestion)))
-    (is (not (contains? (ex-data (try (:x real) (catch clojure.lang.ExceptionInfo e e))) :suggestion)))))
+    (is (not (contains? (ex-data (try (assoc draft :zzzzzz 1) (catch clojure.lang.ExceptionInfo e e))) :suggestion)))
+    (is (not (contains? (ex-data (try (assoc draft :x 1) (catch clojure.lang.ExceptionInfo e e))) :suggestion)))))

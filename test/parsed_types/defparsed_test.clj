@@ -97,7 +97,7 @@
              (mapv #(dissoc % :f) (:checks decl))))
       (is (= [{:name ::row, :reads [:x]}] (mapv #(dissoc % :f) (:fetches decl))))))
   (testing "and parses with it"
-    (is (= {:x 2, :y 2} (into {} (pt/parse (pt/draft Point {:x 2, :y 2})))))
+    (is (= {:x 2, :y 2} (pt/parsed Point (pt/parse (pt/draft Point {:x 2, :y 2})))))
     (is (= :pure (:kind (try (pt/parse (pt/draft Point {:x 1, :y :y})) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
 (pt/defparsed Other [x z])
@@ -151,7 +151,7 @@
           (is (= ::pt/bad-declaration (:type (first (load-error form)))))
           (is (identical? cls (resolve-here-class 'Kept)))
           (is (identical? dcls (resolve-here-class 'KeptDraft)))
-          (is (identical? old (pt/parsed (resolve-here-class 'Kept) old)))
+          (is (pt/parsed? (resolve-here-class 'Kept) old))
           (is (= ::kept-pos (:check (thrown #(pt/parse (eval-here '(pt/draft Kept {:a -1})))))))))))
   (testing "a defparsed that fails after its deftypes, as when a check does not compile, says so wherever its type is used"
     (eval-here '(pt/defparsed Broken [a]))
@@ -229,38 +229,69 @@
   (testing "a type without a draft does not compile"
     (is (re-find #"not a type defined with defparsed" (str (compile-error '(pt/draft String {})))))))
 
-;;; Keys that are not fields
+;;; Reads: a parsed value is read only through pt/parsed, and a draft not at all
 
-(deftest unknown-keys-test
+(deftest every-read-throws-must-unwrap-test
   (let [d (pt/draft Point {:x 1, :y 2})
         p (pt/parse (pt/draft Point {:x 2, :y 2}))]
-    (doseq [[label x] [["a draft" d] ["a parsed value" p]]]
+    (doseq [[label x rule fix] [["a draft" d :parsed-types.rule/draft-not-readable "(pt/parsed Point (pt/parse d))"]
+                                ["a parsed value" p :parsed-types.rule/read-through-parsed "(pt/parsed Point x)"]]]
       (testing label
-        (doseq [[how thunk] [["keyword" #(:z x)]
-                             ["get" #(get x :z)]
-                             ["invoke" #(x :z)]
-                             ["destructuring" #(let [{:keys [z]} x] z)]
-                             ["get with a default" #(get x :z ::none)]
-                             ["get-in with a default" #(get-in x [:z] ::none)]
-                             ["keyword with a default" #(:z x ::none)]
-                             ["invoke with a default" #(x :z ::none)]
-                             ["destructuring with :or" #(let [{:keys [z] :or {z ::none}} x] z)]]]
-          (let [data (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-data e)))]
-            (is (= ::pt/no-field (:type data)) how)
-            (is (= :parsed-types.rule/no-such-field-read (:rule data)) how)))
-        (testing "a field read with a default reads its value, nil too"
-          (is (= (repeat 5 (:x x)) [(get x :x ::none) (get-in x [:x] ::none) (:x x ::none) (x :x ::none)
-                              (let [{:keys [x] :or {x ::none}} x] x)]))
-          (is (nil? (:y (assoc d :y nil) ::none))))
-        (testing "contains?, find and select-keys probe"
-          (is (false? (contains? x :z)))
-          (is (nil? (find x :z)))
-          (is (= {:x (:x x)} (select-keys x [:x :z]))))
-        (testing "java.util.Map keeps Java's contract: get returns null, getOrDefault the default"
-          (is (nil? (.get ^java.util.Map x :z)))
-          (is (= ::none (.getOrDefault ^java.util.Map x :z ::none)))
-          (is (some? (.get ^java.util.Map x :x))))
-        (is (= [:x :y] (keys x)))))))
+        (doseq [[how op k thunk] [["keyword" "get" :x #(:x x)]
+                                  ["keyword, not a field" "get" :z #(:z x)]
+                                  ["get" "get" :x #(get x :x)]
+                                  ["get-in" "get" :x #(get-in x [:x])]
+                                  ["invoke" "get" :x #(x :x)]
+                                  ["destructuring" "get" :x #(let [{:keys [x]} x] x)]
+                                  ["get with a default" "get" :z #(get x :z ::none)]
+                                  ["keyword with a default" "get" :x #(:x x ::none)]
+                                  ["invoke with a default" "get" :x #(x :x ::none)]
+                                  ["destructuring with :or" "get" :x #(let [{:keys [x] :or {x ::none}} x] x)]
+                                  ["contains?" "contains?" :x #(contains? x :x)]
+                                  ["find" "find" :x #(find x :x)]
+                                  ["select-keys" "find" :x #(select-keys x [:x])]
+                                  ["count" "count" nil #(count x)]
+                                  ["seq" "seq" nil #(seq x)]
+                                  ;; Clojure 1.12's empty? counts a Counted; 1.11's calls seq
+                                  ["empty?" #{"count" "seq"} nil #(empty? x)]
+                                  ["into {}" "seq" nil #(into {} x)]
+                                  ["keys" "seq" nil #(keys x)]
+                                  ["vals" "seq" nil #(vals x)]]]
+          (let [e (thrown thunk)]
+            (is (= ::pt/must-unwrap (:type e)) how)
+            (is (= rule (:rule e)) how)
+            (is (if (set? op) (contains? op (:op e)) (= op (:op e))) how)
+            (is (= k (:key e)) how)
+            (is (str/includes? (str (:message e)) fix) (str how ": the message names the fix"))))))))
+
+;; A sink that forgets pt/parsed: it reads its argument as a map
+(defn- forgetful-sink [point]
+  (let [{:keys [x y]} point]
+    [x y]))
+
+(deftest a-sink-that-skips-parsed-fails-on-real-values-test
+  (testing "it takes a plain map, which no library can stop"
+    (is (= [1 1] (forgetful-sink {:x 1, :y 1}))))
+  (testing "but throws on the first parsed value or draft, so it cannot ship working"
+    (is (= ::pt/must-unwrap (:type (thrown #(forgetful-sink (pt/parse (pt/draft Point {:x 1, :y 1})))))))
+    (is (= ::pt/must-unwrap (:type (thrown #(forgetful-sink (pt/draft Point {:x 1, :y 1}))))))))
+
+(pt/defparsed Segment [from to]
+  (pure ::points "Both ends are parsed points." [from to] (and (pt/parsed? Point from) (pt/parsed? Point to))))
+
+(deftest parsed-returns-a-plain-map-test
+  (let [a (pt/parse (pt/draft Point {:x 1, :y 1}))
+        b (pt/parse (pt/draft Point {:x 2, :y 2}))
+        m (pt/parsed Segment (pt/parse (pt/draft Segment {:from a, :to b})))]
+    (testing "pt/parsed returns the fields as a plain map, which carries no proof"
+      (is (= {:x 1, :y 1} (pt/parsed Point a)))
+      (is (map? (pt/parsed Point a)))
+      (is (= clojure.lang.PersistentArrayMap (class (pt/parsed Point a))))
+      (is (= ::pt/not-parsed (:type (thrown #(pt/parsed Point (pt/parsed Point a)))))))
+    (testing "a field that holds parsed values holds them as they are"
+      (is (identical? a (:from m)))
+      (is (pt/parsed? Point (:to m)))
+      (is (= ::pt/must-unwrap (:type (thrown #(:x (:from m)))))))))
 
 ;;; REPL reloads
 
@@ -281,10 +312,10 @@
           (is (re-find #"the code calling \(pt/parsed Kid \.\.\.\) was compiled before the defparsed Kid in parsed-types.defparsed-test was re-evaluated"
                        (:message e)))
           (is (re-find #"\(clojure.tools.namespace.repl/refresh\)" (:message e))))
-        (is (identical? old-value (sink old-value)) "and still takes the values of its own class"))
+        (is (= {:n 1} (sink old-value)) "and still takes the values of its own class"))
       (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
       (testing "once re-evaluated, the sink takes the new class"
-        (is (= {:n 2} (into {} ((resolve-here 'kid-sink) (pt/parse new-kid))))))
+        (is (= {:n 2} ((resolve-here 'kid-sink) (pt/parse new-kid)))))
       (testing "and says to build again what was built before the reload"
         (let [e (thrown #((resolve-here 'kid-sink) old-value))]
           (is (= :parsed-types.rule/stale-value (:rule e)))
@@ -295,7 +326,7 @@
   (eval-here '(pt/defparsed Member [n]))
   (eval-here '(pt/defparsed NonMember [n]))
   (eval-here '(pt/defsum Members [Member NonMember]))
-  (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
+  (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n (pt/parsed Member m))] NonMember o [:non-member (:n (pt/parsed NonMember o))])))
   (eval-here '(pt/defparsed Member [n]))
   (let [member (pt/parse (eval-here '(pt/draft Member {:n 1})))]
     (testing "the sum names itself, and a match compiled before the reload names its namespace"
@@ -311,7 +342,7 @@
         (is (= {:type ::pt/stale-type, :rule :parsed-types.rule/stale-match} (select-keys e [:type :rule])))
         (is (re-find #"Re-evaluate the defsum Members after the defparsed Member, then this match" (:message e)))))
     (eval-here '(pt/defsum Members [Member NonMember]))
-    (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n m)] NonMember o [:non-member (:n o)])))
+    (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n (pt/parsed Member m))] NonMember o [:non-member (:n (pt/parsed NonMember o))])))
     (testing "once the sum and the match are re-evaluated, they take the new class"
       (is (pt/parsed? (resolve-here 'Members) member))
       (is (= [:member 1] ((resolve-here 'which-member) member))))))
@@ -350,7 +381,7 @@
   (eval-here '(pt/defparsed RlLine [n] (pure ::rl-n-int "n is an integer." [n] (int? n))))
   (eval-here '(pt/defparsed RlOther [n]))
   (eval-here '(pt/defsum RlSum [RlLine RlOther]))
-  (eval-here '(defn- rl-match [x] (pt/match RlSum x RlLine l [:line (:n l)] RlOther o [:other (:n o)])))
+  (eval-here '(defn- rl-match [x] (pt/match RlSum x RlLine l [:line (:n (pt/parsed RlLine l))] RlOther o [:other (:n (pt/parsed RlOther o))])))
   (let [line-type  (ns-resolve 'parsed-types.defparsed-test 'RlLine)
         interfaces #(mapv (fn [n] (Class/forName n false (clojure.lang.DynamicClassLoader.)))
                           ["parsed_types.core.ParsedValue" "parsed_types.core.DraftValue" "parsed_types.core.Sum"])
@@ -363,7 +394,7 @@
       (is (= before (interfaces))))
     (testing "a value parsed before the reload is still parsed"
       (is (pt/parsed? line-type parsed))
-      (is (identical? parsed (pt/parsed line-type parsed))))
+      (is (= {:n 1} (pt/parsed line-type parsed))))
     (testing "a draft built before the reload still parses, and still fails its checks"
       (is (pt/parsed? line-type (pt/parse good)))
       (is (= ::rl-n-int (:check (try (pt/parse bad) nil
@@ -373,7 +404,8 @@
       (is (= [:line 1] ((resolve-here 'rl-match) parsed))))
     (testing "a type defined after the reload holds a value parsed before it"
       (eval-here '(pt/defparsed RlEntry [lines]))
-      (is (identical? parsed (first (:lines (pt/parse ((eval-here '(fn [x] (pt/draft RlEntry {:lines [x]}))) parsed)))))))))
+      (is (identical? parsed (first (:lines (pt/parsed (resolve-here-class 'RlEntry)
+                                                       (pt/parse ((eval-here '(fn [x] (pt/draft RlEntry {:lines [x]}))) parsed))))))))))
 
 (deftest a-hand-written-class-with-the-same-name-is-refused-test
   (eval-here '(pt/defparsed Genuine [n]))
@@ -470,17 +502,15 @@
   (testing "a field may be named like any clojure.core function or macro"
     (let [d (pt/draft Awkward {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10})
           p (pt/parse d)]
-      (is (= {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10} (into {} p)))
-      (is (= 10 (count p) (count d)))
-      (is (contains? p :map))
-      (is (= [:count 1] (first (seq p))))
-      (is (= (hash {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10})
-             (hash p)))
+      (is (= {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10} (pt/parsed Awkward p)))
+      (is (= p (pt/parse d)))
+      (is (= (hash p) (hash (pt/parse d))))
       (is (string? (str p)))
       (is (re-find #"#parsed_types.defparsed_test.Awkward\{" (pr-str p)))
-      (is (= 2 (:map (assoc d :map 2))))
-      (is (= 9 (let [{:keys [when]} p] when)))
-      (is (= [:count :map :set :str :seq :into :contains? :or :when :keys] (keys p))))))
+      (is (= 20 (:map (pt/parsed Awkward (pt/parse (assoc d :map 20))))))
+      (is (= 9 (let [{:keys [when]} (pt/parsed Awkward p)] when)))
+      (is (= ::pt/must-unwrap (:type (thrown #(:count p)))))
+      (is (= #{:count :map :set :str :seq :into :contains? :or :when :keys} (set (keys (pt/parsed Awkward p))))))))
 
 (deftest special-form-field-names-test
   (doseq [field '[if do def fn* let* recur throw & new quote]]
@@ -510,7 +540,7 @@
       (is (= @order drafted))
       (is (not= [:i :h :g :f :e :d :c :b :a] drafted) "so not the order written"))))
 
-;;; Equality, and the map interfaces
+;;; Equality, and not being a map
 
 (pt/defparsed Money [amount count])
 (pt/defparsed OtherMoney [amount count])
@@ -528,76 +558,18 @@
     (is (not= {:amount 1M, :count 2} (Money. 1M 2 nil)))
     (is (not (.equals (Money. 1M 2 nil) {:amount 1M, :count 2})))))
 
-(deftest java-map-interface-test
-  (let [m ^java.util.Map (Money. 1M 2 nil)]
-    (is (= 1M (.get m :amount)))
-    (is (nil? (.get m :nope)) "java.util.Map.get returns null for a missing key, as the interface says")
-    (is (.containsKey m :count))
-    (is (.containsValue m 2))
-    (is (not (.isEmpty m)))
-    (is (= 2 (.size m)))
-    (is (= #{:amount :count} (set (.keySet m))))
-    (is (= #{[:amount 1M] [:count 2]} (set (map (fn [^java.util.Map$Entry e] [(.getKey e) (.getValue e)]) (.entrySet m)))))
-    (doseq [[op thunk] [["put" #(.put m :amount 2M)] ["putAll" #(.putAll m {:amount 2M})]
-                        ["remove" #(.remove m :amount)] ["clear" #(.clear m)]]]
-      (is (= {:type ::pt/cannot-change, :op op}
-             (select-keys (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-data e))) [:type :op]))
-          "a java.util.Map mutator throws ex-info, a RuntimeException like UnsupportedOperationException"))
-    (is (= ::pt/cannot-change (try (empty m) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))
-    (is (= [[:amount 1M] [:count 2]] (reduce-kv (fn [acc k v] (conj acc [k v])) [] m)) "kvreduce in field order")))
-
-(deftest every-java-map-mutator-throws-ex-info-test
-  (let [f2   (reify java.util.function.BiFunction (apply [_ _ _] 9M))
-        f1   (reify java.util.function.Function (apply [_ _] 9M))
-        keep (reify java.util.function.Predicate (test [_ _] true))
-        op   (fn [thunk] (select-keys (try (thunk) nil (catch clojure.lang.ExceptionInfo e (ex-data e))) [:type :op]))]
-    (doseq [[label ^java.util.Map m] [["a parsed value" (pt/parse (pt/draft Money {:amount 1M, :count 2}))] ["a draft" (pt/draft Money {:amount 1M, :count 2})]]]
-      (testing label
-        (testing "the default methods of java.util.Map"
-          (doseq [[name thunk] [["replaceAll" #(.replaceAll m f2)]
-                                ["compute" #(.compute m :amount f2)]
-                                ["computeIfAbsent" #(.computeIfAbsent m :amount f1)]
-                                ["computeIfPresent" #(.computeIfPresent m :amount f2)]
-                                ["merge" #(.merge m :amount 9M f2)]
-                                ["putIfAbsent" #(.putIfAbsent m :amount 9M)]
-                                ["replace" #(.replace m :amount 9M)]
-                                ["replace" #(.replace m :amount 1M 9M)]
-                                ["remove" #(.remove m :amount 1M)]]]
-            (is (= {:type ::pt/cannot-change, :op name} (op thunk)) name)))
-        (testing "the views, their iterators and their entries"
-          (doseq [[name thunk] [["keySet().clear" #(.clear (.keySet m))]
-                                ["keySet().remove" #(.remove (.keySet m) :amount)]
-                                ["keySet().add" #(.add (.keySet m) :x)]
-                                ["keySet().removeIf" #(.removeIf (.keySet m) keep)]
-                                ["keySet().iterator().remove" #(let [it (.iterator (.keySet m))] (.next it) (.remove it))]
-                                ["values().remove" #(.remove (.values m) 2)]
-                                ["values().retainAll" #(.retainAll (.values m) [])]
-                                ["values().addAll" #(.addAll (.values m) [1])]
-                                ["values().clear" #(.clear (.values m))]
-                                ["entrySet().removeAll" #(.removeAll (.entrySet m) (vec (.entrySet m)))]
-                                ["entrySet().iterator().remove" #(let [it (.iterator (.entrySet m))] (.next it) (.remove it))]
-                                ["setValue" #(.setValue ^java.util.Map$Entry (first (.entrySet m)) 9M)]]]
-            (is (= {:type ::pt/cannot-change, :op name} (op thunk)) name)))
-        (testing "while the views read like a java.util.HashMap's"
-          (let [h (java.util.HashMap. {:amount 1M, :count 2})]
-            (is (= (.keySet h) (.keySet m)))
-            (is (= #{:amount :count} (.keySet m)))
-            (is (= (.entrySet h) (.entrySet m)))
-            (is (= (.hashCode (.entrySet h)) (.hashCode (.entrySet m))))
-            (is (= (set (.values h)) (set (.values m))))
-            (is (.contains (.values m) 2))
-            (is (= 2 (count (.toArray (.values m) (object-array 0)))))))))))
-
-(deftest conj-test
-  (let [d (pt/draft Money {:amount 1M, :count 2})]
-    (is (= 5M (:amount (conj d [:amount 5M]))))
-    (is (= 5M (:amount (conj d (clojure.lang.MapEntry/create :amount 5M)))))
-    (is (= 5M (:amount (conj d (java.util.AbstractMap$SimpleEntry. :amount 5M)))) "a Java map entry, which is no vector")
-    (is (= 5M (:amount (conj d {:amount 5M}))))
-    (is (= 5M (:amount (conj d (java.util.HashMap. {:amount 5M})))))
-    (is (identical? d (conj d nil)))
-    (is (= :parsed-types.rule/conj-not-a-pair
-           (try (conj d [:amount 5M :extra]) (catch clojure.lang.ExceptionInfo e (:rule (ex-data e))))))))
+(deftest not-a-map-test
+  (doseq [[label x] [["a parsed value" (pt/parse (pt/draft Money {:amount 1M, :count 2}))]
+                     ["a draft" (pt/draft Money {:amount 1M, :count 2})]]]
+    (testing label
+      (is (not (map? x)))
+      (is (not (instance? java.util.Map x)) "no java.util.Map interop either")
+      (doseq [[op thunk] [["conj" #(conj x [:amount 5M])]
+                          ["conj" #(merge x {:amount 5M})]
+                          ["empty" #(empty x)]
+                          ["with-meta" #(with-meta x {:a 1})]]]
+        (is (= {:type ::pt/cannot-change, :op op} (select-keys (thrown thunk) [:type :op])) op))
+      (is (thrown? ClassCastException (dissoc x :amount)) "dissoc needs a map"))))
 
 (deftest a-field-cannot-replace-the-checks-test
   (testing "a field named like a declaration, holding one, is only a field: the checks stay those defparsed wrote"

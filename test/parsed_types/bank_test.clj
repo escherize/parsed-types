@@ -70,7 +70,7 @@
 (deftest transfer-test
   (testing "a valid transfer parses, and the sink moves the money"
     (let [t (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 30M}))]
-      (is (= {:user-id :ada, :from-id 1, :to-id 2, :amount 30M} (into {} t)))
+      (is (= {:user-id :ada, :from-id 1, :to-id 2, :amount 30M} (pt/parsed Transfer t)))
       (transfer! t)
       (is (= [70M 40M] (map #(get-in @accounts [% :balance]) [1 2])))))
   (testing "malformed input fails the first pure check that refuses it, and fetches nothing"
@@ -105,16 +105,16 @@
         (boolean (seq transfers)))
   (pure ::no-repeat-payee "No account is paid twice."
         [transfers]
-        (= (count transfers) (count (set (map :to-id transfers)))))
+        (= (count transfers) (count (set (map #(:to-id (pt/parsed Transfer %)) transfers)))))
   (pure ::one-source "Every transfer draws on the payroll's account."
         [from-id transfers]
-        (every? #(= from-id (:from-id %)) transfers))
+        (every? #(= from-id (:from-id (pt/parsed Transfer %))) transfers))
   (pure ::one-payer "Every transfer is made by the payroll's user."
         [user-id transfers]
-        (every? #(= user-id (:user-id %)) transfers))
+        (every? #(= user-id (:user-id (pt/parsed Transfer %))) transfers))
   (external ::covers-total "The account holds the sum of every transfer."
             [transfers] [source ::source]
-            (<= (reduce + 0M (map :amount transfers)) (:balance source 0M)))
+            (<= (reduce + 0M (map #(:amount (pt/parsed Transfer %)) transfers)) (:balance source 0M)))
   (fetch ::source [from-id] accounts-by-id))
 
 (defn- run-payroll!
@@ -132,7 +132,7 @@
 (deftest payroll-test
   (testing "the transfers parse in one call, then the payroll, with one fetch per declaration and fetch"
     (let [p (pt/parse (payroll :ada 1  2 10M  3 20M))]
-      (is (every? #(pt/parsed? Transfer %) (:transfers p)))
+      (is (every? #(pt/parsed? Transfer %) (:transfers (pt/parsed Payroll p))))
       (is (= [[1] [2 3] [1]] @fetched) "the transfers' sources, their destinations, then the payroll's source")
       (run-payroll! p)
       (is (= [70M 20M 20M] (map #(get-in @accounts [% :balance]) [1 2 3])))))
@@ -147,7 +147,7 @@
     (reset! accounts (into {1 {:owner :ada, :balance 1000M}} (for [i (range 2 52)] [i {:owner :bob, :balance 0M}])))
     (reset! fetched [])
     (let [p (pt/parse (apply payroll :ada 1 (mapcat (fn [i] [i 1M]) (range 2 52))))]
-      (is (= 50 (count (:transfers p))))
+      (is (= 50 (count (:transfers (pt/parsed Payroll p)))))
       (is (= [[1] (vec (range 2 52)) [1]] @fetched)))))
 
 (deftest a-field-holds-parsed-values-not-drafts-test
@@ -167,10 +167,10 @@
 (deftest edit-a-parsed-payroll-test
   (let [p      (pt/parse (payroll :ada 1  2 10M  3 20M))
         draft  (pt/draft-of p)
-        edited (assoc-in draft [:transfers 1] (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 3, :amount 25M})))]
+        edited (assoc draft :transfers (assoc (:transfers (pt/parsed Payroll p)) 1 (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 3, :amount 25M}))))]
     (testing "draft-of returns a draft of the payroll, which still holds the parsed transfers"
-      (is (every? #(pt/parsed? Transfer %) (:transfers draft))))
-    (is (= 25M (:amount (second (:transfers (pt/parse edited))))))))
+      (is (= p (pt/parse draft))))
+    (is (= 25M (:amount (pt/parsed Transfer (second (:transfers (pt/parsed Payroll (pt/parse edited))))))))))
 
 ;;; A sum: a payment is a transfer or a payroll
 

@@ -29,8 +29,10 @@
   A field may hold values [[parse]] issued, but never a draft: parse the parts first, then the whole, as in
   `(pt/parse (pt/draft Order {:customer-id c, :lines (pt/parse-all line-drafts)}))`.
 
-  Drafts and parsed values are maps with fixed fields: reading a key that is not a field throws. A parsed value cannot
-  change: to change one, take [[draft-of]] it, `assoc`, and [[parse]] again.
+  Drafts and parsed values are not maps. [[parsed]] is the only way to read a parsed value: it checks the proof and
+  returns the fields as a plain map. Any other read, as `(:amount x)` or destructuring, throws `::must-unwrap`, so a
+  sink that skips [[parsed]] fails on the first real value. A draft is not read at all. A parsed value cannot change:
+  to change one, take [[draft-of]] it, `assoc`, and [[parse]] again.
 
   A parsed value carries its proof: a hidden field that only [[parse]] sets. So [[parsed]] needs no registry of
   issued values, and a value built by hand, equal or not, is refused.
@@ -40,8 +42,8 @@
   `::stale-type`, naming what to re-evaluate.
 
   Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (a check
-  failed or threw), `::not-parsed`, `::stale-type`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or
-  `::bad-fetch`, and
+  failed or threw), `::not-parsed`, `::must-unwrap`, `::stale-type`, `::cannot-change`, `::no-field`, `::bad-input`,
+  `::bad-declaration` or `::bad-fetch`, and
   a `:rule` in `parsed-types.rule` that names the rule it broke. Its message says what happened, with the values, the
   rule, and the fix."
   (:require
@@ -85,23 +87,24 @@
 (defclass-once
   (definterface DraftValue))
 
+(declare printed-fields)
+
 (defn- print-typed
   "Print `x`, a draft or parsed value, as `#ns.Type{...}`, like a record, so it is told apart from a plain map. The
-  proof is not a key, so it is never printed. The reader cannot build one back: a map type is not a record."
+  proof is not a field, so it is never printed. The reader cannot build one back: the type is not a record."
   [x ^java.io.Writer w]
   (.write w (str "#" (.getName (class x))))
-  (print-method (into {} x) w))
+  (print-method (printed-fields x) w))
 
-;; one method per interface, preferred over the map's, so a defparsed adds none
+;; one method per interface, preferred over the collection's, so a defparsed adds none
 (defmethod print-method ParsedValue [x w] (print-typed x w))
 (defmethod print-method DraftValue [x w] (print-typed x w))
 (doseq [i [ParsedValue DraftValue]]
-  (prefer-method print-method i clojure.lang.IPersistentMap)
-  (prefer-method print-method i java.util.Map)
+  (prefer-method print-method i clojure.lang.IPersistentCollection)
   (defmethod pprint/simple-dispatch i [x]
     (.write ^java.io.Writer *out* (str "#" (.getName (class x))))
-    (pprint/simple-dispatch (into {} x)))
-  (prefer-method pprint/simple-dispatch i clojure.lang.IPersistentMap))
+    (pprint/simple-dispatch (printed-fields x)))
+  (prefer-method pprint/simple-dispatch i clojure.lang.IPersistentCollection))
 
 ;;; ------------------------------------------------ State ------------------------------------------------
 
@@ -127,6 +130,13 @@
 ;; before a REPL re-evaluated the `defparsed`: stale.
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap latest
   (java.util.concurrent.ConcurrentHashMap.))
+
+(defn- printed-fields
+  "The fields of `x`, a draft or parsed value, as a plain map, for printing only: or `{}` when its class has no plan."
+  [x]
+  (if-let [plan (.get registry (class x))]
+    ((if (instance? DraftValue x) (:read-draft plan) (:read-parsed plan)) x)
+    {}))
 
 (defn- edit-distance
   "The Levenshtein distance between the strings `a` and `b`."
@@ -179,12 +189,17 @@
 
 (declare no-field!)
 
+(defn- fields-of
+  "The field keywords of `x`'s type, from its plan, or `[]` for a class no `defparsed` registered."
+  [x]
+  (vec (:fields (.get registry (class x)))))
+
 (defn- final!
   "Throws `::cannot-change`: a parsed value cannot be changed. `k` is the key `op` was given, or nil. A key that is
   not a field throws `::no-field` first, as [[no-field!]] says. Called by the parsed types [[defparsed]] defines."
   [parsed op k]
   (library-value! "parsed-types.core/final!" parsed)
-  (when (and (some? k) (not (contains? parsed k)))
+  (when (and (some? k) (not (some #{k} (fields-of parsed))))
     (no-field! parsed k op))
   (let [n                      (.getSimpleName (class parsed))
         {:keys [rule message]} (case op
@@ -194,13 +209,13 @@
                                                 " changes. Keep the metadata beside it, as in {:value x, :meta m}.")}
                                  "empty"
                                  {:rule    ::rule/no-empty
-                                  :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
-                                                " a plain map.")}
+                                  :message (str n " has fixed fields, so it has no empty version. Read its fields as a"
+                                                " plain map with (pt/parsed " n " x).")}
                                  {:rule    ::rule/parsed-value-is-final
                                   :message (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n) ": a parsed value"
                                                 " never changes, so its checks stay true. Use (pt/parse (assoc"
-                                                " (pt/draft-of x) " (if (some? k) (pr-str k) ":field")
-                                                (if (#{"dissoc" "remove"} op) " nil" " v") ")) for a changed copy.")})]
+                                                " (pt/draft-of x) " (if (some? k) (pr-str k) ":field") " v)) for a"
+                                                " changed copy.")})]
     (throw (ex-info message {:type ::cannot-change, :rule rule, :parsed (.getName (class parsed)), :op op, :key k}))))
 
 (defn- fixed!
@@ -208,7 +223,7 @@
   field throws `::no-field` first. Called by the draft types [[defparsed]] defines."
   [draft op k]
   (library-value! "parsed-types.core/fixed!" draft)
-  (when (and (some? k) (not (contains? draft k)))
+  (when (and (some? k) (not (some #{k} (fields-of draft))))
     (no-field! draft k op))
   (let [n                      (.getSimpleName (class draft))
         {:keys [rule message]} (case op
@@ -219,43 +234,29 @@
                                                 " :meta m}.")}
                                  "empty"
                                  {:rule    ::rule/no-empty
-                                  :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
-                                                " a plain map.")}
+                                  :message (str n " has fixed fields, so it has no empty version. Build one with"
+                                                " pt/draft, naming every field.")}
                                  {:rule    ::rule/draft-fields-are-fixed
                                   :message (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n) ": a draft has"
-                                                " fixed fields, set with assoc. Use (assoc d "
-                                                (if (some? k) (pr-str k) ":field")
-                                                (if (#{"dissoc" "remove"} op) " nil" " v") ").")})]
+                                                " fixed fields, set one at a time with assoc. Use (assoc d "
+                                                (if (some? k) (pr-str k) ":field") " v).")})]
     (throw (ex-info message {:type ::cannot-change, :rule rule, :draft (.getName (class draft)), :op op, :key k}))))
 
 (defn- no-field!
-  "Throws `::no-field`: `x` has no field `k`. `op` is `\"read\"` when a key that is not a field is read, `\"read with a
-  default\"` when it is read with one, or the change, such as `\"assoc\"` or `\"dissoc\"`, that named it. Called by the types [[defparsed]]
-  defines."
+  "Throws `::no-field`: `x` has no field `k`, which `op`, a change such as `\"assoc\"`, named. Called by the types
+  [[defparsed]] defines."
   [x k op]
   (library-value! "parsed-types.core/no-field!" x)
-  (let [fields  (vec (keys x))
-        read?   (#{"read" "read with a default"} op)
+  (let [fields  (fields-of x)
         n       (.getSimpleName (class x))
         draft?  (instance? DraftValue x)
         nearest (nearest k fields)
         field   (pr-str (or nearest (first fields)))]
     (throw (ex-info (cond
                       (empty? fields)
-                      (str n " has no field " (pr-str k) ": it has no fields at all, so every key "
-                           (if read? "read throws, with a default too" "throws") ". Add the field to its"
-                           " defparsed, as in (defparsed " (if draft? (subs n 0 (- (count n) 5)) n) " ["
+                      (str n " has no field " (pr-str k) ": it has no fields at all. Add the field to its defparsed, as"
+                           " in (defparsed " (if draft? (subs n 0 (- (count n) 5)) n) " ["
                            (if (keyword? k) (name k) "field") "]).")
-
-                      (= "read" op)
-                      (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A key that is not a field"
-                           " throws, never reads nil. Read one of its fields " fields ", as in (" field " x).")
-
-                      read?
-                      (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A key that is not a field"
-                           " throws, even read with a default, so a misspelled key never reads the default. Read one"
-                           " of its fields " fields ", as in (" field " x), or probe for the key with (contains? x "
-                           (pr-str k) ") or (find x " (pr-str k) ").")
 
                       draft?
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A draft has fixed fields. Set"
@@ -266,200 +267,94 @@
                            " fields, and never changes. Change one of " fields " on a copy, as in (pt/parse (assoc"
                            " (pt/draft-of x) " field " v))."))
                     (cond-> {:type                     ::no-field
-                             :rule                     (if read?
-                                                         ::rule/no-such-field-read
-                                                         ::rule/no-such-field-assoc)
+                             :rule                     ::rule/no-such-field-assoc
                              (if draft? :draft :parsed) (.getName (class x))
                              :key                      k
                              :op                       op
                              :fields                   fields}
                       nearest (assoc :suggestion nearest))))))
 
-(defn- not-a-pair!
-  "Throws `::bad-input`: `(conj x v)` with a vector `v` that is not a `[key value]` pair. Called by the types
-  [[defparsed]] defines."
-  [x v]
-  (throw (ex-info (str "conj of " (pr-str v) " on " (a-or-an (.getSimpleName (class x))) ": a map takes a [key value] pair, and"
-                       " this vector has " (count v) " elements. Write (conj x [k v]), or (assoc x k v).")
-                  {:type ::bad-input, :rule ::rule/conj-not-a-pair, :got v})))
+(defn- must-unwrap!
+  "Throws `::must-unwrap`: `op` read `x`, a draft or parsed value, which is not a map. `k` is the key read, or nil. A
+  parsed value is read only through [[parsed]], which checks its proof, so a sink that reads without it fails on the
+  first real value instead of also accepting a plain map. A draft is unchecked, so it is not read at all. Called by the
+  types [[defparsed]] defines."
+  [x op k]
+  (library-value! "parsed-types.core/must-unwrap!" x)
+  (let [draft? (instance? DraftValue x)
+        n      (.getSimpleName (class x))
+        t      (if draft? (subs n 0 (max 0 (- (count n) 5))) n)
+        fields (fields-of x)
+        what   (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n))]
+    (throw (ex-info (if draft?
+                      (str what ": a draft is unchecked input, so it cannot be read. Parse it, then read the parsed"
+                           " value through pt/parsed, as in (pt/parsed " t " (pt/parse d)).")
+                      (str what ": a parsed value is read only through pt/parsed, which checks the proof. "
+                           (if (seq fields)
+                             (str "Write (let [{:keys [" (clojure.string/join " " (map name fields)) "]} (pt/parsed " t
+                                  " x)] ...).")
+                             (str t " has no fields to read: check it with (pt/parsed " t " x)."))
+                           (when (and (some? k) (not (some #{k} fields)))
+                             (str " " t " has no field " (pr-str k) "." (did-you-mean k fields)))))
+                    (cond-> {:type                     ::must-unwrap
+                             :rule                     (if draft? ::rule/draft-not-readable ::rule/read-through-parsed)
+                             (if draft? :draft :parsed) (.getName (class x))
+                             :op                       op}
+                      (some? k) (assoc :key k))))))
 
-(defn- read-only-entry
-  "A `java.util.Map$Entry` of `e`, an entry of `x`, a draft or parsed value, whose `setValue` throws as `fail`, the
-  [[final!]] or [[fixed!]] of `x`, does. Called by the types [[defparsed]] defines."
-  [x fail ^java.util.Map$Entry e]
-  (let [k (.getKey e), v (.getValue e)]
-    (reify java.util.Map$Entry
-      (getKey [_] k)
-      (getValue [_] v)
-      (setValue [_ _] (fail x "setValue" k))
-      ;; as java.util.Map$Entry specifies
-      (equals [_ o] (and (instance? java.util.Map$Entry o)
-                         (java.util.Objects/equals k (.getKey ^java.util.Map$Entry o))
-                         (java.util.Objects/equals v (.getValue ^java.util.Map$Entry o))))
-      (hashCode [_] (bit-xor (java.util.Objects/hashCode k) (java.util.Objects/hashCode v)))
-      (toString [_] (str k "=" v)))))
-
-(defn- read-only-view
-  "The `java.util` view `view`, `\"keySet\"`, `\"values\"` or `\"entrySet\"`, of `x`, a draft or parsed value, over
-  the vector `items`: a `Set`, or for `values` a `Collection`. Each mutator, of the view or of its iterator, throws as
-  `fail`, the [[final!]] or [[fixed!]] of `x`, does. Called by the types [[defparsed]] defines."
-  [x fail view items]
-  (let [refuse (fn [op] (fail x (str view "()." op) nil))
-        values? (= "values" view)
-        ^java.util.Collection back (if values?
-                                     (java.util.ArrayList. ^java.util.Collection items)
-                                     (java.util.LinkedHashSet. ^java.util.Collection items))
-        iter   (fn []
-                 (let [it (.iterator back)]
-                   (reify java.util.Iterator
-                     (hasNext [_] (.hasNext it))
-                     (next [_] (.next it))
-                     (remove [_] (refuse "iterator().remove")))))]
-    ;; a Set, so a key set or entry set equals a set with the same members; values is only a Collection, as for
-    ;; java.util.HashMap, equal only to itself
-    (if values?
-      (reify java.util.Collection
-        (size [_] (.size back))
-        (isEmpty [_] (.isEmpty back))
-        (contains [_ o] (.contains back o))
-        (containsAll [_ c] (.containsAll back c))
-        (iterator [_] (iter))
-        (toArray [_] (.toArray back))
-        (^objects toArray [_ ^objects a] (.toArray back a))
-        (add [_ _] (refuse "add"))
-        (addAll [_ _] (refuse "addAll"))
-        (remove [_ _] (refuse "remove"))
-        (removeAll [_ _] (refuse "removeAll"))
-        (retainAll [_ _] (refuse "retainAll"))
-        (removeIf [_ _] (refuse "removeIf"))
-        (clear [_] (refuse "clear"))
-        (toString [_] (.toString back)))
-      (reify java.util.Set
-        (size [_] (.size back))
-        (isEmpty [_] (.isEmpty back))
-        (contains [_ o] (.contains back o))
-        (containsAll [_ c] (.containsAll back c))
-        (iterator [_] (iter))
-        (toArray [_] (.toArray back))
-        (^objects toArray [_ ^objects a] (.toArray back a))
-        (add [_ _] (refuse "add"))
-        (addAll [_ _] (refuse "addAll"))
-        (remove [_ _] (refuse "remove"))
-        (removeAll [_ _] (refuse "removeAll"))
-        (retainAll [_ _] (refuse "retainAll"))
-        (removeIf [_ _] (refuse "removeIf"))
-        (clear [_] (refuse "clear"))
-        (equals [_ o] (.equals back o))
-        (hashCode [_] (.hashCode back))
-        (toString [_] (.toString back))))))
-
-(defn- map-type-methods
-  "The interfaces and methods of a read-only map with exactly `fields`. Reading another key throws, with a default
-  too, but for `java.util.Map.get`, which returns null. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name`, the form of a fn, throws for
-  any other change.
-  `same-proof`, of the other value's symbol, is the form that says whether it holds this value's proof, or nil for a
-  type without one. Every function in these bodies is written qualified, so no field name can shadow it."
-  [fields this k v assoc-form final-name same-proof]
-  (clojure.core/let [nf      (gensym "not-found")
-                     f       (gensym "f")
-                     init    (gensym "init")
-                     o       (gensym "o")
-                     kws     (mapv keyword fields)
-                     lookup  (fn [missing] `(case ~k ~@(mapcat (fn [fld] [(keyword fld) fld]) fields) ~missing))
-                     entries `[~@(map (fn [fld] `(clojure.lang.MapEntry/create ~(keyword fld) ~fld)) fields)]]
-    ;; not MapEquivalence: like a record, a value is equal only to a value of its own type, never to a plain map. A
-    ;; parsed value also holds the same proof: one parse issued never equals one built without it. The hash reads only
-    ;; the fields, which equal values share.
-    `[clojure.lang.IPersistentMap
+(defn- opaque-type-methods
+  "The interfaces and methods of a draft or parsed type with `fields`, whose class is named `class-sym`. It is not a
+  map: each read, as `(:k x)`, `(x :k)`, `get`, destructuring, `contains?`, `find`, `count` or `seq`, throws
+  [[must-unwrap!]]. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name`, the form of a fn,
+  throws for any other change. `same-proof`, of the other value's symbol, is the form that says whether it holds this
+  value's proof, or nil for a type without one. Every function in these bodies is written qualified, so no field name
+  can shadow it."
+  [class-sym fields this k v assoc-form final-name same-proof]
+  (clojure.core/let [nf     (gensym "not-found")
+                     o      (gensym "o")
+                     other  (with-meta (gensym "other") {:tag class-sym})
+                     refuse (fn [op k] `((var must-unwrap!) ~this ~op ~k))
+                     ;; like a record: the same class, and each field `=`, so 1.0M equals 1.00M and an Integer equals a
+                     ;; Long. A parsed value also holds the same proof: one parse issued never equals one built without
+                     ;; it. The hash reads only the fields, which equal values share.
+                     same   `(clojure.core/and
+                              (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
+                              (clojure.core/let [~other ~o]
+                                (clojure.core/and
+                                 ~@(when same-proof [(same-proof other)])
+                                 ~@(map (fn [f] `(clojure.core/= ~f (. ~other ~(symbol (str "-" f))))) fields))))
+                     hash   `(clojure.core/hash [~(str class-sym) ~@fields])]
+    `[clojure.lang.Associative
       (~'assoc [~this ~k ~v] ~assoc-form)
-      (~'assocEx [~this ~k ~v] (~final-name ~this "assocEx" ~k))
-      (~'without [~this ~k] (~final-name ~this "dissoc" ~k))
-      (~'containsKey [~this ~k] (clojure.core/contains? ~(set kws) ~k))
-      (~'entryAt [~this ~k] (if (clojure.core/contains? ~(set kws) ~k)
-                              (clojure.lang.MapEntry/create ~k (.valAt ~this ~k))
-                              nil))
-      (~'count [~this] ~(count fields))
-      ;; like APersistentMap.cons: nil, a map entry, a pair, or a seq of entries
-      (~'cons [~this ~o]
-              (clojure.core/cond
-                (clojure.core/nil? ~o)                   ~this
-                (clojure.core/instance? java.util.Map$Entry ~o)
-                (clojure.core/assoc ~this (.getKey ~(with-meta o {:tag 'java.util.Map$Entry}))
-                                    (.getValue ~(with-meta o {:tag 'java.util.Map$Entry})))
-                (clojure.core/vector? ~o)
-                (if (clojure.core/= 2 (clojure.core/count ~o))
-                  (clojure.core/assoc ~this (clojure.core/nth ~o 0) (clojure.core/nth ~o 1))
-           ;; through `var`, because it is private
-                  ((var not-a-pair!) ~this ~o))
-                :else
-                (clojure.core/reduce (fn [m# e#] (clojure.core/assoc m# (.getKey ^java.util.Map$Entry e#)
-                                                                     (.getValue ^java.util.Map$Entry e#)))
-                                     ~this
-                                     (clojure.core/seq ~o))))
-      ;; no empty version, so code that rebuilds a map through `empty`, such as clojure.walk, throws instead of
-      ;; dropping the type and the proof
+      (~'containsKey [~this ~k] ~(refuse "contains?" k))
+      (~'entryAt [~this ~k] ~(refuse "find" k))
+      (~'valAt [~this ~k] ~(refuse "get" k))
+      (~'valAt [~this ~k ~nf] ~(refuse "get" k))
+      (~'count [~this] ~(refuse "count" nil))
+      (~'seq [~this] ~(refuse "seq" nil))
+      (~'cons [~this ~o] (~final-name ~this "conj" nil))
+      ;; no empty version, so code that rebuilds a collection through `empty`, such as clojure.walk, throws
       (~'empty [~this] (~final-name ~this "empty" nil))
-      ;; like defrecord: the same class, and each field `=`, so 1.0M equals 1.00M and an Integer equals a Long
-      (~'equiv [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
-                                            ~@(when same-proof [(same-proof o)])
-                                            ~@(map (fn [fld] `(clojure.core/= ~fld (.valAt ~(with-meta o {:tag 'clojure.lang.ILookup})
-                                                                                           ~(keyword fld))))
-                                                   fields)))
-      (~'seq [~this] (clojure.core/seq ~entries))
-      (~'iterator [~this] (clojure.lang.SeqIterator. (clojure.core/seq ~entries)))
-      (~'valAt [~this ~k] ~(lookup `((var no-field!) ~this ~k "read")))
-      ;; a default does not make a misspelled key read it: only a field reads
-      (~'valAt [~this ~k ~nf] ~(lookup `((var no-field!) ~this ~k "read with a default")))
+      (~'equiv [~this ~o] ~same)
 
-      clojure.lang.IKVReduce
-      (~'kvreduce [~this ~f ~init]
-                  (clojure.core/reduce (fn [acc# [k# v#]] (~f acc# k# v#)) ~init (clojure.core/seq ~entries)))
-
-      clojure.lang.IHashEq
-      (~'hasheq [~this] (clojure.lang.APersistentMap/mapHasheq ~this))
+      ;; so `count` calls the method above instead of counting through `seq`
+      clojure.lang.Counted
 
       clojure.lang.IFn
-      (~'invoke [~this ~k] (.valAt ~this ~k))
-      (~'invoke [~this ~k ~nf] (.valAt ~this ~k ~nf))
+      (~'invoke [~this ~k] ~(refuse "get" k))
+      (~'invoke [~this ~k ~nf] ~(refuse "get" k))
       (~'applyTo [~this args#] (clojure.lang.AFn/applyToHelper ~this args#))
+
+      clojure.lang.IHashEq
+      (~'hasheq [~this] ~hash)
 
       clojure.lang.IObj
       (~'meta [~this] nil)
       (~'withMeta [~this ~k] (~final-name ~this "with-meta" nil))
 
-      java.util.Map
-      ;; Java's contract, null for a key that is not a field, for Java code that probes keys: the one silent read
-      (~'get [~this ~k] ~(lookup nil))
-      (~'size [~this] ~(count fields))
-      (~'isEmpty [~this] ~(empty? fields))
-      (~'containsValue [~this ~o] (clojure.core/boolean (clojure.core/some #(clojure.core/= ~o %) [~@fields])))
-      ;; views whose mutators, and their iterators' and entries', throw like the map's own
-      (~'keySet [~this] ((var read-only-view) ~this ~final-name "keySet" ~kws))
-      (~'values [~this] ((var read-only-view) ~this ~final-name "values" [~@fields]))
-      (~'entrySet [~this] ((var read-only-view) ~this ~final-name "entrySet"
-                                                (clojure.core/mapv (fn [e#] ((var read-only-entry) ~this ~final-name e#))
-                                                                   ~entries)))
-      ;; ex-info, a RuntimeException like UnsupportedOperationException, so it is unchecked all the same. The default
-      ;; methods of java.util.Map would call put, or setValue on an entry, so each throws here first.
-      (~'put [~this ~k ~v] (~final-name ~this "put" ~k))
-      (~'putAll [~this ~o] (~final-name ~this "putAll" nil))
-      (~'remove [~this ~k] (~final-name ~this "remove" ~k))
-      (~'remove [~this ~k ~v] (~final-name ~this "remove" ~k))
-      (~'clear [~this] (~final-name ~this "clear" nil))
-      (~'replaceAll [~this ~f] (~final-name ~this "replaceAll" nil))
-      (~'compute [~this ~k ~f] (~final-name ~this "compute" ~k))
-      (~'computeIfAbsent [~this ~k ~f] (~final-name ~this "computeIfAbsent" ~k))
-      (~'computeIfPresent [~this ~k ~f] (~final-name ~this "computeIfPresent" ~k))
-      (~'merge [~this ~k ~v ~f] (~final-name ~this "merge" ~k))
-      (~'putIfAbsent [~this ~k ~v] (~final-name ~this "putIfAbsent" ~k))
-      (~'replace [~this ~k ~v] (~final-name ~this "replace" ~k))
-      (~'replace [~this ~k ~o ~v] (~final-name ~this "replace" ~k))
-
       Object
-      (~'hashCode [~this] (clojure.lang.APersistentMap/mapHash ~this))
-      (~'equals [~this ~o] (clojure.core/and (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
-                                             ~@(when same-proof [(same-proof o)])
-                                             (clojure.lang.APersistentMap/mapEquals ~this ~o)))
+      (~'hashCode [~this] ~hash)
+      (~'equals [~this ~o] ~same)
       ;; the printed form, which names the type, never the proof
       (~'toString [~this] (clojure.core/pr-str ~this))]))
 
@@ -512,14 +407,17 @@
 
   - `:make-parsed`, of a map of the fields and a proof, builds a parsed value;
   - `:make-draft`, of a map of the fields, builds a draft;
-  - `:read-draft`, of a draft, returns a map of its fields, each read once from its Java field, not through `get`."
+  - `:read-draft`, of a draft, returns a map of its fields, each read once from its Java field;
+  - `:read-parsed`, of a parsed value, the same, for [[parsed]]: neither type can be read any other way."
   [parsed-name draft-name fields]
   (clojure.core/let [m (gensym "m"), proof (gensym "proof"), d (vary-meta (gensym "d") assoc :tag draft-name)
+                     p (vary-meta (gensym "p") assoc :tag parsed-name)
                      kws (mapv keyword fields)]
     `{:fields      ~kws
       :make-parsed (fn [~m ~proof] (new ~parsed-name ~@(map (fn [k] `(clojure.core/get ~m ~k)) kws) ~proof))
       :make-draft  (fn [~m] (new ~draft-name ~@(map (fn [k] `(clojure.core/get ~m ~k)) kws)))
-      :read-draft  (fn [~d] ~(into {} (map (fn [f] [(keyword f) `(. ~d ~(symbol (str "-" f)))])) fields))}))
+      :read-draft  (fn [~d] ~(into {} (map (fn [f] [(keyword f) `(. ~d ~(symbol (str "-" f)))])) fields))
+      :read-parsed (fn [~p] ~(into {} (map (fn [f] [(keyword f) `(. ~p ~(symbol (str "-" f)))])) fields))}))
 
 (defn- defparsed-type
   "The form that defines `name`, a bare parsed type with `fields`: a map that only [[parse]] issues. `assoc`, `dissoc`
@@ -538,9 +436,10 @@
          parsed_types.core.ParsedValue
          (~'issuedWith [~this ~t] (clojure.core/identical? ~t ~'parse-proof))
          ;; the other value is of this class, so it is this generated type, and the proof goes only into it
-         ~@(map-type-methods fields this k v `((var final!) ~this "assoc" ~k) `(var final!)
-                             (fn [o]
-                               `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
+         ~@(opaque-type-methods name fields this k v
+                                `((var final!) ~this "assoc" ~k) `(var final!)
+                                (fn [o]
+                                  `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
        (ns-unmap *ns* '~(symbol (str "->" name))))))
 
 (defn- defdraft-type
@@ -552,7 +451,8 @@
     `(do
        (deftype ~name [~@fields]
          parsed_types.core.DraftValue
-         ~@(map-type-methods fields this k v `((var assoc-draft) ~this ~k ~v) `(var fixed!) nil))
+         ~@(opaque-type-methods name fields this k v
+                                `((var assoc-draft) ~this ~k ~v) `(var fixed!) nil))
        ;; positional, so reordering the fields would silently swap values: pt/draft names every field instead
        (ns-unmap *ns* '~(symbol (str "->" name))))))
 
@@ -1436,7 +1336,7 @@
 (defn- call-check
   "`{:returned x}`, what the check fn `f` returned on `args`, or `{:threw e}` for the `Exception` its body threw. Only
   the call is inside the `try`, so the library's own exceptions outside the body are never recorded; one the body
-  causes, such as `::no-field` for a misspelled key, is. An `Error` propagates, and so
+  causes, such as `::must-unwrap` for a read without [[parsed]], is. An `Error` propagates, and so
   does an `InterruptedException`, once the thread's interrupt flag, which throwing it cleared, is set again."
   [f args]
   (try {:returned (apply f args)}
@@ -1677,9 +1577,14 @@
   (issued-member? parsed-type x))
 
 (defn parsed
-  "`x`, which must be a value that [[parse]] issued, of `parsed-type` or of a member of the sum `parsed-type`. Throws
-  `::not-parsed` otherwise, and `::stale-type` as [[parsed?]] says. Read its fields by keyword, as in `(:amount x)`: a
-  key that is not a field throws `::no-field`. Throws `::bad-input` when `parsed-type` is not a parsed type or a sum."
+  "The fields of `x` as a plain map, when `x` is a value that [[parse]] issued, of `parsed-type` or of a member of the
+  sum `parsed-type`. This is the only way to read a parsed value: `(:amount x)` on one throws `::must-unwrap`. Throws
+  `::not-parsed` for any other `x`, and `::stale-type` as [[parsed?]] says. Throws `::bad-input` when `parsed-type` is
+  not a parsed type or a sum.
+
+    (let [{:keys [account-id amount]} (pt/parsed Debit debit)] ...)
+
+  A field that holds parsed values holds them as they are: read each through `pt/parsed` too."
   [parsed-type x]
   (check-type! "pt/parsed" parsed-type)
   (stale-sink! "pt/parsed" parsed-type x)
@@ -1723,7 +1628,7 @@
                        :rule     rule
                        :expected (if (sum? parsed-type) (str (sum-name parsed-type)) (.getName ^Class parsed-type))
                        :got      (some-> x class .getName)}))))
-  x)
+  ((:read-parsed (.get registry (class x))) x))
 
 (defn- match-fell-through!
   "Throws for `v`, which no clause of a [[match]] on `sum` took. `handled` holds the classes the match handles,
@@ -1779,7 +1684,7 @@
                       {:type ::not-parsed
                        :rule (if (instance? DraftValue parsed) ::rule/draft-of-a-draft ::rule/draft-of-unissued)
                        :got  (some-> parsed class .getName)})))
-    ((:make-draft plan) (into {} (map (fn [f] [f (get parsed f)])) (:fields plan)))))
+    ((:make-draft plan) ((:read-parsed plan) parsed))))
 
 ;;; ------------------------------------------------ Building and reading ------------------------------------------------
 

@@ -23,6 +23,10 @@
                                  parsed-types.core/defined-in          {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/defparsed-type      {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/describe            {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/printed-fields      {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/opaque-type-methods {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/must-unwrap!        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/fields-of           {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/a-or-an             {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/did-you-mean        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/draft-hint          {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
@@ -42,7 +46,6 @@
                                  parsed-types.core/latest              {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/leaf?               {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/library-value!      {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
-                                 parsed-types.core/map-type-methods    {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/match-fell-through! {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/max-value-depth     {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/member-names        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
@@ -51,7 +54,6 @@
                                  parsed-types.core/named-member        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/nearest             {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/no-field!           {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
-                                 parsed-types.core/not-a-pair!         {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/not-immutable       {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/not-loaded!         {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/owners              {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
@@ -63,8 +65,6 @@
                                  parsed-types.core/pending             {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/plan-for            {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/print-typed         {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
-                                 parsed-types.core/read-only-entry     {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
-                                 parsed-types.core/read-only-view      {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/refuse-mutable!     {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/register!           {:message "register! is called by defparsed. Define the type with pt/defparsed."}
                                  parsed-types.core/registry            {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
