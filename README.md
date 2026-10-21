@@ -17,7 +17,7 @@ The idea is the smart constructor, or
 parsed-types needs Clojure 1.11 or later, and is tested on JDK 21. Add it to `deps.edn`:
 
 ```edn
-{:deps {io.github.escherize/parsed-types {:git/tag "v0.1.0" :git/sha "SHA"}}}
+{:deps {io.github.escherize/parsed-types {:git/tag "v0.1.0" :git/sha "3b9f4d7"}}}
 ```
 
 The API may change before 1.0. Report bugs and questions at
