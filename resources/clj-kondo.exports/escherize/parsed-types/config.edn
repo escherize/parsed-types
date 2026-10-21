@@ -24,6 +24,7 @@
                                  parsed-types.core/defined-in          {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/defparsed-type      {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/describe            {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
+                                 parsed-types.core/a-or-an             {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/did-you-mean        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/draft-hint          {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}
                                  parsed-types.core/draft-value?        {:message "Private to parsed-types.core: code that names it can forge a parsed value or change what parse checks. Build a draft and call pt/parse."}

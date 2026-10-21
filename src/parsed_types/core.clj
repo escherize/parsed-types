@@ -151,6 +151,11 @@
           close  (filter #(<= (edit-distance n (name %)) within) candidates)]
       (first (sort-by #(edit-distance n (name %)) close)))))
 
+(defn- a-or-an
+  "`s` after the article its first letter takes, for an error message: \"an Order\", \"a Draft\"."
+  [s]
+  (str (if (#{\A \E \I \O \U \a \e \i \o \u} (first s)) "an " "a ") s))
+
 (defn- did-you-mean
   "` Did you mean :x?` for the nearest of `candidates` to `k`, or an empty string."
   [k candidates]
@@ -180,14 +185,14 @@
         {:keys [rule message]} (case op
                                  "with-meta"
                                  {:rule    ::rule/no-metadata
-                                  :message (str "with-meta on a " n ": a parsed value carries no metadata, so it never"
+                                  :message (str "with-meta on " (a-or-an n) ": a parsed value carries no metadata, so it never"
                                                 " changes. Keep the metadata beside it, as in {:value x, :meta m}.")}
                                  "empty"
                                  {:rule    ::rule/no-empty
                                   :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
                                                 " a plain map.")}
                                  {:rule    ::rule/parsed-value-is-final
-                                  :message (str op (when (some? k) (str " " (pr-str k))) " on a " n ": a parsed value"
+                                  :message (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n) ": a parsed value"
                                                 " never changes, so its checks stay true. Use (pt/parse (assoc"
                                                 " (pt/draft-of x) " (if (some? k) (pr-str k) ":field")
                                                 (if (#{"dissoc" "remove"} op) " nil" " v") ")) for a changed copy.")})]
@@ -204,7 +209,7 @@
         {:keys [rule message]} (case op
                                  "with-meta"
                                  {:rule    ::rule/no-metadata
-                                  :message (str "with-meta on a " n ": a draft carries no metadata, so it holds only"
+                                  :message (str "with-meta on " (a-or-an n) ": a draft carries no metadata, so it holds only"
                                                 " what parse checks. Keep the metadata beside it, as in {:value x,"
                                                 " :meta m}.")}
                                  "empty"
@@ -212,7 +217,7 @@
                                   :message (str n " has fixed fields, so it has no empty version. Use (into {} x) for"
                                                 " a plain map.")}
                                  {:rule    ::rule/draft-fields-are-fixed
-                                  :message (str op (when (some? k) (str " " (pr-str k))) " on a " n ": a draft has"
+                                  :message (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n) ": a draft has"
                                                 " fixed fields, set with assoc. Use (assoc d "
                                                 (if (some? k) (pr-str k) ":field")
                                                 (if (#{"dissoc" "remove"} op) " nil" " v") ").")})]
@@ -269,7 +274,7 @@
   "Throws `::bad-input`: `(conj x v)` with a vector `v` that is not a `[key value]` pair. Called by the types
   [[defparsed]] defines."
   [x v]
-  (throw (ex-info (str "conj of " (pr-str v) " on a " (.getSimpleName (class x)) ": a map takes a [key value] pair, and"
+  (throw (ex-info (str "conj of " (pr-str v) " on " (a-or-an (.getSimpleName (class x))) ": a map takes a [key value] pair, and"
                        " this vector has " (count v) " elements. Write (conj x [k v]), or (assoc x k v).")
                   {:type ::bad-input, :rule ::rule/conj-not-a-pair, :got v})))
 
@@ -699,6 +704,7 @@
   "Define `name`, a closed set of parsed types. [[match]] on it must handle every member.
 
     (defsum Transaction [Debit Credit])"
+  {:arglists '([name members])}
   ([name]
    (missing-argument! &form ::bad-declaration
                       (str "(defsum " (pr-str name) ") lists no members. A sum names the parsed types it holds. List them"
@@ -723,6 +729,7 @@
   a value [[parse]] issued, of its type's class. A value of a class with the type's name, from before or after a REPL
   re-evaluated its `defparsed`, throws `::stale-type`, naming the namespace to re-evaluate. Any other `x` throws
   `::not-parsed`."
+  {:arglists '([sum-name x & clauses])}
   ([sum-name]
    (missing-argument! &form ::bad-declaration
                       (str "(pt/match " (pr-str sum-name) ") has no value to match. match takes the sum, the value,"
@@ -1004,6 +1011,7 @@
 
   Neither type has a positional factory: only [[draft]] builds a draft, naming every field, and only [[parse]]
   builds a value that [[parsed]] accepts."
+  {:arglists '([parsed-name fields & clauses])}
   ([parsed-name]
    (missing-argument! &form ::bad-declaration
                       (str "(defparsed " (pr-str parsed-name) ") has no field vector. A defparsed names its type,"
@@ -1160,7 +1168,7 @@
     (nil? x)                                            "nil"
     (and (map? x) (not (instance? ParsedValue x))
          (not (instance? DraftValue x)))                "a plain map"
-    :else                                               (str "a " (.getSimpleName (class x)))))
+    :else                                               (a-or-an (.getSimpleName (class x)))))
 
 (defn- register!
   "Build the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the `builders`
@@ -1191,7 +1199,7 @@
                                (str " It is already parsed: pass its draft, as in " (call "(pt/draft-of x)") "."))
 
                              (instance? ParsedValue draft)
-                             (str " It is a " (.getSimpleName (class draft)) " that pt/parse did not issue: a value"
+                             (str " It is " (a-or-an (.getSimpleName (class draft))) " that pt/parse did not issue: a value"
                                   " with no proof. Build a draft and pass that, as in "
                                   (call (draft-hint (class draft))) ".")
 
@@ -1508,7 +1516,11 @@
              result   ((:f fd) tuples)]
          (when-let [missing (seq (remove #(and (map? result) (contains? result %)) tuples))]
            (throw (ex-info (if (map? result)
-                             (str "Fetch " (:name fd) " returned no entry for " (vec missing) ". A fetch answers every"
+                             (str "Fetch " (:name fd) " returned no entry for " (vec missing)
+                                  (when-let [ks (seq (remove vector? (keys result)))]
+                                    (str ", and has keys such as " (vec (take 3 ks))
+                                         ": each key is a tuple, a vector of the fetch's fields"))
+                                  ". A fetch answers every"
                                   " tuple it is given, so no check reads a nil it did not mean. Return a key for every"
                                   " tuple, with nil for not found, as in (into {} (map (fn [t] [t (lookup t)]))"
                                   " tuples).")
@@ -1548,10 +1560,13 @@
           (:kind ((:checks-by-name plan) n)))))
 
 (defn- failed-names
-  "Each check that returned a failure or threw in `st`, in the order they ran, as `[name check entry]`: the check of
-  the plan, and its failure entry."
-  [{:keys [failed order plan]}]
-  (for [n order :when (ran-and-failed? (failed n))] [n ((:checks-by-name plan) n) (failed n)]))
+  "Each check that returned a failure or threw in `st`, in the order they ran, as `[name check entry found-nothing]`:
+  the check of the plan, its failure entry, and the fetches it binds when every one of them found nothing."
+  [{:keys [failed order plan fetched]}]
+  (for [n order :when (ran-and-failed? (failed n))
+        :let [check (get (:checks-by-name plan) n)
+              fs    (:fetches check)]]
+    [n check (failed n) (when (and (seq fs) (every? #(nil? (get fetched %)) fs)) fs)]))
 
 (defn- threw-names
   "The set of the checks that threw in `st`."
@@ -1611,11 +1626,17 @@
         cause  (first-thrown sts)
         thrown (when cause (first (filter (fn [[_ _ entry]] (identical? cause (:threw entry))) named)))]
     (throw (ex-info (str "Invalid " what ": " (count named) (if (= 1 (count named)) " check" " checks") " failed: "
-                         (clojure.string/join ", " (map (fn [[label {:keys [doc]} entry]]
+                         (clojure.string/join ", " (map (fn [[label {:keys [doc]} entry found-nothing]]
                                                          (if-let [^Throwable e (:threw entry)]
                                                            (str label " (" doc ") threw " (.getSimpleName (class e))
                                                                 ": " (ex-message e))
-                                                           (str label " (" doc ")" (truthy-hint (:returned entry)))))
+                                                           (str label " (" doc ")" (truthy-hint (:returned entry))
+                                                                (when found-nothing
+                                                                  ;; a fact, not a fix: true whether or not this is the
+                                                                  ;; check that tests for the row
+                                                                  (str ", and its fetch "
+                                                                       (clojure.string/join " and " found-nothing)
+                                                                       " found nothing")))))
                                                        shown))
                          (when (pos? more) (str ", and " more " more"))
                          ". A draft parses only when every check returns exactly true."
@@ -1660,7 +1681,8 @@
         failures (into (sorted-map) (keep-indexed (fn [i st] (some->> (not-empty (:failed st)) (vector i)))) sts)]
     (when (seq failures)
       (invalid! (str "drafts at indexes " (vec (keys failures)))
-                (for [i (keys failures), [n check entry] (failed-names (nth sts i))] [(str n " in draft " i) check entry])
+                (for [i (keys failures), [n check entry found-nothing] (failed-names (nth sts i))]
+                  [(str n " in draft " i) check entry found-nothing])
                 sts
                 {:failures failures
                  :threw    (into (sorted-map) (keep-indexed (fn [i st] (some->> (not-empty (threw-names st)) (vector i))))
@@ -1681,7 +1703,10 @@
 
   A check that throws holds later checks as a failure does, and the other checks of its phase still run. The first
   exception a check threw is the cause. Exceptions out of a fetch, an `Error` and an `InterruptedException`
-  propagate."
+  propagate.
+
+  Throws `::bad-input`, before any check runs, when `draft` is not a draft, or a field holds a value not known to be
+  immutable, a draft, or a value `parse` did not issue."
   [draft]
   (let [[st] (run-all "pt/parse" [draft])]
     (when (seq (:failed st))
@@ -1871,6 +1896,7 @@
 
   The values are evaluated in the order Clojure evaluates the same map literal: as written for up to 8 keys, and in
   no order the source shows beyond that."
+  {:arglists '([parsed-type m])}
   ([parsed-type]
    (missing-argument! &form ::bad-input
                       (str "(pt/draft " (pr-str parsed-type) ") has no map of fields. pt/draft takes the type, then a"

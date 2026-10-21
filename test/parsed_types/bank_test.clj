@@ -89,7 +89,9 @@
   (testing "a missing account, and someone else's account, fail external checks"
     (let [missing (thrown-data #(pt/parse (pt/draft Transfer {:user-id :ada, :from-id 9, :to-id 2, :amount 1M})))]
       (is (= #{:external} (:failed-kinds missing)))
-      (is (contains? (:failures missing) ::source-exists)))
+      (is (contains? (:failures missing) ::source-exists))
+      (is (re-find #"source-exists \(.*?\), and its fetch :parsed-types.bank-test/\S+ found nothing" (try (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 9, :to-id 2, :amount 1M})) nil
+                                         (catch clojure.lang.ExceptionInfo e (ex-message e))))))
     (is (= {:failed-kinds #{:external}
             ;; held: a failed permission check keeps the balance of someone else's account out of the report
             :failures     {::owns-source {:doc      "The user owns the source account."
@@ -221,6 +223,10 @@
   (external ::row-ok "The row is ok." [] [row ::row] (true? (:ok row)))
   (fetch ::row [id] forgetful-rows))
 
+(pt/defparsed ById [id]
+  (external ::by-id-found "The row exists." [] [row ::row] (some? row))
+  (fetch ::row [id] (fn [tuples] (into {} (map (fn [[id]] [id {:id id}])) tuples))))
+
 (deftest a-fetch-must-answer-every-tuple-test
   (testing "a missing tuple throws, never a nil row a check could pass on"
     (is (= ::pt/bad-fetch (:type (thrown-data #(pt/parse-all [(pt/draft Forgot {:id 1}) (pt/draft Forgot {:id 2})])))))
@@ -228,4 +234,8 @@
                 " so no check reads a nil it did not mean. Return a key for every tuple, with nil for not found, as in"
                 " (into {} (map (fn [t] [t (lookup t)])) tuples).")
            (try (pt/parse-all [(pt/draft Forgot {:id 1}) (pt/draft Forgot {:id 2})]) nil
-                (catch clojure.lang.ExceptionInfo e (ex-message e)))))))
+                (catch clojure.lang.ExceptionInfo e (ex-message e))))))
+  (testing "a fetch keyed by the value, not the tuple, is shown the keys it returned"
+    (is (re-find #"returned no entry for \[\[1\]\], and has keys such as \[1\]: each key is a tuple"
+                 (try (pt/parse (pt/draft ById {:id 1})) nil
+                      (catch clojure.lang.ExceptionInfo e (ex-message e)))))))

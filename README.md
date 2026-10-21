@@ -357,6 +357,20 @@ the library throws `::stale-type` with the command that fixes it, such as `(requ
 | `defsum`, `match` | a closed set of parsed types, and a branch over every member |
 | `declaration` | returns the declaration `defparsed` wrote, as data |
 
+`defparsed` defines classes, not vars. Another namespace requires the namespace that defines them, then imports them,
+in that order. A sum is a var:
+
+```clojure
+(ns checkout
+  (:require [parsed-types.core :as pt]
+            [shop])
+  (:import [shop Card Order OrderLine]))
+
+(pt/parsed? OrderLine shop/line)                         ;; => true
+(pt/parsed? Order shop/line)                             ;; => false
+(pt/parsed shop/Payment (pt/parse (pt/draft Card {:card-token "tok_1", :amount 1M})))
+```
+
 ## docs/guarantees.md pins each guarantee to a test
 
 [docs/guarantees.md](docs/guarantees.md) lists each guarantee with its test, the accepted limits, every error rule,
