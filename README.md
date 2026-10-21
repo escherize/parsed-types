@@ -144,6 +144,21 @@ So a check on fewer fields goes first: a pure check written before one that read
 doesn't compile. An inferred dependency graph was rejected, because it would run checks in an order the source
 doesn't show.
 
+External checks run in the order written too. An external check that fails holds every later external check that
+binds the same fetch. So write the check that a row exists, or that the caller may see it, first. When it fails, no
+later check reports on that row:
+
+```clojure
+(pt/parse (pt/draft OrderLine {:product-id 99, :quantity 1, :unit-price 5M}))
+;; throws ::pt/invalid with these :failures:
+{:shop/product-exists {:doc      "The product is in the catalog."
+                       :returned false
+                       :blocked  [:shop/price-matches]}}
+```
+
+Running every external check was rejected: when a permission check fails, a later check over the same row, such as
+a balance check, would still report on a row the caller can't see.
+
 ### A draft names every field in the source
 
 `pt/draft` takes only a literal map that names every field, and only fields, and checks the keys at compile time.
@@ -249,11 +264,16 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
           (not= ::pt/invalid type) (throw e)
           (seq threw)              {:status 500, :body "A check threw."}
           (:pure failed-kinds)     {:status 400, :body failures}
-          :else                    {:status 422, :body failures})))))
+          :else                    {:status 403, :body "The order was refused."})))))
 
+(order-route {:customer-id 1, :body {:lines [{:product 7, :qty 0, :price 5M}], :subtotal 0M}})
+;; => {:status 400, :body {0 {:shop/quantity-positive {:doc "The quantity is a positive integer.", :returned false, :blocked [:shop/product-exists :shop/price-matches]}}}}
 (order-route {:customer-id 2, :body {:lines [{:product 7, :qty 1, :price 5M}], :subtotal 5M}})
-;; => {:status 422, :body {:shop/customer-can-order {:doc "The customer exists and may order.", :returned false}}}
+;; => {:status 403, :body "The order was refused."}
 ```
+
+A pure failure describes only the caller's own input, so the handler returns it. An external failure is about the
+world, so the handler names no check.
 
 ### Nothing fails silently
 
@@ -261,7 +281,8 @@ A key that isn't a field throws instead of reading nil, and so does a lookup wit
 or `:or`: a misspelled key never reads the default. Probe with `contains?` or `find`. `java.util.Map.get` and
 `getOrDefault` keep Java's contract, null or the default: the one silent path, kept for Java interop. A check passes
 only on exactly `true`; for a truthy result such as `(seq xs)`, the message says to wrap the body in `(boolean ...)`.
-An external check gets nil when a fetch found nothing, so guard it, as `(:price product)` does. A check body that
+An external check gets nil when a fetch found nothing. The first check over a fetch tests for that, as
+`::product-exists` does, and holds the rest when it fails. A check body that
 throws is recorded under `:threw`, and its exception is the cause; the other checks of its phase still run. An
 exception from a fetch propagates. There is no `check` or `check-all`, because each returned a truthy value whether
 the checks passed or failed. A test stubs a fetch declared through its var, as `#'customers-by-id` is, with

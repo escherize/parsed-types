@@ -91,7 +91,10 @@
       (is (= #{:external} (:failed-kinds missing)))
       (is (contains? (:failures missing) ::source-exists)))
     (is (= {:failed-kinds #{:external}
-            :failures     {::owns-source {:doc "The user owns the source account.", :returned false}}}
+            ;; held: a failed permission check keeps the balance of someone else's account out of the report
+            :failures     {::owns-source {:doc      "The user owns the source account."
+                                          :returned false
+                                          :blocked  [::funds-available]}}}
            (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :bob, :from-id 1, :to-id 2, :amount 1M}))) [:failed-kinds :failures]))))
   (testing "more than the balance fails an external check (bob's account holds 40M after the first transfer)"
     (is (= {::funds-available {:doc "The source account holds the amount.", :returned false}}

@@ -32,6 +32,7 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to every `:blocked` and `:failed-kinds` |
 | Pure checks run in the order written, and a failure holds the later checks on its fields | Each pure check runs in its written place, held when a pure check before it that shares a field ran and failed. A held check didn't run, so it holds nothing and lists nothing under `:blocked`. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `a-held-check-holds-nothing-test`, `parse-matches-the-model` |
 | A check body that throws is recorded, and its phase keeps going | Each `Exception` a pure or external check's body throws becomes its failure, `{:doc :threw}`, and holds later checks as a failure does. The other checks of its phase run. `:threw` names the checks that threw, and the first exception, in run order, is the cause. An exception from a fetch or from the library, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-is-recorded-test`, `parse-all-records-a-thrown-check-per-draft-test`, `what-a-check-throws-that-is-not-recorded-test` |
+| External checks run in the order written, and a failure holds the later checks on its fetches | Each external check runs in its written place, held when an external check before it that binds a fetch it binds ran and failed or threw. One that binds no fetch holds nothing and is held by no external check. So a failed permission check written first keeps every later check on that row out of `:failures` | `transfer-test`, `parse-matches-the-model` |
 | Malformed input never reaches a fetch or an external check | A draft whose pure check failed or threw fetches nothing, and its external checks are held | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | `parse-all` gathers the tuples of every draft in the call, per declaration and fetch, and deduplicates them; a missing answer throws `::bad-fetch`. So a parent built from `(pt/parse-all parts)` costs one call per fetch, not one per part | `parse-all-fetches-once-with-each-distinct-tuple`, `batching-test`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Each draft's checks see only that draft | `parse-all-agrees-with-parse`, `parse-all-agrees-with-parse-across-declarations` |
@@ -70,8 +71,8 @@ The proof stops accidents, not forgers. These ways around it, and these gaps, ar
 - **External checks can go stale.** An external check reads the world at the moment of `parse`. A balance that
   passed can change later, so parse right before you act.
 - **An external check gets nil when a fetch found nothing.** A fetch returns nil for a tuple with no row, and every
-  external check bound to that fetch gets the nil. Guard it, as in `(some? row)` in its own check, and
-  `(:balance account 0M)` in the others.
+  external check bound to that fetch gets the nil. Test for it in the first check written over that fetch, as in
+  `(some? row)`: when it fails, it holds the later checks over that fetch.
 
 ## Errors
 
@@ -240,7 +241,8 @@ with `not-known-immutable`: convert it to an accepted value, as in `(str x)`.
 - **What a held check reports.** A held check didn't run, so it has no `:returned`, and it holds no other check: a
   later check that shares a field with it runs, unless a check that ran and failed holds it too. When a pure check
   fails, no fetch and no external check of that draft runs. Each external check is listed under `:blocked` of the
-  pure checks that ran and failed.
+  pure checks that ran and failed. When an external check fails, each later one that binds a fetch it binds is
+  listed under its `:blocked`.
 - **Depth.** Nesting deeper than 1000 levels is refused (`value-too-deep`). The message and `:path` show the first 8
   steps of a longer path, and `:depth` its length.
 - **Cost.** The walk costs about 25 us for 1,000 numbers in 100 vectors; an issued value in a field costs one step.

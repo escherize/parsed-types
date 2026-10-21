@@ -989,6 +989,10 @@
   and runs the other checks of its phase. A pure check written before one that reads a proper subset of its fields
   is a compile error: move the smaller one first.
 
+  External checks run in the order written, after every pure check passed. An external check is held when one
+  before it that binds a fetch it binds ran and failed. So write the check that the row exists, or that the caller
+  may see it, first: when it fails, no later check reports on that row.
+
   A field may hold values [[parse]] issued, which are not checked again, but never a draft: parse the parts first.
 
   Write `defparsed` at the top level of a namespace: inside another form it throws `::bad-declaration`.
@@ -1115,6 +1119,8 @@
     holds nothing.
   - An external check is held when any pure check failed or threw, and fetches run only when none did, so malformed input
     never reads the world.
+  - An external check is held when an external check before it that binds a fetch it binds ran and failed, or threw,
+    so a failed permission check written first keeps the checks after it from reporting on the row it refused.
 
   Pure checks run first, in the order written, then fetches, then external checks, each in the order written.
   [[defparsed]] refuses a pure check written before one that reads a proper subset of its fields, so a check on one
@@ -1129,8 +1135,15 @@
                                                                (map :name))
                                                          pure)))
                                pure)
-        external' (for [c checks :when (= :external (:kind c))]
-                    (assoc c :prereqs (set (map :name pure))))]
+        external  (filterv #(= :external (:kind %)) checks)
+        external' (map-indexed (fn [i c]
+                                 (assoc c :prereqs (into (set (map :name pure))
+                                                         (comp (take i)
+                                                               (filter #(seq (set/intersection (set (:fetches %))
+                                                                                               (set (:fetches c)))))
+                                                               (map :name))
+                                                         external)))
+                               external)]
     {:draft-class    draft-class
      :parses-to      parses-to
      :declaration    (assoc decl :parses-to parses-to)

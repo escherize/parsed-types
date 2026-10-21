@@ -16,7 +16,7 @@
 
 (defn- rows [arg-tuples]
   (log! [::row arg-tuples])
-  (into {} (map (fn [[a :as t]] [t {:ok? (even? a)}])) arg-tuples))
+  (into {} (map (fn [[a :as t]] [t {:ok? (even? a), :small? (< -10 a 10)}])) arg-tuples))
 
 (pt/defparsed Triple [user-id a b c]
   (pure ::a-int "a is an integer." [a] (log! ::a-int) (int? a))
@@ -38,13 +38,18 @@
             [user-id]
             (log! ::user-known)
             (contains? #{1 2} user-id))
+  ;; binds ::row, as ::may-use-row does, so it runs only when that passes; ::user-known binds no fetch and holds nothing
+  (external ::row-small "The row for a is small."
+            [] [row ::row]
+            (log! ::row-small)
+            (true? (:small? row)))
   (fetch ::row [a] rows))
 
 (def ^:private fields [:user-id :a :b :c])
 
 (def ^:private pure-names #{::a-int ::b-string ::c-int ::b-short ::a-below-c ::user-3-c-even})
 
-(def ^:private touches-world? #{::may-use-row ::user-known ::row})
+(def ^:private touches-world? #{::may-use-row ::user-known ::row-small ::row})
 
 (def ^:private gen-value
   (gen/one-of [gen/small-integer gen/small-integer gen/string-alphanumeric (gen/return nil)]))
@@ -59,8 +64,8 @@
             (gen/tuple (gen/elements [1 1 2 3]) gen/small-integer gen/string-alphanumeric gen/nat)))
 
 (def ^:private gen-valid-draft
-  "A draft that passes every check: user 1, an even a, a short b, and c above a."
-  (gen/fmap (fn [[half b gap]] (pt/draft Triple {:user-id 1, :a (* 2 half), :b (subs b 0 (min 3 (count b))), :c (+ (* 2 half) gap 1)}))
+  "A draft that passes every check: user 1, an even a between -10 and 10, a short b, and c above a."
+  (gen/fmap (fn [[half b gap]] (pt/draft Triple {:user-id 1, :a (* 2 (rem half 5)), :b (subs b 0 (min 3 (count b))), :c (+ (* 2 (rem half 5)) gap 1)}))
             (gen/tuple gen/small-integer gen/string-alphanumeric gen/nat)))
 
 (def ^:private gen-draft
@@ -163,7 +168,7 @@
 (defn- model
   "The outcome of parsing a TripleDraft with these fields, from first principles."
   [{:keys [user-id a b c], :as fields}]
-  (let [externals [::may-use-row ::user-known]
+  (let [externals [::may-use-row ::user-known ::row-small]
         singles   (cond-> [[::a-int "a is an integer." (int? a)]
                            [::b-string "b is a string." (string? b)]
                            [::c-int "c is an integer." (int? c)]]
@@ -189,11 +194,15 @@
       {:type         ::pt/invalid
        :failed-kinds #{:pure}
        :failures     (into {} (map (fn [[n e]] [n (assoc e :blocked (blocked n))])) failed)}
-      (let [ext (cond-> {}
-                  (not (and (= 1 user-id) (even? a)))
-                  (assoc ::may-use-row {:doc "User 1 may use the row for a.", :returned false})
-                  (not (contains? #{1 2} user-id))
-                  (assoc ::user-known {:doc "The user is known. An external check with no fetch.", :returned false}))]
+      (let [may-use? (and (= 1 user-id) (even? a))
+            ext      (cond-> {}
+                       ;; an external check is held when one written before it that binds its fetch failed
+                       (not may-use?)
+                       (assoc ::may-use-row {:doc "User 1 may use the row for a.", :returned false, :blocked [::row-small]})
+                       (not (contains? #{1 2} user-id))
+                       (assoc ::user-known {:doc "The user is known. An external check with no fetch.", :returned false})
+                       (and may-use? (not (< -10 a 10)))
+                       (assoc ::row-small {:doc "The row for a is small.", :returned false}))]
         (if (seq ext)
           {:type ::pt/invalid, :failed-kinds #{:external}, :failures ext}
           {:ok (into {} fields)})))))
