@@ -290,28 +290,30 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 | `::bad-declaration` | a `defparsed`, `defsum` or `match` is malformed, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no map, or no entry for a tuple |
 
-`:threw` holds the exception a check's body threw, so a handler can send a bug in a check to its 500 first:
+The ex-data says what kind of failure it is. `:threw` means a check has a bug. `:kind :pure` means the caller's own
+input is malformed, so it's safe to show. `:kind :external` means a check of the world refused the draft, so tell the
+caller no more than that:
 
 ```clojure
-(defn order-route [request]
+(defn place [request]
   (try
-    {:status 201, :body (handle-order request)}
+    [:placed (handle-order request)]
     (catch clojure.lang.ExceptionInfo e
       (let [{:keys [type threw kind check doc]} (ex-data e)]
         (cond
           (not= ::pt/invalid type) (throw e)
-          threw                    {:status 500, :body "A check threw."}
-          (= :pure kind)           {:status 400, :body {:check check, :doc doc}}
-          :else                    {:status 403, :body "The order was refused."})))))
+          threw                    [:bug check]
+          (= :pure kind)           [:bad-input {:check check, :doc doc}]
+          :else                    [:refused])))))
 
-(order-route {:customer-id 1, :body {:lines [{:product 7, :qty 0, :price 5M}], :subtotal 0M}})
-;; => {:status 400, :body {:check :shop/quantity-positive, :doc "The quantity is a positive integer."}}
-(order-route {:customer-id 2, :body {:lines [{:product 7, :qty 1, :price 5M}], :subtotal 5M}})
-;; => {:status 403, :body "The order was refused."}
+(place {:customer-id 1, :body {:lines [{:product 7, :qty 0, :price 5M}], :subtotal 0M}})
+;; => [:bad-input {:check :shop/quantity-positive, :doc "The quantity is a positive integer."}]
+(place {:customer-id 2, :body {:lines [{:product 7, :qty 1, :price 5M}], :subtotal 5M}})
+;; => [:refused]
 ```
 
-A pure failure describes only the caller's own input, so the handler returns it. An external failure is about the
-world, so the handler names no check.
+Never show the caller which external check failed. If a check that reads private data is written before the
+permission check, its failure reveals that data.
 
 ### Nothing fails silently
 
