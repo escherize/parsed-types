@@ -31,7 +31,7 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on each library interface print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
 | `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to which check fails first and what it returned |
 | Checks run in the order written, and the first failure stops the parse | Pure checks run in the order written, then the fetches, then external checks in the order written. The first check that returns anything but `true`, or throws, stops the parse: no check after it runs, so nothing runs after a failed permission check. `defparsed` refuses a pure check written before one on a proper subset of its fields, so the check that fails first names the root cause | `pure-checks-run-in-the-order-written-test`, `order-test`, `transfer-test`, `parse-matches-the-model` |
-| A check body that throws stops the parse as a failure does | Each `Exception` a pure or external check's body throws is reported as that check's failure: `:threw` holds it, and it is the cause. An exception from a fetch or from the library, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-stops-the-parse-test`, `what-a-check-throws-that-is-not-recorded-test` |
+| A check body that throws stops the parse as a failure does | Each `Exception` a pure or external check's body throws is reported as that check's failure: `:threw` holds it, and it is the cause. An exception the library throws inside a check body, such as `::no-field` for a misspelled key, is that check's `:threw` too. An exception from a fetch or from the library outside a check body, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-stops-the-parse-test`, `what-a-check-throws-that-is-not-recorded-test` |
 | Malformed input never reaches a fetch or an external check | A pure check that fails stops the parse before any fetch. `parse-all` runs every draft's pure checks before any fetch, so one malformed draft fetches nothing for the batch | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test`, `batching-test` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | `parse-all` gathers the tuples of every draft in the call, per declaration and fetch, and deduplicates them; a missing answer throws `::bad-fetch`. So a parent built from `(pt/parse-all parts)` costs one call per fetch, not one per part | `parse-all-fetches-once-with-each-distinct-tuple`, `batching-test`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Each draft's checks see only that draft | `parse-all-agrees-with-parse`, `parse-all-agrees-with-parse-across-declarations` |
@@ -94,7 +94,7 @@ holds.
 
 | `:type` | Thrown when | Other ex-data |
 |---|---|---|
-| `::invalid` | `parse` or `parse-all` ran a check that failed or threw, and stopped there. The message names the check, its doc and what it threw, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:check`, `:doc`, `:kind`, `:returned` or `:threw`, `:draft`, and `:index` from `parse-all` |
+| `::invalid` | `parse` or `parse-all` ran a check that failed or threw, and stopped there. The message names the check, its doc and what it returned or threw, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:check`, `:doc`, `:kind`, `:returned` or `:threw`, `:draft`, and `:index` from `parse-all` |
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed` | `:class`, and `:ns` where it applies |
 | `::cannot-change` | a change to a parsed value, a `dissoc`, `with-meta` or `empty` on a draft, or a `java.util.Map` mutator on either | `:parsed` or `:draft`, `:op`, `:key` |
@@ -245,7 +245,7 @@ with `not-known-immutable`: convert it to an accepted value, as in `(str x)`.
 - **`pt/draft` evaluates its values as Clojure evaluates the same map literal:** in the order written for up to 8
   keys, and in hash order beyond, since the reader makes a hash map of a larger literal.
 - **Exceptions.** A fetch's exception propagates out of `parse` and stops `parse-all`: a database outage is not
-  bad input. A check body's is recorded, as above.
+  bad input. A check body's exception stops the parse as `::invalid`, with `:threw`.
 
 ## REPL reloads
 

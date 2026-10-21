@@ -193,6 +193,8 @@ malformed draft in the batch fetches nothing for any of them:
 {:check :shop/quantity-positive, :kind :pure, :returned false}
 ```
 
+That holds per call. `handle-order` parses and fetches the lines before the order's own pure checks run.
+
 ### A parent holds parsed values, and `parse-all` batches the parts' fetches
 
 `:lines` holds `OrderLine` values that `parse-all` issued. Each fetch runs once per call, with each distinct tuple

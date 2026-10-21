@@ -39,8 +39,8 @@
   evaluated against the old ones keeps them. Where a class does not match but its name does, the library throws
   `::stale-type`, naming what to re-evaluate.
 
-  Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (checks
-  failed), `::not-parsed`, `::stale-type`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or
+  Every error the library throws is an `ex-info` whose ex-data has a `:type` in this namespace: `::invalid` (a check
+  failed or threw), `::not-parsed`, `::stale-type`, `::cannot-change`, `::no-field`, `::bad-input`, `::bad-declaration` or
   `::bad-fetch`, and
   a `:rule` in `parsed-types.rule` that names the rule it broke. Its message says what happened, with the values, the
   rule, and the fix."
@@ -1435,7 +1435,8 @@
 
 (defn- call-check
   "`{:returned x}`, what the check fn `f` returned on `args`, or `{:threw e}` for the `Exception` its body threw. Only
-  the call is inside the `try`, so an exception of the library's own is never recorded. An `Error` propagates, and so
+  the call is inside the `try`, so the library's own exceptions outside the body are never recorded; one the body
+  causes, such as `::no-field` for a misspelled key, is. An `Error` propagates, and so
   does an `InterruptedException`, once the thread's interrupt flag, which throwing it cleared, is set again."
   [f args]
   (try {:returned (apply f args)}
