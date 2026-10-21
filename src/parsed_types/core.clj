@@ -512,7 +512,7 @@
   [where what ^Class c]
   (throw (ex-info (str where " got " what " of " (.getName c) " from before " (defined-in c) " was re-evaluated. Types"
                        " compare by class, like records, and re-evaluating a defparsed makes new classes. Build it"
-                       " again, as in " (parse-hint c) ", or re-run the code that built it.")
+                       " again, as in " (parse-hint (or (.get latest (.getName c)) c)) ", or re-run the code that built it.")
                   {:type ::stale-type, :rule ::rule/stale-value, :class (.getName c)})))
 
 (defn- type-name [type]
@@ -975,16 +975,20 @@
   "nil when `m`, a map given to `fn-name` for the parsed type named `t`, has exactly the keys `fields`, else
   `[rule message data]`. `at` names where `m` is, for `parse-all`, or is empty."
   [fn-name t fields m at]
-  (let [unknown (vec (remove (set fields) (keys m)))
-        missing (vec (remove #(contains? m %) fields))
+  ;; from the keys, never `contains?`: a sorted map's comparator throws on a key of another type
+  (let [ks      (set (keys m))
+        unknown (vec (remove (set fields) ks))
+        missing (vec (remove ks fields))
+        ;; untrusted input can carry many keys: name the first few
+        shown   (if (< 10 (count unknown)) (str (subvec unknown 0 10) " and " (- (count unknown) 10) " more") unknown)
         m-hint  (str "{" (clojure.string/join ", " (map #(str % " ...") fields)) "}")
         call    (str "(" fn-name " " t " " (if (= "pt/parse-all" fn-name) (str "[" m-hint "]") m-hint) ")")]
     (cond
       (seq unknown)
       [::rule/input-unknown-keys
-       (str fn-name ": " t " has no fields " unknown at "." (did-you-mean (first unknown) fields) " A map to parse names"
+       (str fn-name ": " t " has no fields " shown at "." (did-you-mean (first unknown) fields) " A map to parse names"
             " only fields; its fields are " fields ". Remove the others, as in (select-keys m " fields ").")
-       (cond-> {:unknown unknown, :fields fields}
+       (cond-> {:unknown (vec (take 10 unknown)), :unknown-count (count unknown), :fields fields}
          (nearest (first unknown) fields) (assoc :suggestion (nearest (first unknown) fields)))]
 
       (seq missing)
@@ -1003,15 +1007,20 @@
         fail (fn [rule message more] (throw (ex-info message (merge data {:rule rule} more))))]
     (cond
       (issued? m)
-      (fail ::rule/already-parsed
-            (str fn-name " got a parsed " (.getSimpleName (class m)) at ", which is already parsed. Pass it as it is,"
-                 " or parse a changed map, as in (pt/parse " t " (assoc (pt/parsed " t " x) :field v)).")
-            {:got (.getName (class m))})
+      (let [u (.getSimpleName (class m))]
+        (fail ::rule/already-parsed
+              (if (identical? type (class m))
+                (str fn-name " got a parsed " t at ", which is already parsed. Pass it as it is, or parse a changed map,"
+                     " as in (pt/parse " t " (assoc (pt/parsed " t " x) " (first (:fields plan)) " v)).")
+                (str fn-name " got a parsed " u at " for " t ". It parses a map of " t "'s fields. Read " u "'s fields"
+                     " with (pt/parsed " u " x), and build the map from them, as in (pt/parse " t " "
+                     (input-hint type) ")."))
+              {:got (.getName (class m))}))
 
       (not (map? m))
       (fail ::rule/input-not-a-map
             (str fn-name " got " (describe m) at " for " t ". It parses a map of " t "'s fields, as in (" fn-name " " t
-                 " " (input-hint type) ")" (when (instance? ParsedValue m) ": a value pt/parse did not issue is no input")
+                 " " (if (= "pt/parse-all" fn-name) (str "[" (input-hint type) "]") (input-hint type)) ")" (when (instance? ParsedValue m) ": a value pt/parse did not issue is no input")
                  ".")
             {:got (some-> m class .getName)})
 
@@ -1234,7 +1243,7 @@
           :let        [[rule path what fix got] (not-immutable v walked)]
           :when       what]
     (let [shown (if (< 8 (count path)) (str (subvec path 0 8) " and " (- (count path) 8) " levels more") path)]
-      (throw (ex-info (str (.getSimpleName type) (when index (str ", the map at index " index ","))
+      (throw (ex-info (str (.getSimpleName type) (when index (str " (the map at index " index ")"))
                            ": the field " field
                            (when (seq path) (str " at " shown))
                            " holds " what " (" got "). "
@@ -1418,7 +1427,8 @@
   type's fields, so a misspelled or missing key in the source fails when it compiles. Called by the `:inline` of
   [[parse]]; any other call is checked when it runs."
   [type-form m]
-  (when (and (symbol? type-form) (map? m))
+  ;; only keyword keys: any other key form is an expression, whose value is known only when it runs
+  (when (and (symbol? type-form) (map? m) (every? keyword? (keys m)))
     (let [c (resolve type-form)]
       (when (and (class? c) (parsed-type? c))
         (when-let [[rule message more] (key-refusal "pt/parse" (.getSimpleName ^Class c) (:fields (.get registry c))

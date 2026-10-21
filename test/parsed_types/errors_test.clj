@@ -169,7 +169,7 @@
    [:input-missing-keys (compiling '(pt/parse Debit {:user-id 1, :account-id 2})) "Debit needs every field; missing [:amount]"
     "Write nil for a field you mean to leave empty, as in (pt/parse Debit {:user-id ..., :account-id ..., :amount ...})."]
    [:already-parsed #(pt/parse Debit real) "pt/parse got a parsed Debit, which is already parsed"
-    "(pt/parse Debit (assoc (pt/parsed Debit x) :field v))"]
+    "(pt/parse Debit (assoc (pt/parsed Debit x) :user-id v))"]
    [:unissued-in-field #(pt/parse Credit {:amount (Credit. 1 nil)})
     "Credit: the field :amount holds a value of Credit that pt/parse did not issue" "carries no proof"
     "(pt/parse Credit {:amount ...})"]

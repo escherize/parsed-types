@@ -222,11 +222,42 @@
   (testing "a map that is not literal compiles, and is checked when it runs"
     (is (nil? (compile-error '(fn [m] (pt/parse Point m)))))))
 
+;; found in review of the draft removal
+(pt/defparsed Pair2 [n m])
+(pt/defparsed Other2 [z])
+;; public: the quoted forms below name it, which clj-kondo does not see
+(def n-key :n)
+
+(deftest input-map-edge-cases-test
+  (testing "a literal map with a key that is an expression is checked when it runs, not refused when it compiles"
+    (is (nil? (compile-error '(pt/parse Pair2 {n-key 1, :m 2}))))
+    (is (pt/parsed? Pair2 (eval-here '(pt/parse Pair2 {n-key 1, :m 2}))))
+    (is (pt/parsed? Pair2 (eval-here '(let [k :n] (pt/parse Pair2 {k 1, :m 2}))))))
+  (testing "a sorted map with keys that are not keywords is ::bad-input, not a ClassCastException"
+    (is (= :parsed-types.rule/input-unknown-keys
+           (:rule (thrown #(pt/parse Pair2 (into (sorted-map) {"n" 1, "m" 2}))))))
+    (is (= :parsed-types.rule/input-unknown-keys (:rule (thrown #(pt/parse Pair2 (sorted-map 1 1 2 2)))))))
+  (testing "many unknown keys: the message and the ex-data name the first ten, and the count"
+    (let [e (thrown #(pt/parse Pair2 (into {:n 1, :m 2} (map (fn [i] [(keyword (str "k" i)) i])) (range 500))))]
+      (is (= 10 (count (:unknown e))))
+      (is (= 500 (:unknown-count e)))
+      (is (< (count (:message e)) 1000))))
+  (testing "parse-all's not-a-map fix is a vector"
+    (is (str/includes? (:message (thrown #(pt/parse-all Pair2 [{:n 1, :m 2} 5])))
+                       "(pt/parse-all Pair2 [{:n ..., :m ...}])")))
+  (testing "a parsed value of another type gets a fix that reads it, not one that passes it"
+    (let [msg (:message (thrown #(pt/parse Pair2 (pt/parse Other2 {:z 1}))))]
+      (is (str/includes? msg "(pt/parsed Other2 x)"))
+      (is (not (str/includes? msg "Pass it as it is")))))
+  (testing "a value of the same type gets a fix naming a real field"
+    (is (str/includes? (:message (thrown #(pt/parse Pair2 (pt/parse Pair2 {:n 1, :m 2}))))
+                       "(pt/parse Pair2 (assoc (pt/parsed Pair2 x) :n v))"))))
+
 (deftest parse-checks-any-map-when-it-runs-test
   (let [parse (fn [m] (thrown #(pt/parse Point m)))]
     (testing "a key that is not a field throws, never parses, and names the field it is close to"
       (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/input-unknown-keys, :fn "pt/parse", :unknown [:yy]
-              :suggestion :y, :fields [:x :y], :parsed "parsed_types.defparsed_test.Point"}
+              :unknown-count 1, :suggestion :y, :fields [:x :y], :parsed "parsed_types.defparsed_test.Point"}
              (dissoc (parse {:x 1, :yy 2}) :message))))
     (testing "a missing field throws, never reads nil"
       (is (= {:rule :parsed-types.rule/input-missing-keys, :missing [:y]} (select-keys (parse {:x 1}) [:rule :missing])))
@@ -240,7 +271,7 @@
     (testing "a parsed value is already parsed"
       (let [e (parse (pt/parse Point {:x 2, :y 2}))]
         (is (= :parsed-types.rule/already-parsed (:rule e)))
-        (is (re-find #"\(pt/parse Point \(assoc \(pt/parsed Point x\) :field v\)\)" (:message e)))))
+        (is (re-find #"\(pt/parse Point \(assoc \(pt/parsed Point x\) :x v\)\)" (:message e)))))
     (testing "a sum is no type to parse into"
       (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-parsed-type}
              (select-keys (thrown #(pt/parse Shape {:x 1, :y 1})) [:type :rule]))))
@@ -338,6 +369,14 @@
     (is (not (re-find #"[^.]\.\.(?!\.)" (:message e))) "no doubled period")))
 
 ;;; REPL reloads
+
+(deftest a-stale-value-fix-names-the-current-fields-test
+  (eval-here '(pt/defparsed Grower [n]))
+  (let [old (eval-here '(pt/parse Grower {:n 1}))]
+    (eval-here '(pt/defparsed Grower [n k]))
+    (let [e (thrown #(pt/parsed (eval-here 'Grower) old))]
+      (is (= :parsed-types.rule/stale-value (:rule e)))
+      (is (str/includes? (:message e) "(pt/parse Grower {:n ..., :k ...})")))))
 
 (deftest re-evaluating-a-type-test
   (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
