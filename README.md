@@ -146,38 +146,34 @@ such as `[[7] [8]]`. `f` returns a map from each tuple to its row, or to nil whe
 
 ## Explicitness: what you read in the declaration is what runs
 
-### Checks run in the order written, on the fields they name
+### Checks run in the order written, and the first failure stops the parse
 
-A body that uses a field its argument vector doesn't name doesn't compile. Pure checks run in the order written. A
-pure check that fails holds every later pure check that shares a field with it, and every external check. A held
-check holds nothing:
+A body that uses a field its argument vector doesn't name doesn't compile. Checks run in the order written: pure
+checks, then fetches, then external checks. The first check that fails, or throws, stops the parse, and `::invalid`
+names it:
 
 ```clojure
 (pt/parse (pt/draft Order {:customer-id 1, :lines [line], :subtotal 12M}))
-;; throws ::pt/invalid with these :failures:
-{:shop/subtotal-adds-up {:doc      "The subtotal is the sum of the line totals."
-                         :returned false
-                         :blocked  [:shop/customer-can-order]}}
+;; throws ::pt/invalid with this ex-data:
+{:check    :shop/subtotal-adds-up
+ :doc      "The subtotal is the sum of the line totals."
+ :kind     :pure
+ :returned false}
 ```
 
 So a check on fewer fields goes first: a pure check written before one that reads a proper subset of its fields
-doesn't compile. An inferred dependency graph was rejected, because it would run checks in an order the source
-doesn't show.
+doesn't compile, and the check that fails first names the root cause. An inferred dependency graph was rejected,
+because it would run checks in an order the source doesn't show.
 
-External checks run in the order written too. An external check that fails holds every later external check that
-binds the same fetch. So write the check that a row exists, or that the caller may see it, first. When it fails, no
-later check reports on that row:
+Reporting every failure was rejected. A caller learns one failure per attempt, but nothing runs after a failed
+permission check, so no later check reports on data the caller may not see. Write the check that a row exists, or
+that the caller may see it, before the checks that read the row:
 
 ```clojure
 (pt/parse (pt/draft OrderLine {:product-id 99, :quantity 1, :unit-price 5M}))
-;; throws ::pt/invalid with these :failures:
-{:shop/product-exists {:doc      "The product is in the catalog."
-                       :returned false
-                       :blocked  [:shop/price-matches]}}
+;; throws ::pt/invalid with this ex-data:
+{:check :shop/product-exists, :kind :external, :returned false}
 ```
-
-Running every external check was rejected: when a permission check fails, a later check over the same row, such as
-a balance check, would still report on a row the caller can't see.
 
 ### A draft names every field in the source
 
@@ -188,14 +184,13 @@ run time, write `{:quantity (:qty l)}`.
 
 ### Pure checks run before anything touches the world
 
-A draft that fails a pure check fetches nothing, and its external checks are held:
+A draft that fails a pure check fetches nothing. `parse-all` runs every draft's pure checks before any fetch, so one
+malformed draft in the batch fetches nothing for any of them:
 
 ```clojure
 (pt/parse (pt/draft OrderLine {:product-id 7, :quantity 0, :unit-price 5M}))
-;; throws ::pt/invalid with these :failures:
-{:shop/quantity-positive {:doc      "The quantity is a positive integer."
-                          :returned false
-                          :blocked  [:shop/product-exists :shop/price-matches]}}
+;; throws ::pt/invalid with this ex-data:
+{:check :shop/quantity-positive, :kind :pure, :returned false}
 ```
 
 ### A parent holds parsed values, and `parse-all` batches the parts' fetches
@@ -284,7 +279,7 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 
 | `:type` | Thrown when |
 |---|---|
-| `::invalid` | a check failed or threw. `:failures` has each one, `:threw` names those that threw, and `:failed-kinds` is a set of `:pure` and `:external`, the kinds that failed |
+| `::invalid` | the first check that failed or threw: `:check`, `:doc`, `:kind` (`:pure` or `:external`), and `:returned` or `:threw`; from `parse-all`, also the draft's `:index` |
 | `::not-parsed` | a sink, `match` or `draft-of` got a value `parse` didn't make |
 | `::stale-type` | a class from before a REPL re-evaluated a `defparsed` met one from after |
 | `::cannot-change` | code changed a parsed value, or called `dissoc`, `with-meta` or `empty` on a draft |
@@ -293,23 +288,22 @@ In summary, with every rule in [docs/guarantees.md](docs/guarantees.md#errors):
 | `::bad-declaration` | a `defparsed`, `defsum` or `match` is malformed, found when it expands or loads |
 | `::bad-fetch` | a fetch returned no map, or no entry for a tuple |
 
-`:threw` names the checks whose body threw, so a handler can send a bug in a check to its 500 before it reads
-`:failed-kinds`. From `parse-all`, `:failures` and `:threw` map the index of each draft that failed to its entries:
+`:threw` holds the exception a check's body threw, so a handler can send a bug in a check to its 500 first:
 
 ```clojure
 (defn order-route [request]
   (try
     {:status 201, :body (handle-order request)}
     (catch clojure.lang.ExceptionInfo e
-      (let [{:keys [type threw failed-kinds failures]} (ex-data e)]
+      (let [{:keys [type threw kind check doc]} (ex-data e)]
         (cond
           (not= ::pt/invalid type) (throw e)
-          (seq threw)              {:status 500, :body "A check threw."}
-          (:pure failed-kinds)     {:status 400, :body failures}
+          threw                    {:status 500, :body "A check threw."}
+          (= :pure kind)           {:status 400, :body {:check check, :doc doc}}
           :else                    {:status 403, :body "The order was refused."})))))
 
 (order-route {:customer-id 1, :body {:lines [{:product 7, :qty 0, :price 5M}], :subtotal 0M}})
-;; => {:status 400, :body {0 {:shop/quantity-positive {:doc "The quantity is a positive integer.", :returned false, :blocked [:shop/product-exists :shop/price-matches]}}}}
+;; => {:status 400, :body {:check :shop/quantity-positive, :doc "The quantity is a positive integer."}}
 (order-route {:customer-id 2, :body {:lines [{:product 7, :qty 1, :price 5M}], :subtotal 5M}})
 ;; => {:status 403, :body "The order was refused."}
 ```
@@ -326,9 +320,9 @@ world, so the handler names no check.
 - **A check passes only on exactly `true`.** For a truthy result such as `(seq xs)`, the message says to wrap the
   body in `(boolean ...)`.
 - **An external check gets nil when a fetch found nothing.** The first check over a fetch tests for that, as
-  `::product-exists` does, and holds the rest when it fails.
-- **A check body that throws is recorded** under `:threw`, and its exception is the cause. The other checks of its
-  phase still run. An exception from a fetch propagates.
+  `::product-exists` does. When a check fails and every fetch it binds found nothing, the message says so.
+- **A check body that throws stops the parse,** as a failure does. `:threw` holds the exception, which is also the
+  cause. An exception from a fetch propagates.
 - **There is no boolean `valid?`.** A caller can ignore a boolean, but not a throw.
 - **A test stubs a fetch through its var.** `#'customers-by-id` is declared as a var, so
   `(with-redefs [customers-by-id stub] ...)` reaches it.
@@ -351,7 +345,7 @@ the library throws `::stale-type` with the command that fixes it, such as `(requ
 |---|---|
 | `defparsed` | defines `Name`, `NameDraft`, and the checks between them |
 | `draft` | builds a draft from a literal map that names every field, and only fields |
-| `parse`, `parse-all` | checks drafts and returns parsed values, or throws with every failure |
+| `parse`, `parse-all` | checks drafts and returns parsed values, or throws for the first check that fails |
 | `parsed`, `parsed?` | returns or tests a value `parse` made |
 | `draft-of` | turns a parsed value back into a draft |
 | `defsum`, `match` | a closed set of parsed types, and a branch over every member |

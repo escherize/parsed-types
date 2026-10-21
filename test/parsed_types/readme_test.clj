@@ -1,7 +1,8 @@
 (ns parsed-types.readme-test
   "Every clojure block of the README, evaluated in order, against the store in `shop.db`. A form whose line ends in
   `;; => x`, or is followed by that comment, must return `x`. One with `;; throws t` must throw an ex-info of `:type`
-  `t`, and when the comment ends in `:failures:`, the next form is the expected `:failures`, and is not evaluated."
+  `t`, and when the comment ends in `with this ex-data:`, the next form is a map of the entries the ex-data must have,
+  and is not evaluated."
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
@@ -32,10 +33,11 @@
               (is (= (read-string (subs m 3)) (:value result)) (pr-str form))
 
               :else
-              (let [[_ t failures?] (re-find #"^throws (\S+?),?(?: with these (:failures):)?$" m)]
+              (let [[_ t data?] (re-find #"^throws (\S+?),?(?: (with this ex-data):)?$" m)]
                 (is (= (read-string t) (:type (ex-data (:thrown result)))) (pr-str form))
-                (when failures?
-                  (is (= (next!) (:failures (ex-data (:thrown result)))) (pr-str form)))))
+                (when data?
+                  (let [expected (next!)]
+                    (is (= expected (select-keys (ex-data (:thrown result)) (keys expected))) (pr-str form))))))
             (recur)))))
     *ns*))
 

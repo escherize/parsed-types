@@ -1,7 +1,6 @@
 (ns parsed-types.properties-test
   "Generative tests of the properties the library promises, over random drafts and random sequences of edits."
   (:require
-   [clojure.set :as set]
    [clojure.test.check.clojure-test :refer [defspec]]
    [clojure.test.check.generators :as gen]
    [clojure.test.check.properties :as prop]
@@ -22,13 +21,12 @@
   (pure ::a-int "a is an integer." [a] (log! ::a-int) (int? a))
   (pure ::b-string "b is a string." [b] (log! ::b-string) (string? b))
   (pure ::c-int "c is an integer." [c] (log! ::c-int) (int? c))
-  ;; written after ::b-string, which reads b too, so it runs only when that passes
+  ;; written after ::b-string, so it runs only when that passes
   (pure ::b-short "b has at most 3 characters."
         [b]
         (log! ::b-short)
         (or (<= (count (str b)) 3) {:length (count (str b))}))
   (pure ::a-below-c "a is below c." [a c] (log! ::a-below-c) (< a c))
-  ;; shares c with ::c-int and ::a-below-c, and nothing with ::a-int: held only when one of those two ran and failed
   (pure ::user-3-c-even "User 3's c is even." [user-id c] (log! ::user-3-c-even) (or (not= 3 user-id) (even? c)))
   (external ::may-use-row "User 1 may use the row for a."
             [user-id] [row ::row]
@@ -38,7 +36,7 @@
             [user-id]
             (log! ::user-known)
             (contains? #{1 2} user-id))
-  ;; binds ::row, as ::may-use-row does, so it runs only when that passes; ::user-known binds no fetch and holds nothing
+  ;; written last, so it runs only when every check before it passes
   (external ::row-small "The row for a is small."
             [] [row ::row]
             (log! ::row-small)
@@ -47,7 +45,9 @@
 
 (def ^:private fields [:user-id :a :b :c])
 
-(def ^:private pure-names #{::a-int ::b-string ::c-int ::b-short ::a-below-c ::user-3-c-even})
+(def ^:private written-order
+  "The checks of Triple, pure then external, each in the order written."
+  [::a-int ::b-string ::c-int ::b-short ::a-below-c ::user-3-c-even ::may-use-row ::user-known ::row-small])
 
 (def ^:private touches-world? #{::may-use-row ::user-known ::row-small ::row})
 
@@ -78,21 +78,31 @@
   (pt/draft Triple {:user-id (:user-id draft), :a (:a draft), :b (:b draft), :c (:c draft)}))
 
 (defn- outcome
-  "What `thunk` returned, as a plain value, or the type, failed kinds and failures it threw."
+  "What `thunk` returned, as a plain value, or the ex-data it threw, without the exception a check threw."
   [thunk]
   (try
     (let [x (thunk)]
       {:ok (if (vector? x) (mapv #(into {} %) x) (into {} x))})
     (catch clojure.lang.ExceptionInfo e
-      (select-keys (ex-data e) [:type :failed-kinds :failures]))))
+      (cond-> (dissoc (ex-data e) :threw)
+        (contains? (ex-data e) :threw) (assoc :threw (class (:threw (ex-data e))))))))
 
 (defspec nothing-touches-the-world-until-every-pure-check-passes 300
   (prop/for-all [draft gen-draft]
     (reset! ran [])
-    (let [{:keys [failures]} (outcome #(pt/parse draft))
-          pure-failed?       (some pure-names (keys failures))]
-      (or (not pure-failed?)
+    (let [{:keys [kind]} (outcome #(pt/parse draft))]
+      (or (not= :pure kind)
           (not-any? #(touches-world? (if (vector? %) (first %) %)) @ran)))))
+
+(defspec nothing-runs-after-the-first-check-that-fails 300
+  (prop/for-all [draft gen-draft]
+    (reset! ran [])
+    (let [{:keys [check ok]} (outcome #(pt/parse draft))
+          checks-ran         (remove vector? @ran)]
+      (= (if ok
+           written-order
+           (conj (vec (take-while #(not= check %) written-order)) check))
+         checks-ran))))
 
 (defspec parse-issues-a-new-equal-value-and-nothing-else-is-parsed 300
   (prop/for-all [draft gen-draft]
@@ -138,23 +148,28 @@
            (not (identical? parsed reparsed))
            (pt/parsed? Triple reparsed)))))
 
+(defn- parse-all-from-parse
+  "What parse-all must return, from what parse returned for each draft: every value when every draft parsed; else the
+  failure of the first draft whose pure checks failed, as every draft's pure checks run before any external check;
+  else the failure of the first draft whose external checks failed. The failure carries its draft's index."
+  [each]
+  (let [first-of (fn [kind] (first (keep-indexed (fn [i o] (when (= kind (:kind o)) (assoc o :index i))) each)))]
+    (or (first-of :pure)
+        (first-of :external)
+        {:ok (mapv :ok each)})))
+
 (defspec parse-all-agrees-with-parse 300
   (prop/for-all [drafts (gen/vector gen-draft 0 8)]
-    (let [each     (mapv #(outcome (fn [] (pt/parse (fresh %)))) drafts)
-          all      (outcome #(pt/parse-all (mapv fresh drafts)))
-          failures (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
-      (if (empty? failures)
-        (= all {:ok (mapv :ok each)})
-        (= all {:type         ::pt/invalid
-                :failed-kinds (apply set/union (keep :failed-kinds each))
-                :failures     failures})))))
+    (= (parse-all-from-parse (mapv #(outcome (fn [] (pt/parse (fresh %)))) drafts))
+       (outcome #(pt/parse-all (mapv fresh drafts))))))
 
 (declare model)
 
 (defspec parse-all-fetches-once-with-each-distinct-tuple 300
   (prop/for-all [drafts (gen/vector gen-draft 0 8)]
-    (let [pure-ok? (fn [d] (not= #{:pure} (:failed-kinds (model d))))
-          expected (into [] (comp (filter pure-ok?) (map (fn [d] [(:a d)])) (distinct)) drafts)]
+    (let [pure-ok? (fn [d] (not= :pure (:kind (model d))))
+          ;; a pure failure in any draft throws before anything is fetched
+          expected (if (every? pure-ok? drafts) (into [] (comp (map (fn [d] [(:a d)])) (distinct)) drafts) [])]
       (reset! ran [])
       (outcome #(pt/parse-all (mapv fresh drafts)))
       (let [calls (filterv #(and (vector? %) (= ::row (first %))) @ran)]
@@ -166,46 +181,32 @@
 ;;; both sides of a comparison still fails here.
 
 (defn- model
-  "The outcome of parsing a TripleDraft with these fields, from first principles."
+  "The outcome of parsing a TripleDraft with these fields, from first principles: the first check, pure then external,
+  each in the order written, that does not return exactly true, or every field when none fails. Each check is a fn, so
+  a check after the first failure is never called, as parse never runs it."
   [{:keys [user-id a b c], :as fields}]
-  (let [externals [::may-use-row ::user-known ::row-small]
-        singles   (cond-> [[::a-int "a is an integer." (int? a)]
-                           [::b-string "b is a string." (string? b)]
-                           [::c-int "c is an integer." (int? c)]]
-                    ;; a pure check is held when one written before it that shares a field failed
-                    (string? b)
-                    (conj [::b-short "b has at most 3 characters." (or (<= (count (str b)) 3) {:length (count (str b))})]))
-        failed    (into {} (for [[n doc r] singles :when (not (true? r))] [n {:doc doc, :returned r}]))
-        relation  (cond
-                    (or (failed ::a-int) (failed ::c-int)) :blocked
-                    (< a c)                                :passed
-                    :else                                  :failed)
-        ;; a held check did not run, so it holds nothing: ::a-below-c held by ::a-int does not hold ::user-3-c-even
-        even-held (or (failed ::c-int) (= :failed relation))
-        failed    (cond-> failed
-                    (= :failed relation) (assoc ::a-below-c {:doc "a is below c.", :returned false})
-                    (and (not even-held) (= 3 user-id) (not (even? c)))
-                    (assoc ::user-3-c-even {:doc "User 3's c is even.", :returned false}))
-        blocked   (fn [n] (vec (concat (when (= ::b-string n) [::b-short])
-                                       (when (and (= :blocked relation) (#{::a-int ::c-int} n)) [::a-below-c])
-                                       (when (#{::c-int ::a-below-c} n) [::user-3-c-even])
-                                       externals)))]
-    (if (seq failed)
-      {:type         ::pt/invalid
-       :failed-kinds #{:pure}
-       :failures     (into {} (map (fn [[n e]] [n (assoc e :blocked (blocked n))])) failed)}
-      (let [may-use? (and (= 1 user-id) (even? a))
-            ext      (cond-> {}
-                       ;; an external check is held when one written before it that binds its fetch failed
-                       (not may-use?)
-                       (assoc ::may-use-row {:doc "User 1 may use the row for a.", :returned false, :blocked [::row-small]})
-                       (not (contains? #{1 2} user-id))
-                       (assoc ::user-known {:doc "The user is known. An external check with no fetch.", :returned false})
-                       (and may-use? (not (< -10 a 10)))
-                       (assoc ::row-small {:doc "The row for a is small.", :returned false}))]
-        (if (seq ext)
-          {:type ::pt/invalid, :failed-kinds #{:external}, :failures ext}
-          {:ok (into {} fields)})))))
+  (let [checks [[:pure ::a-int "a is an integer." #(int? a)]
+                [:pure ::b-string "b is a string." #(string? b)]
+                [:pure ::c-int "c is an integer." #(int? c)]
+                [:pure ::b-short "b has at most 3 characters." #(or (<= (count b) 3) {:length (count b)})]
+                [:pure ::a-below-c "a is below c." #(< a c)]
+                [:pure ::user-3-c-even "User 3's c is even." #(or (not= 3 user-id) (even? c))]
+                ;; the row for a is {:ok? (even? a), :small? (< -10 a 10)}
+                [:external ::may-use-row "User 1 may use the row for a." #(and (= 1 user-id) (even? a))]
+                [:external ::user-known "The user is known. An external check with no fetch." #(contains? #{1 2} user-id)]
+                [:external ::row-small "The row for a is small." #(< -10 a 10)]]]
+    (or (some (fn [[kind n doc f]]
+                (let [r (f)]
+                  (when-not (true? r)
+                    {:type     ::pt/invalid
+                     :rule     :parsed-types.rule/check-failed
+                     :check    n
+                     :doc      doc
+                     :kind     kind
+                     :returned r
+                     :draft    "parsed_types.properties_test.TripleDraft"})))
+              checks)
+        {:ok (into {} fields)})))
 
 (defspec parse-matches-the-model 500
   (prop/for-all [draft gen-draft]
@@ -213,7 +214,7 @@
 
 (defspec the-generators-reach-every-outcome 1
   (prop/for-all [drafts (gen/vector gen-draft 400)]
-    (= #{#{:pure} #{:external} :ok} (set (map #(or (:failed-kinds %) :ok) (map model drafts))))))
+    (= #{:pure :external :ok} (set (map #(or (:kind %) :ok) (map model drafts))))))
 
 ;;; Several declarations in one call, sharing a fetch name with different fetches
 
@@ -241,14 +242,9 @@
                               (instance? TripleDraft d)  (fresh d)
                               (instance? PosPairDraft d) (pt/draft PosPair {:a (:a d)})
                               :else                      (pt/draft NegPair {:a (:a d)})))
-          each      (mapv #(outcome (fn [] (pt/parse (fresh-any %)))) drafts)
-          all       (outcome #(pt/parse-all (mapv fresh-any drafts)))
-          failures  (into (sorted-map) (keep-indexed (fn [i o] (when-not (:ok o) [i (:failures o)]))) each)]
-      (if (empty? failures)
-        (= all {:ok (mapv :ok each)})
-        (= all {:type         ::pt/invalid
-                :failed-kinds (apply set/union (keep :failed-kinds each))
-                :failures     failures})))))
+          each      (mapv #(outcome (fn [] (pt/parse (fresh-any %)))) drafts)]
+      (= (parse-all-from-parse each)
+         (outcome #(pt/parse-all (mapv fresh-any drafts)))))))
 
 ;;; Sums
 

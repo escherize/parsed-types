@@ -98,7 +98,7 @@
       (is (= [{:name ::row, :reads [:x]}] (mapv #(dissoc % :f) (:fetches decl))))))
   (testing "and parses with it"
     (is (= {:x 2, :y 2} (into {} (pt/parse (pt/draft Point {:x 2, :y 2})))))
-    (is (= #{:pure} (:failed-kinds (try (pt/parse (pt/draft Point {:x 1, :y :y})) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
+    (is (= :pure (:kind (try (pt/parse (pt/draft Point {:x 1, :y :y})) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
 (pt/defparsed Other [x z])
 
@@ -152,7 +152,7 @@
           (is (identical? cls (resolve-here-class 'Kept)))
           (is (identical? dcls (resolve-here-class 'KeptDraft)))
           (is (identical? old (pt/parsed (resolve-here-class 'Kept) old)))
-          (is (= #{::kept-pos} (set (keys (:failures (thrown #(pt/parse (eval-here '(pt/draft Kept {:a -1})))))))))))))
+          (is (= ::kept-pos (:check (thrown #(pt/parse (eval-here '(pt/draft Kept {:a -1})))))))))))
   (testing "a defparsed that fails after its deftypes, as when a check does not compile, says so wherever its type is used"
     (eval-here '(pt/defparsed Broken [a]))
     (is (some? (load-error '(pt/defparsed Broken [a] (pure ::b "b" [a] (no-such-fn a))))))
@@ -366,8 +366,8 @@
       (is (identical? parsed (pt/parsed line-type parsed))))
     (testing "a draft built before the reload still parses, and still fails its checks"
       (is (pt/parsed? line-type (pt/parse good)))
-      (is (= #{::rl-n-int} (set (keys (:failures (try (pt/parse bad) nil
-                                                       (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
+      (is (= ::rl-n-int (:check (try (pt/parse bad) nil
+                                     (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
     (testing "a sum and a match defined before the reload still take the value"
       (is (pt/parsed? (resolve-here 'RlSum) parsed))
       (is (= [:line 1] ((resolve-here 'rl-match) parsed))))
@@ -605,7 +605,7 @@
                   (pure ::never "Never passes." [ShadowDraft-declaration] false)))
     (let [d ((eval-here '(fn [v] (pt/draft Shadow {:ShadowDraft-declaration v})))
              {:parses-to (resolve 'parsed-types.defparsed-test/Shadow), :checks []})]
-      (is (= #{:pure} (:failed-kinds (try (pt/parse d) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
+      (is (= ::never (:check (try (pt/parse d) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
 
 (deftest field-name-limits-test
   (doseq [[fields re] [['[a.b] #"cannot contain a dot"]

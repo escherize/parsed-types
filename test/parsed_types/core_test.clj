@@ -81,29 +81,30 @@
           (binding [*ns* (the-ns 'parsed-types.core-test)] (eval '(pt/defparsed Printed [a])))
           (is (= before (count (methods print-method))))
           (is (not (contains? (methods print-method) RenameCard)))))))
-  (testing "a failed pure check is reported by name, with its doc and what it returned"
-    (is (= {:type         ::pt/invalid
-            :rule         :parsed-types.rule/checks-failed
-            :failed-kinds #{:pure}
-            :draft        "parsed_types.core_test.RenameCardDraft"
-            :threw        #{}
-            :failures    {::card-id-positive {:doc      "The card id is a positive integer."
-                                              :returned false
-                                              :blocked  [::title-not-the-card-id ::may-write-card]}
-                          ::title-not-blank  {:doc      "The title is a non-blank string."
-                                              :returned {:title " "}
-                                              :blocked  [::title-not-the-card-id ::may-write-card]}}}
-           (thrown-data #(pt/parse (pt/draft RenameCard {:user-id 1, :card-id -1, :title " "}))))))
+  (testing "the first failed check stops the parse, and is reported by name, with its doc and what it returned"
+    (is (= {:type     ::pt/invalid
+            :rule     :parsed-types.rule/check-failed
+            :check    ::card-id-positive
+            :doc      "The card id is a positive integer."
+            :kind     :pure
+            :returned false
+            :draft    "parsed_types.core_test.RenameCardDraft"}
+           (thrown-data #(pt/parse (pt/draft RenameCard {:user-id 1, :card-id -1, :title " "})))))
+    (is (= [::card-id-positive] (runs #(thrown-data (fn [] (pt/parse (pt/draft RenameCard {:user-id 1, :card-id -1, :title " "}))))))
+        "no check after it runs")
+    (is (= {:title " "} (:returned (thrown-data #(pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title " "})))))
+        "what a check returned, when it says why"))
   (testing "a failed external check is reported as :external"
-    (is (= {:type         ::pt/invalid
-            :rule         :parsed-types.rule/checks-failed
-            :failed-kinds #{:external}
-            :draft        "parsed_types.core_test.RenameCardDraft"
-            :threw        #{}
-            :failures     {::may-write-card {:doc "User 1 may write the card.", :returned false}}}
+    (is (= {:type     ::pt/invalid
+            :rule     :parsed-types.rule/check-failed
+            :check    ::may-write-card
+            :doc      "User 1 may write the card."
+            :kind     :external
+            :returned false
+            :draft    "parsed_types.core_test.RenameCardDraft"}
            (thrown-data #(pt/parse (pt/draft RenameCard {:user-id 1, :card-id 3, :title "New"}))))))
   (testing "who is acting is a field: the same card, another user"
-    (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (pt/draft RenameCard {:user-id 2, :card-id 1, :title "New"}))))))))
+    (is (= :external (:kind (thrown-data #(pt/parse (pt/draft RenameCard {:user-id 2, :card-id 1, :title "New"}))))))))
 
 (pt/defparsed Written [a b c]
   (pure ::a-int "a is an integer." [a] (log! ::a-int) (int? a))
@@ -114,10 +115,9 @@
 (deftest pure-checks-run-in-the-order-written-test
   (testing "in the order written, not by how many fields each reads"
     (is (= [::a-int ::a-pos ::a-below-b ::c-int] (runs #(pt/parse (pt/draft Written {:a 1, :b 2, :c 3}))))))
-  (testing "a failed check holds every later pure check that shares a field with it, and no other"
-    (is (= [::a-int ::c-int] (runs #(thrown-data (fn [] (pt/parse (pt/draft Written {:a :x, :b 2, :c 3})))))))
-    (is (= {::a-int {:doc "a is an integer.", :returned false, :blocked [::a-pos ::a-below-b]}}
-           (:failures (thrown-data #(pt/parse (pt/draft Written {:a :x, :b 2, :c 3})))))))
+  (testing "the first failed check stops the parse: no later check runs, whatever fields it reads"
+    (is (= [::a-int] (runs #(thrown-data (fn [] (pt/parse (pt/draft Written {:a :x, :b 2, :c 3})))))))
+    (is (= ::a-int (:check (thrown-data #(pt/parse (pt/draft Written {:a :x, :b 2, :c :y})))))))
   (testing "a check written before one that reads a proper subset of its fields does not compile"
     (is (re-find #"the pure check :parsed-types.core-test/ab reads \[a b\], and is written before :parsed-types.core-test/a, which reads only \[a\]\..*Move :parsed-types.core-test/a before :parsed-types.core-test/ab\."
                  (try (binding [*ns* (the-ns 'parsed-types.core-test)]
@@ -126,7 +126,7 @@
                       (catch Throwable e (ex-message (ex-cause e))))))))
 
 (deftest a-check-that-reads-no-field-may-go-anywhere-test
-  (testing "it shares no field, so it holds nothing and is not a proper subset to move first"
+  (testing "it reads no field, so it is not a proper subset to move first"
     (binding [*ns* (the-ns 'parsed-types.core-test)]
       (eval '(pt/defparsed Anywhere [a] (pure ::a-int "a is an integer." [a] (int? a)) (pure ::always "Always." [] true))))
     (is (some? (pt/parse (binding [*ns* (the-ns 'parsed-types.core-test)] (eval '(pt/draft Anywhere {:a 1}))))))))
@@ -135,8 +135,8 @@
   (testing "pure checks in the order written, then fetches, then external checks"
     (is (= [::card-id-positive ::title-not-blank ::title-not-the-card-id [::card [[1]]] ::may-write-card]
            (runs #(pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title "New"}))))))
-  (testing "a failed pure check holds up every fetch and external check, even one that does not read its field"
-    (is (= [::card-id-positive ::title-not-blank]
+  (testing "a failed pure check stops the parse before any fetch or external check"
+    (is (= [::card-id-positive]
            (runs #(thrown-data (fn [] (pt/parse (pt/draft RenameCard {:user-id 1, :card-id -1, :title "New"})))))))
     (is (= [::card-id-positive ::title-not-blank]
            (runs #(thrown-data (fn [] (pt/parse (pt/draft RenameCard {:user-id 1, :card-id 1, :title " "})))))))))
@@ -170,18 +170,26 @@
              (filter vector? (runs #(reset! parsed (pt/parse-all drafts))))))
       (is (= 3 (count @parsed)))
       (is (every? #(pt/parsed? RenameCard %) @parsed))))
-  (testing "parse-all throws once with every failure, by index, and every kind that failed"
-    (is (= {:type         ::pt/invalid
-            :rule         :parsed-types.rule/checks-failed
-            :failed-kinds #{:pure :external}
-            :threw        {}
-            :failures    {1 {::may-write-card {:doc "User 1 may write the card.", :returned false}}
-                          2 {::card-id-positive {:doc      "The card id is a positive integer."
-                                                 :returned false
-                                                 :blocked  [::title-not-the-card-id ::may-write-card]}}}}
+  (testing "parse-all runs every draft's pure checks before any fetch, and throws for the first check that fails"
+    (is (= {:type     ::pt/invalid
+            :rule     :parsed-types.rule/check-failed
+            :check    ::card-id-positive
+            :doc      "The card id is a positive integer."
+            :kind     :pure
+            :returned false
+            :draft    "parsed_types.core_test.RenameCardDraft"
+            :index    2}
            (thrown-data #(pt/parse-all [(pt/draft RenameCard {:user-id 1, :card-id 1, :title "a"})
                                         (pt/draft RenameCard {:user-id 1, :card-id 3, :title "b"})
-                                        (pt/draft RenameCard {:user-id 1, :card-id -1, :title "c"})]))))))
+                                        (pt/draft RenameCard {:user-id 1, :card-id -1, :title "c"})]))))
+    (is (not-any? vector? (runs #(thrown-data (fn [] (pt/parse-all [(pt/draft RenameCard {:user-id 1, :card-id 3, :title "b"})
+                                                                    (pt/draft RenameCard {:user-id 1, :card-id -1, :title "c"})])))))
+        "so a pure failure in a later draft fetches nothing"))
+  (testing "when every pure check passes, the first external failure names its draft"
+    (is (= {:check ::may-write-card, :index 1}
+           (select-keys (thrown-data #(pt/parse-all [(pt/draft RenameCard {:user-id 1, :card-id 1, :title "a"})
+                                                     (pt/draft RenameCard {:user-id 1, :card-id 3, :title "b"})]))
+                        [:check :index])))))
 
 (deftest a-draft-must-be-a-draft-type-test
   (testing "anything but a draft of a type defparsed defined is refused, even one that implements DraftValue"
@@ -287,7 +295,7 @@
 (deftest a-fetch-may-close-over-a-local-test
   (testing "a fetch reads the world, so it may hold a database handle"
     (is (= {:a 1} (into {} (pt/parse (pt/draft Closure {:a 1})))))
-    (is (= #{:external} (:failed-kinds (thrown-data #(pt/parse (pt/draft Closure {:a 2}))))))))
+    (is (= :external (:kind (thrown-data #(pt/parse (pt/draft Closure {:a 2}))))))))
 
 (defn- rows-by-id [tuples] (into {} (map (fn [t] [t {:id (first t)}])) tuples))
 
@@ -303,7 +311,7 @@
     (testing "the var is called through, so with-redefs stubs the fetch"
       (is (some? (parse-one)))
       (with-redefs [rows-by-id (fn [tuples] (into {} (map (fn [t] [t nil])) tuples))]
-        (is (= #{:external} (:failed-kinds (thrown-data parse-one)))))))
+        (is (= :external (:kind (thrown-data parse-one)))))))
   (testing "a var that holds anything but a fn is refused when the defparsed loads"
     (let [e (try (binding [*ns* (the-ns 'parsed-types.core-test)]
                    (eval '(pt/defparsed ByNumber [id] (fetch ::row [id] #'not-a-fn))))
@@ -533,20 +541,6 @@
         (is (str/includes? (str message) fix) (str (class v)))
         (is (some? (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title (convert v)}))) (str (class v)))))))
 
-(pt/defparsed Held [a b c]
-  (pure ::a-int "a is an integer." [a] (int? a))
-  (pure ::a-below-b "a is below b." [a b] (< a b))
-  (pure ::b-below-c "b is below c." [b c] (< b c)))
-
-(deftest a-held-check-holds-nothing-test
-  (testing "a check held by a failure did not run, so a later check that shares a field with it still runs"
-    (is (= {::a-int     {:doc "a is an integer.", :returned false, :blocked [::a-below-b]}
-            ::b-below-c {:doc "b is below c.", :returned false}}
-           (:failures (thrown-data #(pt/parse (pt/draft Held {:a :x, :b 5, :c 1})))))))
-  (testing "while a check that ran and failed holds it"
-    (is (= {::a-below-b {:doc "a is below b.", :returned false, :blocked [::b-below-c]}}
-           (:failures (thrown-data #(pt/parse (pt/draft Held {:a 9, :b 5, :c 1}))))))))
-
 (deftest an-issued-value-in-a-field-is-not-walked-again-test
   (let [inner  (pt/parse (pt/draft Other {:user-id 1, :card-id 1, :title [[1] [2] [3]]}))
         walked (atom 0)
@@ -576,55 +570,32 @@
 (defn- thrown [thunk]
   (try (thunk) nil (catch Throwable t t)))
 
-(deftest a-check-that-throws-is-recorded-test
-  (testing "a pure check that throws is that check's failure, holds later checks on its fields, and the phase goes on"
+(deftest a-check-that-throws-stops-the-parse-test
+  (testing "a pure check that throws is that check's failure, and its exception is the cause"
     (let [e    (thrown #(pt/parse (pt/draft Throwing {:amount :x, :note "n"})))
-          data (ex-data e)
-          ex   (get-in data [:failures ::amount-positive :threw])]
-      (is (instance? ClassCastException ex))
-      (is (= {::amount-positive {:doc "The amount is positive.", :threw ex, :blocked [::amount-small ::note-known]}}
-             (:failures data))
-          "no :returned, and the check on the same field and the external check are held")
-      (is (= #{::amount-positive} (:threw data)))
-      (is (= #{:pure} (:failed-kinds data)))
-      (is (identical? ex (ex-cause e)) "the exception is the cause")
-      (is (= [::amount-positive ::note-string] (runs #(thrown (fn [] (pt/parse (pt/draft Throwing {:amount :x, :note "n"}))))))
-          "the pure check on another field runs; nothing touches the world")))
-  (testing "a thrown check and a failed one are reported together"
-    (let [data (ex-data (thrown #(pt/parse (pt/draft Throwing {:amount :x, :note 5}))))]
-      (is (= #{::amount-positive} (:threw data)))
-      (is (= {:doc "The note is a string.", :returned false} (dissoc (get-in data [:failures ::note-string]) :blocked)))))
-  (testing "external checks that throw: every one runs, and the first to throw is the cause"
+          data (ex-data e)]
+      (is (instance? ClassCastException (:threw data)))
+      (is (= {:check ::amount-positive, :doc "The amount is positive.", :kind :pure} (select-keys data [:check :doc :kind])))
+      (is (not (contains? data :returned)))
+      (is (identical? (:threw data) (ex-cause e)) "the exception is the cause")
+      (is (= [::amount-positive] (runs #(thrown (fn [] (pt/parse (pt/draft Throwing {:amount :x, :note "n"}))))))
+          "no check after it runs")))
+  (testing "an external check that throws stops the parse too"
     (let [e    (thrown #(pt/parse (pt/draft Remote {:id 1})))
           data (ex-data e)]
-      (is (= ::pt/invalid (:type data)))
-      (is (= #{::first-throws ::second-throws} (:threw data)))
-      (is (= #{:external} (:failed-kinds data)))
-      (is (= {:doc "The id is 3.", :returned false} (get-in data [:failures ::id-is-3])))
+      (is (= {:type ::pt/invalid, :check ::first-throws, :kind :external} (select-keys data [:type :check :kind])))
       (is (= "first" (ex-message (ex-cause e))))
-      (is (not (contains? (get-in data [:failures ::first-throws]) :returned)))
-      (is (= [::first-throws ::second-throws ::id-is-3] (remove vector? (runs #(thrown (fn [] (pt/parse (pt/draft Remote {:id 1}))))))))))
-  (testing "no check threw: :threw is empty"
-    (is (= #{} (:threw (ex-data (thrown #(pt/parse (pt/draft Remote {:id 4}))))))))
-  (testing "the message names what each check threw"
+      (is (= [::first-throws] (remove vector? (runs #(thrown (fn [] (pt/parse (pt/draft Remote {:id 1}))))))))))
+  (testing "no check threw: there is :returned and no :threw"
+    (let [data (ex-data (thrown #(pt/parse (pt/draft Remote {:id 4}))))]
+      (is (= {:check ::id-is-3, :returned false} (select-keys data [:check :returned :threw])))))
+  (testing "the message names what the check threw"
     (is (str/includes? (ex-message (thrown #(pt/parse (pt/draft Remote {:id 1}))))
-                       ":parsed-types.core-test/first-throws (Throws for id 1.) threw IllegalStateException: first"))))
-
-(deftest parse-all-records-a-thrown-check-per-draft-test
-  (testing "one draft's thrown check stops no other draft, and the batch throws one ::invalid"
-    (let [e    (thrown #(pt/parse-all [(pt/draft Remote {:id 2})
-                                       (pt/draft Throwing {:amount :x, :note "n"})
-                                       (pt/draft Remote {:id 3})
-                                       (pt/draft Throwing {:amount 5, :note 7})]))
-          data (ex-data e)]
-      (is (= ::pt/invalid (:type data)))
-      (is (= {0 #{::second-throws}, 1 #{::amount-positive}} (:threw data)) "keyed by index, like :failures")
-      (is (= #{0 1 3} (set (keys (:failures data)))))
-      (is (= #{:pure :external} (:failed-kinds data)))
-      (is (instance? ClassCastException (ex-cause e))
-          "every pure check runs before any external one, so the pure throw of draft 1 is first")))
-  (testing "no check threw: :threw is an empty map"
-    (is (= {} (:threw (ex-data (thrown #(pt/parse-all [(pt/draft Remote {:id 4})]))))))))
+                       ":parsed-types.core-test/first-throws (Throws for id 1.) threw IllegalStateException: first")))
+  (testing "in parse-all, a thrown pure check of a later draft comes before any external check"
+    (let [data (ex-data (thrown #(pt/parse-all [(pt/draft Remote {:id 2})
+                                                (pt/draft Throwing {:amount :x, :note "n"})])))]
+      (is (= {:check ::amount-positive, :index 1} (select-keys data [:check :index]))))))
 
 (defn- failing-fetch [_tuples] (throw (IllegalStateException. "database down")))
 

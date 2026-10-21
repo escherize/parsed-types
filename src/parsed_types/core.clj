@@ -152,9 +152,14 @@
       (first (sort-by #(edit-distance n (name %)) close)))))
 
 (defn- a-or-an
-  "`s` after the article its first letter takes, for an error message: \"an Order\", \"a Draft\"."
+  "`s` after the article its first letter takes, for an error message: \"an Order\", \"a User\". An anonymous
+  class, whose name is empty, is \"a value\"."
   [s]
-  (str (if (#{\A \E \I \O \U \a \e \i \o \u} (first s)) "an " "a ") s))
+  (cond
+    (empty? s)                             "a value"
+    ;; ponytail: by first letter; "a User", but also "a Hour"
+    (#{\A \E \I \O \a \e \i \o} (first s)) (str "an " s)
+    :else                                  (str "a " s)))
 
 (defn- did-you-mean
   "` Did you mean :x?` for the nearest of `candidates` to `k`, or an empty string."
@@ -991,14 +996,10 @@
 
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
 
-  Pure checks run in the order written. A pure check is held, not run, when one before it that shares a field ran
-  and failed. A held check holds nothing. A check whose body throws an `Exception` has failed: [[parse]] records it
-  and runs the other checks of its phase. A pure check written before one that reads a proper subset of its fields
-  is a compile error: move the smaller one first.
-
-  External checks run in the order written, after every pure check passed. An external check is held when one
-  before it that binds a fetch it binds ran and failed. So write the check that the row exists, or that the caller
-  may see it, first: when it fails, no later check reports on that row.
+  Checks run in the order written: every pure check, then the fetches, then every external check. The first check
+  that does not return exactly `true`, or throws, stops the parse, so nothing runs after a failed permission check. A
+  pure check written before one that reads a proper subset of its fields is a compile error: move the smaller one
+  first, so the check that fails first names the root cause.
 
   A field may hold values [[parse]] issued, which are not checked again, but never a draft: parse the parts first.
 
@@ -1060,14 +1061,14 @@
      (when-let [[big small] (first (for [[i big] (map-indexed vector (filter #(= :pure (:kind %)) checks))
                                          small (drop (inc i) (filter #(= :pure (:kind %)) checks))
                                          :let  [b (set (:reads big)), sm (set (:reads small))]
-                                         ;; a check that reads no field shares none, so it holds nothing
+                                         ;; a check that reads no field is a proper subset of no other, so it may go anywhere
                                          :when (and (seq sm) (set/subset? sm b) (not= sm b))]
                                      [big small]))]
        (syntax-error! &form ::rule/pure-check-order
                       (str "the pure check " (:name big) " reads " (mapv symbol (:reads big)) ", and is written before "
                            (:name small) ", which reads only " (mapv symbol (:reads small)) ". Pure checks run in the"
-                           " order written, and a check that fails holds every later one that shares a field with it, so a check"
-                           " on fewer fields goes first. Move " (:name small) " before " (:name big) ".")))
+                           " order written, and the first that fails stops the parse, so a check on fewer fields goes first"
+                           " and the failure names the root cause. Move " (:name small) " before " (:name big) ".")))
      ;; when it expands, so that a refused defparsed never reaches its deftypes, which would redefine the classes
      (claim-class-names! (ns-name *ns*) parsed-name claims false)
      ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
@@ -1118,48 +1119,19 @@
   (.put pending parsed-class-name fetch-fns)
   nil)
 
-(defn- reads-set [x] (set (:reads x)))
-
 (defn- compile-plan
-  "Order the checks, and work out what holds each.
-
-  - A pure check is held when a pure check before it that shares a field ran and failed, or threw: one held in turn
-    holds nothing.
-  - An external check is held when any pure check failed or threw, and fetches run only when none did, so malformed input
-    never reads the world.
-  - An external check is held when an external check before it that binds a fetch it binds ran and failed, or threw,
-    so a failed permission check written first keeps the checks after it from reporting on the row it refused.
-
-  Pure checks run first, in the order written, then fetches, then external checks, each in the order written.
-  [[defparsed]] refuses a pure check written before one that reads a proper subset of its fields, so a check on one
-  field runs before a check relating it to another."
+  "Split the checks into the two phases [[parse]] runs, each in the order written: pure checks, then, after the
+  fetches, external checks. The first check that fails stops the parse, so malformed input never reads the world, and
+  nothing runs after a failed permission check. [[defparsed]] refuses a pure check written before one that reads a
+  proper subset of its fields, so the check that fails first names the root cause."
   [parses-to draft-class fields {:keys [checks], :as decl}]
-  (let [pure      (filterv #(= :pure (:kind %)) checks)
-        pure'     (map-indexed (fn [i c]
-                                 (assoc c :prereqs (into #{}
-                                                         (comp (take i)
-                                                               (filter #(seq (set/intersection (reads-set %)
-                                                                                               (reads-set c))))
-                                                               (map :name))
-                                                         pure)))
-                               pure)
-        external  (filterv #(= :external (:kind %)) checks)
-        external' (map-indexed (fn [i c]
-                                 (assoc c :prereqs (into (set (map :name pure))
-                                                         (comp (take i)
-                                                               (filter #(seq (set/intersection (set (:fetches %))
-                                                                                               (set (:fetches c)))))
-                                                               (map :name))
-                                                         external)))
-                               external)]
-    {:draft-class    draft-class
-     :parses-to      parses-to
-     :declaration    (assoc decl :parses-to parses-to)
-     :fields         fields
-     :pure           (vec pure')
-     :fetches        (:fetches decl)
-     :external       (vec external')
-     :checks-by-name (into {} (map (juxt :name identity)) (concat pure' external'))}))
+  {:draft-class draft-class
+   :parses-to   parses-to
+   :declaration (assoc decl :parses-to parses-to)
+   :fields      fields
+   :pure        (filterv #(= :pure (:kind %)) checks)
+   :fetches     (:fetches decl)
+   :external    (filterv #(= :external (:kind %)) checks)})
 
 (defn- describe
   "`x` for an error message: nil, a plain map, or a value of its type."
@@ -1459,24 +1431,7 @@
     {:draft   draft
      :values  values
      :plan    plan
-     :fetched {}
-     :failed  {}     ; check name -> failure entry
-     :order   []}))  ; failed check names, in the order they failed
-
-(defn- ran-and-failed?
-  "Whether `entry`, a failure entry, is of a check that ran: it returned a failure, or threw. A held check did neither."
-  [entry]
-  (or (contains? entry :returned) (contains? entry :threw)))
-
-(defn- roots-of
-  "The checks among `prereqs` that ran and failed, or nil. A held check did not run, so it holds nothing."
-  [st prereqs]
-  (seq (filter #(ran-and-failed? (get-in st [:failed %])) prereqs)))
-
-(defn- block
-  "`st` with the check `n` listed under `:blocked` of each of `roots`, the checks that held it."
-  [st n roots]
-  (reduce #(update-in %1 [:failed %2 :blocked] (fnil conj []) n) st roots))
+     :fetched {}}))
 
 (defn- call-check
   "`{:returned x}`, what the check fn `f` returned on `args`, or `{:threw e}` for the `Exception` its body threw. Only
@@ -1490,22 +1445,21 @@
        (catch Exception e
          {:threw e})))
 
-(defn- run-check [st {n :name, :keys [prereqs f doc reads fetches]}]
-  (if-let [roots (roots-of st prereqs)]
-    (block st n roots)
-    (let [result (call-check f (into (mapv (:values st) reads) (map (:fetched st)) fetches))]
-      (if (true? (:returned result))
-        st
-        (-> st
-            (assoc-in [:failed n] (assoc result :doc doc))
-            (update :order conj n))))))
+(declare invalid!)
+
+(defn- run-check!
+  "Run `check` on `st`, the state of the draft at `index` of `fn-name`'s call. Returns nil when it returns exactly
+  `true`; otherwise throws `::invalid` for it, so no later check runs."
+  [fn-name index st {:keys [f reads fetches], :as check}]
+  (let [result (call-check f (into (mapv (:values st) reads) (map (:fetched st)) fetches))]
+    (when-not (true? (:returned result))
+      (invalid! fn-name index st check result))))
 
 (defn- fetch-phase
-  "Run every fetch the drafts that passed their pure checks need, each once per plan across all of them, with each
-  distinct tuple of arguments once."
+  "Run every fetch the drafts need, each once per plan across all of them, with each distinct tuple of arguments
+  once. Every draft here passed its pure checks."
   [sts]
   (let [wanted (for [[i st] (map-indexed vector sts)
-                     :when  (empty? (:failed st))
                      fd     (get-in st [:plan :fetches])]
                  {:i i, :fd fd})
         tuple  (fn [{:keys [i fd]}] (mapv (:values (nth sts i)) (:reads fd)))]
@@ -1539,51 +1493,19 @@
      (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)]) wanted))))
 
 (defn- run-all
-  "Run the checks of every draft, and return the state of each. `fn-name` names the fn that got them."
+  "Run the checks of every draft, and return the state of each, or throw `::invalid` for the first check that fails.
+  Every draft is read and walked, then every draft's pure checks run, in draft order, then the fetches, then every
+  draft's external checks. `fn-name` names the fn that got them."
   [fn-name drafts]
   (let [walked (java.util.IdentityHashMap.)
-        ;; every draft is read and walked before any check runs
         sts    (mapv #(start fn-name % walked) drafts)
-        sts    (mapv #(reduce run-check % (get-in % [:plan :pure])) sts)
-        ;; a draft that failed a pure check fetches nothing, and its external checks are held
-        sts    (fetch-phase sts)]
-    (mapv #(reduce run-check % (get-in % [:plan :external])) sts)))
-
-(defn- failed-kinds
-  "The kinds, `:pure` or `:external`, of the checks that returned a failure or threw in `sts`. A held check did
-  neither: what holds it failed."
-  [sts]
-  (into #{}
-        (for [{:keys [plan failed]} sts
-              [n entry]             failed
-              :when                 (ran-and-failed? entry)]
-          (:kind ((:checks-by-name plan) n)))))
-
-(defn- failed-names
-  "Each check that returned a failure or threw in `st`, in the order they ran, as `[name check entry found-nothing]`:
-  the check of the plan, its failure entry, and the fetches it binds when every one of them found nothing."
-  [{:keys [failed order plan fetched]}]
-  (for [n order :when (ran-and-failed? (failed n))
-        :let [check (get (:checks-by-name plan) n)
-              fs    (:fetches check)]]
-    [n check (failed n) (when (and (seq fs) (every? #(nil? (get fetched %)) fs)) fs)]))
-
-(defn- threw-names
-  "The set of the checks that threw in `st`."
-  [{:keys [failed order]}]
-  (into #{} (filter #(contains? (failed %) :threw)) order))
-
-(defn- first-thrown
-  "The first exception a check threw in `sts`, in the order the checks ran: every draft's pure checks, in draft order,
-  then every draft's external checks. A draft whose pure check threw runs no external check. nil when none threw."
-  [sts]
-  (let [thrown (fn [kind]
-                 (for [{:keys [failed order plan]} sts
-                       n                           order
-                       :let                        [e (:threw (failed n))]
-                       :when                       (and e (= kind (:kind ((:checks-by-name plan) n))))]
-                   e))]
-    (first (concat (thrown :pure) (thrown :external)))))
+        each!  (fn [sts phase]
+                 (doseq [[i st] (map-indexed vector sts), check (get-in st [:plan phase])]
+                   (run-check! fn-name i st check)))]
+    (each! sts :pure)
+    (let [sts (fetch-phase sts)]
+      (each! sts :external)
+      sts)))
 
 (defn- truthy-hint
   "A hint for a check that returned `x`, a value that is truthy but not `true`, as `(seq xs)` does: it fails, which is
@@ -1607,7 +1529,7 @@
     (seq reads)
     (let [f (name (first reads))]
       (str " Guard its input with a pure check written before it, as in (pure ::" f "-number \"" f " is a number.\" ["
-           f "] (number? " f ")): a pure check that fails holds every later check that reads " f "."))
+           f "] (number? " f ")): a pure check that fails stops the parse before this one runs."))
 
     :else
     " Fix its body so that it returns true or false."))
@@ -1618,36 +1540,33 @@
   ((:make-parsed plan) values parse-token))
 
 (defn- invalid!
-  "Throws `::invalid` for `what`, naming each failed check of `named`, `[label check entry]` triples, with its doc and
-  what it threw: the first five, then how many more. The first exception a check threw in `sts` is the cause."
-  [what named sts data]
-  (let [shown  (take 5 named)
-        more   (- (count named) (count shown))
-        cause  (first-thrown sts)
-        thrown (when cause (first (filter (fn [[_ _ entry]] (identical? cause (:threw entry))) named)))]
-    (throw (ex-info (str "Invalid " what ": " (count named) (if (= 1 (count named)) " check" " checks") " failed: "
-                         (clojure.string/join ", " (map (fn [[label {:keys [doc]} entry found-nothing]]
-                                                         (if-let [^Throwable e (:threw entry)]
-                                                           (str label " (" doc ") threw " (.getSimpleName (class e))
-                                                                ": " (ex-message e))
-                                                           (str label " (" doc ")" (truthy-hint (:returned entry))
-                                                                (when found-nothing
-                                                                  ;; a fact, not a fix: true whether or not this is the
-                                                                  ;; check that tests for the row
-                                                                  (str ", and its fetch "
-                                                                       (clojure.string/join " and " found-nothing)
-                                                                       " found nothing")))))
-                                                       shown))
-                         (when (pos? more) (str ", and " more " more"))
-                         ". A draft parses only when every check returns exactly true."
-                         (if thrown
-                           (str " A check that throws met input that no check before it refused: "
-                                (first thrown) " threw." (threw-fix (second thrown)) " (:threw (ex-data e)) names"
-                                " every check that threw, and (:failures (ex-data e)) has what each returned or threw.")
-                           (str " Change the draft so they pass and parse again; (:failures (ex-data e)) has what each"
-                                " returned.")))
-                    (merge {:type ::invalid, :rule ::rule/checks-failed, :failed-kinds (failed-kinds sts)} data)
-                    cause))))
+  "Throws `::invalid` for `check`, the first that did not return exactly `true`, with `result`, `{:returned x}` or
+  `{:threw e}`, on `st`, the state of the draft at `index` of `fn-name`'s call. An exception the check threw is the
+  cause."
+  [fn-name index {:keys [draft plan fetched]} {n :name, :keys [doc kind fetches], :as check} {:keys [returned threw]}]
+  (let [found-nothing (when (and (seq fetches) (every? #(nil? (get fetched %)) fetches)) fetches)
+        what          (str "Invalid " (.getSimpleName ^Class (:parses-to plan))
+                           (when (= "pt/parse-all" fn-name) (str ", the draft at index " index " of pt/parse-all")))]
+    (throw (ex-info (str what ": the check " n " (" doc ")"
+                         (if threw
+                           (str " threw " (.getSimpleName (class threw)) ": " (ex-message threw) ". A check that"
+                                " throws met input that no check before it refused." (threw-fix check))
+                           (str " failed" (truthy-hint returned)
+                                ;; a fact, not a fix: true whether or not this is the check that tests for the row
+                                (when found-nothing
+                                  (str ", and its fetch " (clojure.string/join " and " found-nothing) " found nothing"))
+                                ". A draft parses only when every check returns exactly true, and parse stops at the"
+                                " first that does not. Change the draft so it passes and parse again.")))
+                    (cond-> {:type  ::invalid
+                             :rule  ::rule/check-failed
+                             :check n
+                             :doc   doc
+                             :kind  kind
+                             :draft (.getName (class draft))}
+                      threw                      (assoc :threw threw)
+                      (not threw)                (assoc :returned returned)
+                      (= "pt/parse-all" fn-name) (assoc :index index))
+                    threw))))
 
 ;;; ------------------------------------------------ API ------------------------------------------------
 
@@ -1660,59 +1579,37 @@
     (make-draft (assoc (read-draft draft) field v))))
 
 (defn parse-all
-  "Parse each draft. Returns a vector of parsed values aligned with `drafts`, or throws `::invalid` once with every
-  failure, keyed by the index of each draft that failed:
-
-  - `:failures`: index -> that draft's failures, shaped like [[parse]]'s.
-  - `:threw`: index -> the set of that draft's checks that threw, for each draft where one did; `{}` when none did.
-  - `:failed-kinds`: the kinds of check that failed or threw in any of them.
-
-  One draft's check that throws stops no other draft's checks. The first exception a check threw, in the order they
-  ran, is the cause. Each fetch runs once for the whole call, with each distinct tuple once, so parsing the parts of a
-  whole together costs one call per fetch. Exceptions out of a fetch, an `Error` and an `InterruptedException`
-  propagate. Throws `::bad-input` when `drafts` is a single draft, a map, or not a sequential collection."
+  "Parse each draft. Returns a vector of parsed values aligned with `drafts`, or throws `::invalid` for the first check
+  that fails, shaped like [[parse]]'s, with `:index`, the index of its draft. Every draft's pure checks run, in draft
+  order, before any fetch; then the fetches; then every draft's external checks. Each fetch runs once for the whole
+  call, with each distinct tuple once, so parsing the parts of a whole together costs one call per fetch. Exceptions
+  out of a fetch, an `Error` and an `InterruptedException` propagate. Throws `::bad-input` when `drafts` is a single
+  draft, a map, or not a sequential collection."
   [drafts]
   (when (or (map? drafts) (not (sequential? drafts)))
     (throw (ex-info (str "pt/parse-all got " (describe drafts) ". It takes a vector of drafts and returns a vector of"
                          " parsed values. Pass a vector, as in (pt/parse-all [draft]), or parse one draft with"
                          " (pt/parse draft).")
                     {:type ::bad-input, :rule ::rule/parse-all-not-a-vector, :got (some-> drafts class .getName)})))
-  (let [sts      (run-all "pt/parse-all" drafts)
-        failures (into (sorted-map) (keep-indexed (fn [i st] (some->> (not-empty (:failed st)) (vector i)))) sts)]
-    (when (seq failures)
-      (invalid! (str "drafts at indexes " (vec (keys failures)))
-                (for [i (keys failures), [n check entry found-nothing] (failed-names (nth sts i))]
-                  [(str n " in draft " i) check entry found-nothing])
-                sts
-                {:failures failures
-                 :threw    (into (sorted-map) (keep-indexed (fn [i st] (some->> (not-empty (threw-names st)) (vector i))))
-                                 sts)}))
-    (mapv issue sts)))
+  (mapv issue (run-all "pt/parse-all" drafts)))
 
 (defn parse
-  "Parse `draft`, running every check. Returns a new value of its parsed type. When a check fails or throws, throws
-  `::invalid` with:
+  "Parse `draft`, running its checks in order: pure checks, then fetches, then external checks, each in the order
+  written. Returns a new value of its parsed type. The first check that does not return exactly `true` stops the
+  parse: no check after it runs, and `parse` throws `::invalid` with:
 
-  - `:failures`: every failure, by check name: `{:doc :returned :blocked}`, or `{:doc :threw :blocked}` for a check
-    whose body threw an `Exception`, which `:threw` holds.
-  - `:threw`: the set of the checks that threw, `#{}` when none did. One that is not empty is a bug in a check, not
-    bad input.
-  - `:failed-kinds`: a set of `:pure` and `:external`, the kinds of check that failed or threw. A pure failure means
-    the input is malformed; an external one means a check of the world refused it.
+  - `:check`, `:doc` and `:kind` (`:pure` or `:external`) of that check. A pure failure means the input is malformed;
+    an external one means a check of the world refused it.
+  - `:returned`, what it returned, or `:threw`, the `Exception` its body threw, which is also the cause. A check that
+    threw is a bug in a check, not bad input.
   - `:draft`: the name of the draft's class.
 
-  A check that throws holds later checks as a failure does, and the other checks of its phase still run. The first
-  exception a check threw is the cause. Exceptions out of a fetch, an `Error` and an `InterruptedException`
-  propagate.
+  Exceptions out of a fetch, an `Error` and an `InterruptedException` propagate.
 
   Throws `::bad-input`, before any check runs, when `draft` is not a draft, or a field holds a value not known to be
   immutable, a draft, or a value `parse` did not issue."
   [draft]
-  (let [[st] (run-all "pt/parse" [draft])]
-    (when (seq (:failed st))
-      (invalid! (.getSimpleName ^Class (:parses-to (:plan st))) (failed-names st) [st]
-                {:draft (.getName (class draft)), :failures (:failed st), :threw (threw-names st)}))
-    (issue st)))
+  (issue (first (run-all "pt/parse" [draft]))))
 
 (defn- issued?
   "Whether `x` is a parsed value that holds the proof: one [[parse]] built. Its class must be one [[defparsed]]

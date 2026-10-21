@@ -29,11 +29,10 @@ This page lists what parsed-types promises, the test that pins each promise, its
 | A field may be named like any `clojure.core` function | The map type's methods call every function qualified, so no field shadows one | `fields-named-like-core-functions-test`, `a-field-cannot-replace-the-checks-test` |
 | Equality is a record's: same type, each field `=`, and for a parsed value the same proof | `equiv` checks the class and the proof, then compares fields with `=`, so `1.0M` equals `1.00M`. The hash reads only the fields | `equality-test`, `the-proof-is-not-a-key-test` |
 | A value prints with its type, never its proof | One `print-method` and one `pprint` dispatch on each library interface print `#ns.Type{...}`; `str` and `toString` return the same. A `defparsed` adds no method | `parse-test` |
-| `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to every `:blocked` and `:failed-kinds` |
-| Pure checks run in the order written, and a failure holds the later checks on its fields | Each pure check runs in its written place, held when a pure check before it that shares a field ran and failed. A held check didn't run, so it holds nothing and lists nothing under `:blocked`. `defparsed` refuses a pure check written before one on a proper subset of its fields | `pure-checks-run-in-the-order-written-test`, `a-held-check-holds-nothing-test`, `parse-matches-the-model` |
-| A check body that throws is recorded, and its phase keeps going | Each `Exception` a pure or external check's body throws becomes its failure, `{:doc :threw}`, and holds later checks as a failure does. The other checks of its phase run. `:threw` names the checks that threw, and the first exception, in run order, is the cause. An exception from a fetch or from the library, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-is-recorded-test`, `parse-all-records-a-thrown-check-per-draft-test`, `what-a-check-throws-that-is-not-recorded-test` |
-| External checks run in the order written, and a failure holds the later checks on its fetches | Each external check runs in its written place, held when an external check before it that binds a fetch it binds ran and failed or threw. One that binds no fetch holds nothing and is held by no external check. So a failed permission check written first keeps every later check on that row out of `:failures` | `transfer-test`, `parse-matches-the-model` |
-| Malformed input never reaches a fetch or an external check | A draft whose pure check failed or threw fetches nothing, and its external checks are held | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test` |
+| `parse` reports exactly what the declaration says | | `parse-matches-the-model`: against a model written by hand, down to which check fails first and what it returned |
+| Checks run in the order written, and the first failure stops the parse | Pure checks run in the order written, then the fetches, then external checks in the order written. The first check that returns anything but `true`, or throws, stops the parse: no check after it runs, so nothing runs after a failed permission check. `defparsed` refuses a pure check written before one on a proper subset of its fields, so the check that fails first names the root cause | `pure-checks-run-in-the-order-written-test`, `order-test`, `transfer-test`, `parse-matches-the-model` |
+| A check body that throws stops the parse as a failure does | Each `Exception` a pure or external check's body throws is reported as that check's failure: `:threw` holds it, and it is the cause. An exception from a fetch or from the library, an `Error`, and an `InterruptedException`, with the thread's interrupt flag set again, propagate | `a-check-that-throws-stops-the-parse-test`, `what-a-check-throws-that-is-not-recorded-test` |
+| Malformed input never reaches a fetch or an external check | A pure check that fails stops the parse before any fetch. `parse-all` runs every draft's pure checks before any fetch, so one malformed draft fetches nothing for the batch | `nothing-touches-the-world-until-every-pure-check-passes`, `order-test`, `batching-test` |
 | Each fetch runs once per declaration, with each tuple once, and answers every tuple | `parse-all` gathers the tuples of every draft in the call, per declaration and fetch, and deduplicates them; a missing answer throws `::bad-fetch`. So a parent built from `(pt/parse-all parts)` costs one call per fetch, not one per part | `parse-all-fetches-once-with-each-distinct-tuple`, `batching-test`, `payroll-test`, `a-fetch-must-answer-every-tuple-test` |
 | `parse-all` agrees with `parse` | Each draft's checks see only that draft | `parse-all-agrees-with-parse`, `parse-all-agrees-with-parse-across-declarations` |
 | A fetch may be a var | A var that holds a fn passes the load-time check and is called through, so `with-redefs` on it reaches the fetch | `a-fetch-may-be-a-var-test` |
@@ -72,7 +71,8 @@ The proof stops accidents, not forgers. These ways around it, and these gaps, ar
   passed can change later, so parse right before you act.
 - **An external check gets nil when a fetch found nothing.** A fetch returns nil for a tuple with no row, and every
   external check bound to that fetch gets the nil. Test for it in the first check written over that fetch, as in
-  `(some? row)`: when it fails, it holds the later checks over that fetch.
+  `(some? row)`: when it fails, no later check runs. A check that fails while every fetch it binds found nothing
+  says so in its message.
 
 ## Errors
 
@@ -89,11 +89,12 @@ pt/parse on it first, as in (pt/parse draft), and pass the result.
 The ex-data holds the same facts as data. When a key is not a field, the message suggests the nearest field, as in
 `Did you mean :account-id?`, and `:suggestion` holds it. `parsed-types.errors-test` has an example of every
 rule, and fails when `core.clj` has a rule with no example, an `ex-info` without a `:rule`, or a `throw` of anything
-but an `ex-info`. Class names in ex-data are strings, so ex-data can be serialized, but for the exception a `:threw` entry holds.
+but an `ex-info`. Class names in ex-data are strings, so ex-data can be serialized, except for the exception `:threw`
+holds.
 
 | `:type` | Thrown when | Other ex-data |
 |---|---|---|
-| `::invalid` | `parse` or `parse-all` ran the checks and some failed or threw. The message names the first five with their docs and what each threw, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:failures`, `:threw`, `:failed-kinds`, and `:draft` from `parse` |
+| `::invalid` | `parse` or `parse-all` ran a check that failed or threw, and stopped there. The message names the check, its doc and what it threw, and for a result that is truthy but not `true`, says to wrap the body in `(boolean ...)` | `:check`, `:doc`, `:kind`, `:returned` or `:threw`, `:draft`, and `:index` from `parse-all` |
 | `::not-parsed` | `pt/parsed`, `match` or `draft-of` got a value `parse` didn't issue | `:expected`, `:got` |
 | `::stale-type` | a class doesn't match but its name does: one side is from before a REPL re-evaluated a `defparsed` | `:class`, and `:ns` where it applies |
 | `::cannot-change` | a change to a parsed value, a `dissoc`, `with-meta` or `empty` on a draft, or a `java.util.Map` mutator on either | `:parsed` or `:draft`, `:op`, `:key` |
@@ -104,17 +105,13 @@ but an `ex-info`. Class names in ex-data are strings, so ex-data can be serializ
 
 For `::invalid`:
 
-- `:failures` maps each failed or held check's name to `{:doc :returned :blocked}`. `:returned` is what the check
-  returned. A check whose body threw has `:threw`, the exception, instead. A held check has neither. `:blocked` lists
-  the checks a failure held.
-- `:threw` is the set of the checks that threw, `#{}` when none did. One that is not empty means a check has a bug,
-  not that the input is bad. The ex-info's cause is the first exception thrown, in the order the checks ran.
-- `:failed-kinds` is a set of `:pure` and `:external`: the kinds of check that failed or threw. A pure failure
-  means the input is malformed. An external one means a check of the world refused it.
-- `:draft` is the name of the draft's class, from `parse` only.
-
-From `parse-all`, `:failures` maps the index of each draft that failed to its failures, and `:threw` maps the index
-of each draft where a check threw to that set, `{}` when none did.
+- `:check` and `:doc` are the name and doc of the check that failed. It is the first that did not return exactly
+  `true`, in the order the checks ran.
+- `:kind` is `:pure` or `:external`. A pure failure means the input is malformed. An external one means a check of
+  the world refused it.
+- `:returned` is what the check returned. A check whose body threw has `:threw`, the exception, instead, which is
+  also the cause. A check that threw has a bug; the input may be fine.
+- `:draft` is the name of the draft's class. From `parse-all`, `:index` is the index of its draft.
 
 ### Every rule
 
@@ -178,7 +175,7 @@ Parsing (`::bad-input`, `::invalid`, `::bad-fetch`):
 - `value-too-deep`: a field nests deeper than 1000 levels.
 - `draft-in-field`: a field holds a draft. Fix: `(pt/parse d)`, or `(pt/parse-all ds)` for a vector.
 - `unissued-in-field`: a field holds a value of a parsed type that `parse` didn't issue.
-- `checks-failed`: some check returned anything but `true`, or threw. Fix for a pure check that threw: a pure check
+- `check-failed`: a check returned anything but `true`, or threw, and the parse stopped there. Fix for a pure check that threw: a pure check
   written before it that guards its input, as in `(pure ::amount-number "amount is a number." [amount] (number? amount))`.
 - `fetch-missing-tuples`: a fetch returned no map, or no entry for some tuple.
 
@@ -238,17 +235,12 @@ with `not-known-immutable`: convert it to an accepted value, as in `(str x)`.
   parsed value can report that it contains an equal plain map.
 - **No empty version.** `empty` throws, and so does anything built on `(into (empty x) ...)`, such as
   `clojure.walk`. Use `(into {} x)` for a plain map.
-- **What a held check reports.** A held check didn't run, so it has no `:returned`, and it holds no other check: a
-  later check that shares a field with it runs, unless a check that ran and failed holds it too. When a pure check
-  fails, no fetch and no external check of that draft runs. Each external check is listed under `:blocked` of the
-  pure checks that ran and failed. When an external check fails, each later one that binds a fetch it binds is
-  listed under its `:blocked`.
 - **Depth.** Nesting deeper than 1000 levels is refused (`value-too-deep`). The message and `:path` show the first 8
   steps of a longer path, and `:depth` its length.
 - **Cost.** The walk costs about 25 us for 1,000 numbers in 100 vectors; an issued value in a field costs one step.
   `clojure -M:bench` prints the current numbers.
 - **Fetch calls.** One call per declaration and fetch for the whole `parse-all`, with each distinct tuple once.
-  Drafts whose pure check failed or threw add no tuple.
+  A pure failure in any draft stops the call before any fetch.
 - **No-op changes.** `(merge p {})` and `(conj p nil)` return `p` itself, which stays parsed.
 - **`pt/draft` evaluates its values as Clojure evaluates the same map literal:** in the order written for up to 8
   keys, and in hash order beyond, since the reader makes a hash map of a larger literal.

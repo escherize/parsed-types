@@ -73,34 +73,23 @@
       (is (= {:user-id :ada, :from-id 1, :to-id 2, :amount 30M} (into {} t)))
       (transfer! t)
       (is (= [70M 40M] (map #(get-in @accounts [% :balance]) [1 2])))))
-  (testing "malformed input fails pure checks, reports every failure, and fetches nothing"
+  (testing "malformed input fails the first pure check that refuses it, and fetches nothing"
     (reset! fetched [])
-    (is (= {:failed-kinds #{:pure}
-            :failures    {::amount-positive {:doc      "The amount is a positive decimal."
-                                             :returned false
-                                             :blocked  [::source-exists ::destination-exists ::owns-source
-                                                        ::funds-available]}
-                          ::two-accounts    {:doc      "Money moves between two different accounts."
-                                             :returned false
-                                             :blocked  [::source-exists ::destination-exists ::owns-source
-                                                        ::funds-available]}}}
-           (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 1, :amount 30}))) [:failed-kinds :failures])))
+    (is (= {:kind :pure, :check ::amount-positive, :returned false}
+           (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 1, :amount 30}))) [:kind :check :returned])))
     (is (= [] @fetched)))
-  (testing "a missing account, and someone else's account, fail external checks"
-    (let [missing (thrown-data #(pt/parse (pt/draft Transfer {:user-id :ada, :from-id 9, :to-id 2, :amount 1M})))]
-      (is (= #{:external} (:failed-kinds missing)))
-      (is (contains? (:failures missing) ::source-exists))
-      (is (re-find #"source-exists \(.*?\), and its fetch :parsed-types.bank-test/\S+ found nothing" (try (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 9, :to-id 2, :amount 1M})) nil
-                                         (catch clojure.lang.ExceptionInfo e (ex-message e))))))
-    (is (= {:failed-kinds #{:external}
-            ;; held: a failed permission check keeps the balance of someone else's account out of the report
-            :failures     {::owns-source {:doc      "The user owns the source account."
-                                          :returned false
-                                          :blocked  [::funds-available]}}}
-           (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :bob, :from-id 1, :to-id 2, :amount 1M}))) [:failed-kinds :failures]))))
+  (testing "a missing account fails the existence check, and the message says the fetch found nothing"
+    (is (= {:kind :external, :check ::source-exists}
+           (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :ada, :from-id 9, :to-id 2, :amount 1M}))) [:kind :check])))
+    (is (re-find #"source-exists \(.*?\) failed, and its fetch :parsed-types.bank-test/source found nothing"
+                 (try (pt/parse (pt/draft Transfer {:user-id :ada, :from-id 9, :to-id 2, :amount 1M})) nil
+                      (catch clojure.lang.ExceptionInfo e (ex-message e))))))
+  (testing "someone else's account fails the permission check, and nothing after it runs"
+    ;; so the balance of an account the user may not see is never checked, and never reported
+    (is (= {:kind :external, :check ::owns-source, :returned false}
+           (select-keys (thrown-data #(pt/parse (pt/draft Transfer {:user-id :bob, :from-id 1, :to-id 2, :amount 1000M}))) [:kind :check :returned]))))
   (testing "more than the balance fails an external check (bob's account holds 40M after the first transfer)"
-    (is (= {::funds-available {:doc "The source account holds the amount.", :returned false}}
-           (:failures (thrown-data #(pt/parse (pt/draft Transfer {:user-id :bob, :from-id 2, :to-id 1, :amount 41M})))))))
+    (is (= ::funds-available (:check (thrown-data #(pt/parse (pt/draft Transfer {:user-id :bob, :from-id 2, :to-id 1, :amount 41M})))))))
   (testing "the sink refuses a transfer built by hand"
     (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (Transfer. :ada 1 2 1000M nil))))))
     (is (= ::pt/not-parsed (:type (thrown-data #(transfer! (pt/draft Transfer {:user-id :ada, :from-id 1, :to-id 2, :amount 1000M}))))))))
@@ -147,18 +136,13 @@
       (is (= [[1] [2 3] [1]] @fetched) "the transfers' sources, their destinations, then the payroll's source")
       (run-payroll! p)
       (is (= [70M 20M 20M] (map #(get-in @accounts [% :balance]) [1 2 3])))))
-  (testing "a malformed transfer fails parse-all under its index, and only the well-formed transfer fetches"
+  (testing "a malformed transfer fails parse-all with its index, and nothing fetches"
     (reset! fetched [])
-    (is (= {:failed-kinds #{:pure}
-            :failures     {1 {::amount-positive {:doc      "The amount is a positive decimal."
-                                                 :returned false
-                                                 :blocked  [::source-exists ::destination-exists ::owns-source
-                                                            ::funds-available]}}}}
-           (select-keys (thrown-data #(payroll :ada 1  2 10M  3 -5M)) [:failed-kinds :failures])))
-    (is (= [[1] [2]] @fetched)))
+    (is (= {:kind :pure, :check ::amount-positive, :index 1}
+           (select-keys (thrown-data #(payroll :ada 1  2 10M  3 -5M)) [:kind :check :index])))
+    (is (= [] @fetched)))
   (testing "each transfer fits the balance, but together they don't: only the payroll can see that"
-    (is (= {::covers-total {:doc "The account holds the sum of every transfer.", :returned false}}
-           (:failures (thrown-data #(pt/parse (payroll :ada 1  2 60M  3 60M)))))))
+    (is (= ::covers-total (:check (thrown-data #(pt/parse (payroll :ada 1  2 60M  3 60M)))))))
   (testing "a payroll of 50 transfers, parsed with parse-all, fetches once per fetch: no call per transfer"
     (reset! accounts (into {1 {:owner :ada, :balance 1000M}} (for [i (range 2 52)] [i {:owner :bob, :balance 0M}])))
     (reset! fetched [])

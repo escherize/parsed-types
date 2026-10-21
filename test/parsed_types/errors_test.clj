@@ -34,15 +34,6 @@
   (external ::row-ok "The row is ok." [] [row ::row] (some? row))
   (fetch ::row [id] vector-rows))
 
-(pt/defparsed Seven [a b c d e f g]
-  (pure ::a "a is an integer." [a] (int? a))
-  (pure ::b "b is an integer." [b] (int? b))
-  (pure ::c "c is an integer." [c] (int? c))
-  (pure ::d "d is an integer." [d] (int? d))
-  (pure ::e "e is an integer." [e] (int? e))
-  (pure ::f "f is an integer." [f] (int? f))
-  (pure ::g "g is an integer." [g] (int? g)))
-
 (pt/defparsed Throwy [amount]
   (pure ::amount-positive "The amount is positive." [amount] (pos? amount)))
 
@@ -200,12 +191,14 @@
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
    [:fetch-missing-tuples #(pt/parse (pt/draft Odd {:id 1})) "returned a PersistentVector, not a map"
     "(into {} (map (fn [t] [t (lookup t)])) tuples)"]
-   [:checks-failed #(pt/parse (pt/draft Debit {:user-id 1, :account-id :x, :amount -5})) "Invalid Debit: 2 checks failed"
-    ":parsed-types.errors-test/amount-positive (The amount is positive.)" "Change the draft so they pass"]
-   [:checks-failed #(pt/parse (pt/draft Throwy {:amount :x}))
-    "Invalid Throwy: 1 check failed: :parsed-types.errors-test/amount-positive (The amount is positive.) threw ClassCastException: "
-    "(pure ::amount-number \"amount is a number.\" [amount] (number? amount))" "(:threw (ex-data e)) names every check that threw"]
-   [:checks-failed #(pt/parse (pt/draft ThrowyRow {:id 1}))
+   [:check-failed #(pt/parse (pt/draft Debit {:user-id 1, :account-id :x, :amount -5}))
+    "Invalid Debit: the check :parsed-types.errors-test/amount-positive (The amount is positive.) failed."
+    "parse stops at the first that does not" "Change the draft so it passes"]
+   [:check-failed #(pt/parse (pt/draft Throwy {:amount :x}))
+    "Invalid Throwy: the check :parsed-types.errors-test/amount-positive (The amount is positive.) threw ClassCastException: "
+    "A check that throws met input that no check before it refused."
+    "(pure ::amount-number \"amount is a number.\" [amount] (number? amount))"]
+   [:check-failed #(pt/parse (pt/draft ThrowyRow {:id 1}))
     "(The balance is positive.) threw NullPointerException: " "guard it in the body, as in (and (some? row) (:ok? row))"]
    ;; sinks
    [:not-a-parsed-type #(pt/parsed :x real) "pt/parsed got :x as its type" "(pt/parsed Debit x)"]
@@ -339,13 +332,6 @@
   (is (str/includes? (:message (error #(.clear ^java.util.Map draft))) "clear on a DebitDraft"))
   (is (str/includes? (:message (error #(.clear ^java.util.Map draft))) "(assoc d :field v)")))
 
-(deftest invalid-names-the-first-five-checks-test
-  (is (str/includes? (:message (error #(pt/parse (pt/draft Seven {:a :a, :b :b, :c :c, :d :d, :e :e, :f :f, :g :g}))))
-                     "Invalid Seven: 7 checks failed: :parsed-types.errors-test/a (a is an integer.), ")
-      "each failed check with its doc")
-  (is (str/includes? (:message (error #(pt/parse (pt/draft Seven {:a :a, :b :b, :c :c, :d :d, :e :e, :f :f, :g :g}))))
-                     "(e is an integer.), and 2 more.")))
-
 (pt/defparsed Truthy [k]
   (pure ::returns "Returns the value k names." [k]
         (get {:seq (seq [1 2]), :num 3, :lazy (range), :nil nil, :false false, :str "too long", :map {:length 9}} k)))
@@ -354,7 +340,7 @@
   (testing "a seq is truthy but not true: the message says to wrap the body in (boolean ...)"
     (doseq [[k shown] [[:seq "(1 2)"] [:lazy "(0 1 2 3 4 ...)"]]]
       (is (str/includes? (:message (error #(pt/parse (pt/draft Truthy {:k k}))))
-                         (str "(Returns the value k names.), which returned " shown ", which is truthy but not true;"
+                         (str "(Returns the value k names.) failed, which returned " shown ", which is truthy but not true;"
                               " wrap the body in (boolean ...)")))))
   (testing "and the fix passes"
     (is (some? ((compiling '(do (pt/defparsed Truthy2 [xs] (pure ::xs-seq "Wrapped." [xs] (boolean (seq xs))))
@@ -507,8 +493,9 @@
                               (catch clojure.lang.ExceptionInfo e e)))]
       (is (some? guard))
       (is (= ::pt/invalid (:type data)))
-      (is (= #{} (:threw data)) "nothing throws")
-      (is (= [::amount-positive] (get-in data [:failures ::amount-number :blocked])) "the guard holds the check")))
+      (is (not (contains? data :threw)) "nothing throws")
+      (is (= {:check ::amount-number, :returned false} (select-keys data [:check :returned]))
+          "the guard fails first, so the check it guards never runs")))
   (testing "an external check that throws on a fetch that found nothing: the guard the message names returns false"
     (let [e (try ((compiling '(do (pt/defparsed ThrowyRow2 [id]
                                     (external ::ok "The row is ok." [] [row ::row] (and (some? row) (:ok? row)))
@@ -516,7 +503,7 @@
                                   (pt/parse (pt/draft ThrowyRow2 {:id 1})))))
                  nil
                  (catch clojure.lang.ExceptionInfo e e))]
-      (is (= {:type ::pt/invalid, :threw #{}} (select-keys (ex-data e) [:type :threw])))))
+      (is (= {:type ::pt/invalid, :check ::ok, :returned false} (select-keys (ex-data e) [:type :check :returned :threw])))))
   (testing "parse of a value parse issued says it is already parsed"
     (is (str/includes? (:message (error #(pt/parse real))) "It is already parsed: pass it as it is"))))
 
