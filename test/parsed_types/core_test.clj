@@ -94,7 +94,7 @@
             :check    ::may-write-card
             :doc      "User 1 may write the card."
             :kind     :external
-            :returned false
+            
             :parsed   "parsed_types.core_test.RenameCard"}
            (thrown-data #(pt/parse RenameCard {:user-id 1, :card-id 3, :title "New"})))))
   (testing "who is acting is a field: the same card, another user"
@@ -554,9 +554,9 @@
       (is (= {:type ::pt/invalid, :check ::first-throws, :kind :external} (select-keys data [:type :check :kind])))
       (is (= "first" (ex-message (ex-cause e))))
       (is (= [::first-throws] (remove vector? (runs #(thrown (fn [] (pt/parse Remote {:id 1})))))))))
-  (testing "no check threw: there is :returned and no :threw"
+  (testing "no check threw: there is no :threw, and an external check's result is left out"
     (let [data (ex-data (thrown #(pt/parse Remote {:id 4})))]
-      (is (= {:check ::id-is-3, :returned false} (select-keys data [:check :returned :threw])))))
+      (is (= {:check ::id-is-3} (select-keys data [:check :returned :threw])))))
   (testing "the message names what the check threw"
     (is (str/includes? (ex-message (thrown #(pt/parse Remote {:id 1})))
                        ":parsed-types.core-test/first-throws (Throws for id 1.) threw IllegalStateException: first")))

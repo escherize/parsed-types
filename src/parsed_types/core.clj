@@ -114,8 +114,10 @@
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
   (java.util.concurrent.ConcurrentHashMap.))
 
-;; Parsed class name -> the fetch fns its `defparsed` evaluated and checked before defining any class, for `register!`
-;; to take once the classes exist. A failed `defparsed` leaves its entry, which the next one replaces.
+;; Expansion token -> the fetch fns its `defparsed` evaluated and checked before defining any class, for `register!`
+;; to take once the class exists. The token is made once per expansion, so two evaluations of one `defparsed` on two
+;; threads never take each other's fetches. A `defparsed` that fails between the two leaves its entry: a REPL-only
+;; leak of one vector.
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap pending
   (java.util.concurrent.ConcurrentHashMap.))
 
@@ -865,6 +867,16 @@
                            (filter (comp '#{pure external} first) clauses))
          names       (concat (map :name checks) (map :name fetches))
          parsed-class-name (str (namespace-munge *ns*) "." parsed-name)]
+     ;; pure checks run before every fetch and external check, so the source must show them first
+     (when-let [[ext pure] (first (for [[i c] (map-indexed vector clauses)
+                                         :when (= 'external (first c))
+                                         p     (drop (inc i) clauses)
+                                         :when (= 'pure (first p))]
+                                     [(second c) (second p)]))]
+       (syntax-error! &form ::rule/pure-after-external
+                      (str "the pure check " (pr-str pure) " is written after the external check " (pr-str ext) ". Pure"
+                           " checks run before any fetch or external check, so written after one it would run before"
+                           " it, though the source shows it after. Move " (pr-str pure) " before " (pr-str ext) ".")))
      (when-not (apply distinct? ::sentinel names)
        (syntax-error! &form ::rule/name-used-twice
                       (str "a check or fetch name is used twice: "
@@ -885,19 +897,20 @@
      (claim-class-name! (ns-name *ns*) parsed-name parsed-class-name false)
      ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
      ;; every class as it was. The private fns through `var`.
+     (let [token (str parsed-class-name "#" (gensym "expansion"))]
      `(do
         ;; the fetch fns, evaluated once and checked before any class is defined
-        ((var stage!) ~parsed-class-name
+        ((var stage!) ~parsed-class-name ~token
                       '~(mapv #(select-keys % [:name :reads]) fetches) [~@(map :f fetches)])
         ;; before the deftype, which is what records the claim
         ((var claim-class-name!) '~(ns-name *ns*) '~parsed-name ~parsed-class-name true)
         ~(defparsed-type parsed-name fields)
         ;; only this expansion may record a plan
-        ((var register!) ~parsed-name
+        ((var register!) ~parsed-name ~token
                          {:checks  ~checks
                           :fetches '~(mapv #(select-keys % [:name :reads]) fetches)}
                          ~(builders parsed-name fields))
-        ~parsed-name))))
+        ~parsed-name)))))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
 
@@ -912,9 +925,9 @@
   "Check what [[defparsed]] cannot see when it expands, only when it loads, before it defines any class: a fetch that
   is not a fn, or a var that holds one. A var is called through, so `with-redefs` on it reaches the fetch. Throws
   `::bad-declaration`, so a `defparsed` that fails here changes nothing. Then keep `fetch-fns` for [[register!]].
-  `fetches` holds each fetch's `:name` and `:reads`, in the order of `fetch-fns`. Called by the expansion of
-  [[defparsed]]."
-  [parsed-class-name fetches fetch-fns]
+  `fetches` holds each fetch's `:name` and `:reads`, in the order of `fetch-fns`; `token` names this expansion. Called
+  by the expansion of [[defparsed]]."
+  [parsed-class-name token fetches fetch-fns]
   (doseq [[{n :name, :keys [reads]} f] (map vector fetches fetch-fns)]
     (when-not (or (fn? f) (and (var? f) (fn? @f)))
       (bad-declaration! parsed-class-name ::rule/fetch-not-fn
@@ -923,7 +936,7 @@
                              " it fetches, or a var that holds one, as in (fetch " n " " (mapv symbol reads)
                              " rows-by-id) or (fetch " n " " (mapv symbol reads) " #'rows-by-id).")
                         {:name n, :got (some-> f class .getName)})))
-  (.put pending parsed-class-name fetch-fns)
+  (.put pending token fetch-fns)
   nil)
 
 (defn- compile-plan
@@ -949,13 +962,23 @@
 
 (defn- register!
   "Build the plan of `parsed-type`, and record it, with the `builders` [[defparsed]] generated and the fetch fns
-  [[stage!]] kept. Called by the expansion of [[defparsed]], when it loads, after its `deftype`."
-  [parsed-type decl builders]
-  (let [fetch-fns (.remove pending (.getName ^Class parsed-type))
-        decl      (update decl :fetches #(mapv (fn [fd f] (assoc fd :f f)) % fetch-fns))
+  [[stage!]] kept under `token`. Throws `::bad-declaration`, recording nothing, when those fetch fns are missing or
+  not one per declared fetch: a type is never registered with fewer fetches than its declaration names. Called by the
+  expansion of [[defparsed]], when it loads, after its `deftype`."
+  [parsed-type token decl builders]
+  (let [fetch-fns (.remove pending token)
+        n         (.getSimpleName ^Class parsed-type)]
+    (when-not (and (vector? fetch-fns) (= (count fetch-fns) (count (:fetches decl))))
+      (bad-declaration! (.getName ^Class parsed-type) ::rule/fetches-not-staged
+                        (str "the defparsed " n " lost its fetch fns between staging them and registering the type,"
+                             " which happens when one defparsed is evaluated on two threads at once. A type is"
+                             " registered only with every fetch its declaration names. Evaluate the defparsed " n
+                             " again, on one thread, or reload its namespace.")
+                        {:token token}))
+  (let [decl      (update decl :fetches #(mapv (fn [fd f] (assoc fd :f f)) % fetch-fns))
         plan      (merge (compile-plan parsed-type (:fields builders) decl) builders)]
     (.put registry parsed-type plan)
-    (.put latest (.getName ^Class parsed-type) parsed-type)))
+    (.put latest (.getName ^Class parsed-type) parsed-type))))
 
 (declare issued? check-type!)
 
@@ -1302,18 +1325,14 @@
       (invalid! fn-name index st check result))))
 
 (defn- fetch-phase
-  "Run every fetch the inputs need, each once across all of them, with each distinct tuple of arguments once. Every
-  input here passed its pure checks."
+  "Run every fetch of the plan the inputs share, in the order the declaration writes them, each once across all of
+  them, with each distinct tuple of arguments once. Every input here passed its pure checks."
   [sts]
-  (let [wanted (for [[i st] (map-indexed vector sts)
-                     fd     (get-in st [:plan :fetches])]
-                 {:i i, :fd fd})
-        tuple  (fn [{:keys [i fd]}] (mapv (:values (nth sts i)) (:reads fd)))]
+  (let [tuple (fn [fd st] (mapv (:values st) (:reads fd)))]
     (reduce
-     (fn [sts [_ ws]]
-       (let [{fd :fd} (first ws)
-             tuples   (into [] (comp (map tuple) (distinct)) ws)
-             result   ((:f fd) tuples)]
+     (fn [sts fd]
+       (let [tuples (into [] (comp (map #(tuple fd %)) (distinct)) sts)
+             result ((:f fd) tuples)]
          (when-let [missing (seq (remove #(and (map? result) (contains? result %)) tuples))]
            (throw (ex-info (if (map? result)
                              (str "Fetch " (:name fd) " returned no entry for " (vec missing)
@@ -1331,12 +1350,10 @@
                             :rule    ::rule/fetch-missing-tuples
                             :fetch   (:name fd)
                             :missing (vec missing)})))
-         (reduce (fn [sts w]
-                   (assoc-in sts [(:i w) :fetched (:name fd)] (get result (tuple w))))
-                 sts ws)))
+         (mapv (fn [st] (assoc-in st [:fetched (:name fd)] (get result (tuple fd st)))) sts)))
      sts
-     ;; one call per fetch per plan: the same fetch name in two declarations is two fetches
-     (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)]) wanted))))
+     ;; every input of one call has the same plan: parse-all takes one type
+     (get-in sts [0 :plan :fetches]))))
 
 (defn- run-all
   "Run the checks of every map in `ms`, inputs of `type`, and return the state of each, or throw `::invalid` for the
@@ -1359,12 +1376,19 @@
 (defn- truthy-hint
   "A hint for a check that returned `x`, a value that is truthy but not `true`, as `(seq xs)` does: it fails, which is
   rarely what the body meant. Empty for nil, false, a string or a map, which a check returns on purpose to say why it
-  failed, and for a number, which `(boolean ...)` would turn into a check that always passes."
-  [x]
+  failed, and for a number, which `(boolean ...)` would turn into a check that always passes.
+
+  It names only the class of `x` when `external?`, since an external check's result can hold data the caller may not
+  see, and when `x` is a lazy value not yet realized, which printing would realize: that runs code, and can throw."
+  [x external?]
   (if (or (not x) (true? x) (string? x) (map? x) (number? x))
     ""
-    (str ", which returned " (binding [*print-length* 5, *print-level* 3] (pr-str x)) ", which is truthy but not"
-         " true; wrap the body in (boolean ...)")))
+    (let [class-only (str "a " (.getName (class x)))
+          shown      (if (or external? (and (instance? clojure.lang.IPending x) (not (realized? x))))
+                       class-only
+                       (try (binding [*print-length* 5, *print-level* 3] (pr-str x))
+                            (catch Exception _ class-only)))]
+      (str ", which returned " shown ", which is truthy but not true; wrap the body in (boolean ...)"))))
 
 (defn- threw-fix
   "The fix for `check`, a check of a plan that threw: for a pure check, a pure check written before it that guards its
@@ -1403,7 +1427,7 @@
                                   " A field may hold parsed values, and a check reads one through pt/parsed too.")
                              (str " threw " (.getSimpleName (class threw)) ": " (ex-message threw) ". A check that"
                                   " throws met input that no check before it refused." (threw-fix check)))
-                           (str " failed" (truthy-hint returned)
+                           (str " failed" (truthy-hint returned (= :external kind))
                                 ;; a fact, not a fix: true whether or not this is the check that tests for the row
                                 (when found-nothing
                                   (str ", and its fetch " (clojure.string/join " and " found-nothing) " found nothing"))
@@ -1416,7 +1440,8 @@
                              :kind  kind
                              :parsed (.getName ^Class (:parses-to plan))}
                       threw                      (assoc :threw threw)
-                      (not threw)                (assoc :returned returned)
+                      ;; never what an external check returned: it can hold fetched data the caller may not see
+                      (and (not threw) (= :pure kind)) (assoc :returned returned)
                       (= "pt/parse-all" fn-name) (assoc :index index))
                     threw))))
 
@@ -1473,8 +1498,9 @@
 
   - `:check`, `:doc` and `:kind` (`:pure` or `:external`) of that check. A pure failure means the input is malformed;
     an external one means a check of the world refused it.
-  - `:returned`, what it returned, or `:threw`, the `Exception` its body threw, which is also the cause. A check that
-    threw is a bug in a check, not bad input.
+  - `:returned`, what a pure check returned, or `:threw`, the `Exception` a check's body threw, which is also the
+    cause. A check that threw is a bug in a check, not bad input. What an external check returned is left out, and
+    the message names only its class: it can hold fetched data the caller may not see.
   - `:parsed`: the name of the parsed type's class.
 
   Exceptions out of a fetch, an `Error` and an `InterruptedException` propagate.

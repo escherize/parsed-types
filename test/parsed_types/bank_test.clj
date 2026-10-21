@@ -86,7 +86,8 @@
                       (catch clojure.lang.ExceptionInfo e (ex-message e))))))
   (testing "someone else's account fails the permission check, and nothing after it runs"
     ;; so the balance of an account the user may not see is never checked, and never reported
-    (is (= {:kind :external, :check ::owns-source, :returned false}
+    ;; and what the check returned is left out: an external check's result can hold data the caller may not see
+    (is (= {:kind :external, :check ::owns-source}
            (select-keys (thrown-data #(pt/parse Transfer {:user-id :bob, :from-id 1, :to-id 2, :amount 1000M})) [:kind :check :returned]))))
   (testing "more than the balance fails an external check (bob's account holds 40M after the first transfer)"
     (is (= ::funds-available (:check (thrown-data #(pt/parse Transfer {:user-id :bob, :from-id 2, :to-id 1, :amount 41M}))))))

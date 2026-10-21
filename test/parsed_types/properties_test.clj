@@ -197,13 +197,14 @@
     (or (some (fn [[kind n doc f]]
                 (let [r (f)]
                   (when-not (true? r)
-                    {:type     ::pt/invalid
-                     :rule     :parsed-types.rule/check-failed
-                     :check    n
-                     :doc      doc
-                     :kind     kind
-                     :returned r
-                     :parsed   "parsed_types.properties_test.Triple"})))
+                    (cond-> {:type     ::pt/invalid
+                             :rule     :parsed-types.rule/check-failed
+                             :check    n
+                             :doc      doc
+                             :kind     kind
+                             :parsed   "parsed_types.properties_test.Triple"}
+                      ;; never what an external check returned
+                      (= :pure kind) (assoc :returned r)))))
               checks)
         {:ok (into {} fields)})))
 

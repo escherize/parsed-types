@@ -653,3 +653,89 @@
                        ['[parse-proof] #"reserves the field name parse-proof"]
                        ['[parse_proof] #"reserves the field name parse-proof"]]]
     (is (re-find re (str (compile-error (list 'pt/defparsed 'Limits fields)))))))
+
+;;; Found in review of v0.3.1
+
+(defn- staged-rows [tuples] (into {} (map (fn [t] [t :row])) tuples))
+
+(deftest two-evaluations-of-one-defparsed-never-lose-its-fetches-test
+  ;; Two threads evaluating one defparsed run the forms of its expansion interleaved. Run them in that order on one
+  ;; thread: stage A, stage B, then the rest of A, then the rest of B.
+  (let [form   '(pt/defparsed Raced [id]
+                  (external ::row-found "The row was fetched." [] [row ::row] (= :row row))
+                  (fetch ::row [id] staged-rows))
+        [_ & a] (binding [*ns* (the-ns 'parsed-types.defparsed-test)] (macroexpand-1 form))
+        [_ & b] (binding [*ns* (the-ns 'parsed-types.defparsed-test)] (macroexpand-1 form))]
+    (eval-here (first a))
+    (eval-here (first b))
+    (doseq [f (rest a)] (eval-here f))
+    (doseq [f (rest b)] (eval-here f))
+    (testing "the type is registered with its fetch, so the external check sees the row"
+      (is (= {:id 1} (pt/parsed (eval-here 'Raced) (pt/parse (eval-here 'Raced) {:id 1})))))
+    (testing "a register with nothing staged refuses, and never registers a type without its fetches"
+      (is (= :parsed-types.rule/fetches-not-staged
+             (:rule (thrown #(#'pt/register! (eval-here 'Raced) "never staged"
+                                             {:checks [] :fetches [{:name ::row :reads [:id]}]} {}))))))))
+
+(def ^:private fetch-calls (atom []))
+
+(defn- logging-fetch [k] (fn [tuples] (swap! fetch-calls conj k) (into {} (map (fn [t] [t true])) tuples)))
+
+(def f1 (logging-fetch 1)) (def f2 (logging-fetch 2)) (def f3 (logging-fetch 3)) (def f4 (logging-fetch 4))
+(def f5 (logging-fetch 5)) (def f6 (logging-fetch 6)) (def f7 (logging-fetch 7)) (def f8 (logging-fetch 8))
+(def f9 (logging-fetch 9))
+
+(pt/defparsed NineFetches [x]
+  (fetch ::f1 [x] f1) (fetch ::f2 [x] f2) (fetch ::f3 [x] f3) (fetch ::f4 [x] f4) (fetch ::f5 [x] f5)
+  (fetch ::f6 [x] f6) (fetch ::f7 [x] f7) (fetch ::f8 [x] f8) (fetch ::f9 [x] f9))
+
+(deftest fetches-run-in-the-order-written-test
+  (reset! fetch-calls [])
+  (pt/parse NineFetches {:x 1})
+  (is (= [1 2 3 4 5 6 7 8 9] @fetch-calls) "past 8 fetches too, where a hash map would reorder them"))
+
+(deftest a-pure-check-after-an-external-check-does-not-compile-test
+  (is (re-find #"the pure check :parsed-types.defparsed-test/p is written after the external check"
+               (str (compile-error '(pt/defparsed Late [x]
+                                      (external ::e "e" [x] true)
+                                      (pure ::p "p" [x] true))))))
+  (is (nil? (compile-error '(pt/defparsed Early [x]
+                              (pure ::p "p" [x] true)
+                              (fetch ::r [x] staged-rows)
+                              (external ::e "e" [] [r ::r] (some? r)))))
+      "fetches may be written anywhere"))
+
+(def ^:private secret-rows {[1] {:ssn "123-45-6789"}})
+
+(pt/defparsed Leaky [id]
+  (external ::leaky "Returns the row in a seq." [] [row ::row] (seq [row]))
+  (fetch ::row [id] (fn [ts] (into {} (map (fn [t] [t (get secret-rows t)])) ts))))
+
+(def ^:private realized? (atom false))
+
+(pt/defparsed Lazy [x]
+  (pure ::lazy "Returns a lazy seq." [x] (map (fn [y] (reset! realized? true) y) [x])))
+
+(deftest a-failure-message-shows-no-external-data-and-realizes-nothing-test
+  (testing "an external check's result: only its class, in the message and the ex-data"
+    (let [e (thrown #(pt/parse Leaky {:id 1}))]
+      (is (not (str/includes? (:message e) "123-45-6789")))
+      (is (str/includes? (:message e) "which returned a clojure.lang."))
+      (is (not (contains? e :returned)))))
+  (testing "a lazy seq a check returned is not realized to print it"
+    (reset! realized? false)
+    (let [e (thrown #(pt/parse Lazy {:x 1}))]
+      (is (str/includes? (:message e) "a clojure.lang.LazySeq"))
+      (is (false? @realized?)))))
+
+(def ^:private branches-run (atom []))
+
+(deftest match-runs-no-branch-for-a-forged-member-test
+  ;; the branch reads nothing, so only match can refuse the forged value
+  (reset! branches-run [])
+  (let [forged (Point. 1 1 nil)
+        e      (thrown #(pt/match Shape forged
+                          Point p (swap! branches-run conj :point)
+                          Other o (swap! branches-run conj :other)))]
+    (is (= ::pt/not-parsed (:type e)))
+    (is (= [] @branches-run))))

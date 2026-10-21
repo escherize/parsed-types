@@ -143,7 +143,12 @@
    [:pure-check-order (compiling '(pt/defparsed E1 [a b] (pure ::ab "d" [a b] true) (pure ::a "d" [a] true)))
     "the pure check :parsed-types.errors-test/ab reads [a b], and is written before :parsed-types.errors-test/a"
     "Move :parsed-types.errors-test/a before :parsed-types.errors-test/ab."]
+   [:pure-after-external (compiling '(pt/defparsed E1 [a] (external ::e "d" [a] true) (pure ::p "d" [a] true)))
+    "the pure check :parsed-types.errors-test/p is written after the external check :parsed-types.errors-test/e"
+    "Move :parsed-types.errors-test/p before :parsed-types.errors-test/e."]
    ;; when a defparsed loads
+   [:fetches-not-staged #(#'pt/register! Credit "an expansion that staged nothing" {:checks [] :fetches [{:name ::f :reads [:amount]}]} {})
+    "lost its fetch fns" "on one thread"]
    [:fetch-not-fn (compiling '(pt/defparsed E2 [a] (external ::c "d" [] [r ::f] (some? r)) (fetch ::f [a] 42)))
     "is 42, not a fn" "(fetch :parsed-types.errors-test/f [a] rows-by-id)"]
    [:defparsed-not-top-level (compiling '(let [x 1] (pt/defparsed E3 [a] (pure ::c "d" [a] (= a x)))))
@@ -451,7 +456,7 @@
                                   (pt/parse ThrowyRow2 {:id 1}))))
                  nil
                  (catch clojure.lang.ExceptionInfo e e))]
-      (is (= {:type ::pt/invalid, :check ::ok, :returned false} (select-keys (ex-data e) [:type :check :returned :threw])))))
+      (is (= {:type ::pt/invalid, :check ::ok} (select-keys (ex-data e) [:type :check :returned :threw])))))
   (testing "parse of a value parse issued says it is already parsed, and the changed copy it names parses"
     (is (str/includes? (:message (error #(pt/parse Debit real))) "which is already parsed. Pass it as it is"))
     (is (pt/parsed? Debit (let [x real] (pt/parse Debit (assoc (pt/parsed Debit x) :amount 5M)))))))

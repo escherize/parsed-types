@@ -180,7 +180,7 @@ that the caller may see it, before the checks that read the row:
 ```clojure
 (pt/parse OrderLine {:product-id 99, :quantity 1, :unit-price 5M})
 ;; throws ::pt/invalid with this ex-data:
-{:check :shop/product-exists, :kind :external, :returned false}
+{:check :shop/product-exists, :kind :external}
 ```
 
 ### The map to parse names every field, and only fields
