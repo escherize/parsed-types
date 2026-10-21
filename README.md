@@ -11,6 +11,14 @@ where they can, and every error the library throws states the fix as code.
 The idea is the smart constructor, or
 [parse, don't validate](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/), for Clojure.
 
+## Install it as a git dependency
+
+parsed-types needs Clojure 1.11 or later. Add it to `deps.edn`:
+
+```edn
+{:deps {io.github.escherize/parsed-types {:git/tag "v0.1.0" :git/sha "SHA"}}}
+```
+
 ## Only `parse` turns a draft into a parsed value
 
 `defparsed` defines `Order`, the parsed type, and `OrderDraft`, its draft. An order holds order lines that are
@@ -316,3 +324,7 @@ the library throws `::stale-type` with the command that fixes it, such as `(requ
 
 [docs/guarantees.md](docs/guarantees.md) lists each guarantee with its test, the accepted limits, every error rule,
 and REPL reloads. Run the tests with `clojure -X:test`, and the timings with `clojure -M:bench`.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
