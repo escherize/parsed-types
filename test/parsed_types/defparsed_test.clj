@@ -19,9 +19,9 @@
           [["a name that is not a symbol"
             '(pt/defparsed "A" [a])
             #"Write \(defparsed Name \[fields\]"]
-           ["a check that reads a field the draft does not have"
+           ["a check that reads a field the type does not have"
             '(pt/defparsed A [a] (pure ::c "d" [b] true))
-            #"reads fields the draft does not have: \[b\]"]
+            #"reads fields the type does not have: \[b\]"]
            ["a check that uses a field it does not name"
             '(pt/defparsed A [a b] (pure ::c "d" [a] (< a b)))
             #"uses the field `b` without naming it\. Add it to the argument vector: \[a b\]"]
@@ -43,9 +43,9 @@
            ["a fetch that is not declared"
             '(pt/defparsed A [a] (external ::c "d" [a] [x ::nope] true))
             #"pairs of a local and a fetch declared"]
-           ["a fetch over a field the draft does not have"
+           ["a fetch over a field the type does not have"
             '(pt/defparsed A [a] (fetch ::f [b] identity))
-            #"fields of the draft"]
+            #"fields of the type"]
            ["a name used twice"
             '(pt/defparsed A [a] (pure ::c "d" [a] true) (pure ::c "d" [a] true))
             #"used twice"]
@@ -88,7 +88,7 @@
 
 (deftest declaration-test
   (testing "defparsed writes a plain declaration: the data you would write by hand"
-    (let [decl (pt/declaration (pt/draft Point {:x 1, :y 1}))]
+    (let [decl (pt/declaration Point)]
       (is (= Point (:parses-to decl)))
       (is (= [{:name ::x-int, :doc "x is an integer.", :kind :pure, :reads [:x]}
               {:name ::y-int, :doc "y is an integer.", :kind :pure, :reads [:y]}
@@ -97,16 +97,15 @@
              (mapv #(dissoc % :f) (:checks decl))))
       (is (= [{:name ::row, :reads [:x]}] (mapv #(dissoc % :f) (:fetches decl))))))
   (testing "and parses with it"
-    (is (= {:x 2, :y 2} (pt/parsed Point (pt/parse (pt/draft Point {:x 2, :y 2})))))
-    (is (= :pure (:kind (try (pt/parse (pt/draft Point {:x 1, :y :y})) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
+    (is (= {:x 2, :y 2} (pt/parsed Point (pt/parse Point {:x 2, :y 2}))))
+    (is (= :pure (:kind (try (pt/parse Point {:x 1, :y :y}) (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
 (pt/defparsed Other [x z])
 
 (pt/defsum Shape [Point Other])
 
 (deftest only-defparsed-makes-types-test
-  (testing "the macros that defined a parsed type or a draft type alone are private, so calling them does not compile"
-    (is (re-find #"defdraft-type is not public" (str (compile-error '(pt/defdraft-type HandDraft [a] {})))))
+  (testing "the fn that defines a parsed type alone is private, so calling it does not compile"
     (is (re-find #"defparsed-type is not public" (str (compile-error '(pt/defparsed-type Hand [a])))))))
 
 (defn- resolve-here [sym] @(ns-resolve 'parsed-types.defparsed-test sym))
@@ -144,23 +143,20 @@
   (testing "a defparsed that fails when it loads changes nothing: the classes and the plan stay the old ones"
     (eval-here '(pt/defparsed Kept [a] (pure ::kept-pos "a is positive." [a] (pos? a))))
     (let [cls     (resolve-here-class 'Kept)
-          dcls    (resolve-here-class 'KeptDraft)
-          old     (pt/parse (eval-here '(pt/draft Kept {:a 1})))]
+          old     (eval-here '(pt/parse Kept {:a 1}))]
       (doseq [[label form] [["a fetch that is not a fn" '(pt/defparsed Kept [a] (fetch ::f [a] 42))]]]
         (testing label
           (is (= ::pt/bad-declaration (:type (first (load-error form)))))
           (is (identical? cls (resolve-here-class 'Kept)))
-          (is (identical? dcls (resolve-here-class 'KeptDraft)))
           (is (pt/parsed? (resolve-here-class 'Kept) old))
-          (is (= ::kept-pos (:check (thrown #(pt/parse (eval-here '(pt/draft Kept {:a -1})))))))))))
+          (is (= ::kept-pos (:check (thrown #(eval-here '(pt/parse Kept {:a -1}))))))))))
   (testing "a defparsed that fails after its deftypes, as when a check does not compile, says so wherever its type is used"
     (eval-here '(pt/defparsed Broken [a]))
     (is (some? (load-error '(pt/defparsed Broken [a] (pure ::b "b" [a] (no-such-fn a))))))
-    ;; pt/draft refuses the type, so the draft is built with its constructor
-    (let [draft (eval-here '(parsed_types.defparsed_test.BrokenDraft. 1))]
-      (doseq [[label thunk] [["parse" #(pt/parse draft)]
-                             ["parsed" #(pt/parsed (resolve-here-class 'Broken) nil)]
-                             ["draft" #(eval-here '(pt/draft Broken {:a 1}))]]]
+    (let [broken (resolve-here-class 'Broken)]
+      (doseq [[label thunk] [["parse" #(pt/parse broken {:a 1})]
+                             ["parsed" #(pt/parsed broken nil)]
+                             ["parse, compiled" #(eval-here '(pt/parse Broken {:a 1}))]]]
         (testing label
           (let [e (thrown thunk)]
             (is (= {:type ::pt/bad-declaration, :rule :parsed-types.rule/type-not-loaded}
@@ -169,7 +165,7 @@
                          (str (:message e)))))))
       (testing "and the fix it names works"
         (eval-here '(pt/defparsed Broken [a]))
-        (is (some? (pt/parse (eval-here '(pt/draft Broken {:a 1})))))))))
+        (is (some? (eval-here '(pt/parse Broken {:a 1}))))))))
 
 (deftest defparsed-only-at-the-top-level-test
   (doseq [form ['(let [x 1] (pt/defparsed InLet [a] (pure ::c "d" [a] (= a x))))
@@ -182,7 +178,7 @@
   (testing "the fix it names works: a top-level def in place of the local"
     (eval-here '(def limit 1))
     (eval-here '(pt/defparsed InLet [a] (pure ::c "d" [a] (= a limit))))
-    (is (some? (pt/parse (eval-here '(pt/draft InLet {:a 1})))))))
+    (is (some? (eval-here '(pt/parse InLet {:a 1}))))))
 
 (deftest match-compile-errors-test
   (doseq [[label form re]
@@ -211,31 +207,67 @@
     (is (re-find #"members are distinct types" (str (compile-error '(pt/defsum Bad [Point Point])))))
     (is (re-find #"members are distinct types" (str (compile-error '(pt/defsum Bad [Point String])))))))
 
-;;; pt/draft
+;;; The input map
 
-(deftest draft-test
-  (testing "a literal map names every field"
-    (is (= (pt/draft Point {:x 1, :y nil}) (pt/draft Point {:x 1, :y nil}))))
+(deftest parse-checks-a-literal-map-when-it-compiles-test
   (testing "a literal map that leaves a field out does not compile"
-    (is (re-find #"Point needs every field; missing \[:y\]" (str (compile-error '(pt/draft Point {:x 1}))))))
-  (testing "a literal map with a key that is not a field does not compile"
-    (is (re-find #"Point has no fields \[:z\]\. A literal map names only fields; its fields are \[:x :y\]"
-                 (str (compile-error '(pt/draft Point {:x 1, :z 2}))))))
-  (testing "anything but a literal map does not compile, and the message names the fields to write"
-    (is (re-find #"pt/draft: m is not a literal map\..*\(pt/draft Point \{:x \.\.\., :y \.\.\.\}\)\.$"
-                 (str (compile-error '(fn [m] (pt/draft Point m))))))
-    (is (re-find #"is not a literal map" (str (compile-error '(pt/draft Point (hash-map :x 1 :y 2))))))
-    (is (nil? (resolve 'parsed-types.core/draft-from-map)) "there is no run-time path"))
-  (testing "a type without a draft does not compile"
-    (is (re-find #"not a type defined with defparsed" (str (compile-error '(pt/draft String {})))))))
+    (is (re-find #"Point needs every field; missing \[:y\]" (str (compile-error '(pt/parse Point {:x 1})))))
+    (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/input-missing-keys, :missing [:y]}
+           (select-keys (thrown #(eval-here '(pt/parse Point {:x 1}))) [:type :rule :missing]))))
+  (testing "a literal map with a key that is not a field does not compile, and names the field it is close to"
+    (is (re-find #"Point has no fields \[:yy\]\. Did you mean :y\? A map to parse names only fields; its fields are \[:x :y\]"
+                 (str (compile-error '(pt/parse Point {:x 1, :yy 2})))))
+    (is (= {:rule :parsed-types.rule/input-unknown-keys, :unknown [:yy], :suggestion :y}
+           (select-keys (thrown #(eval-here '(pt/parse Point {:x 1, :yy 2}))) [:rule :unknown :suggestion]))))
+  (testing "a map that is not literal compiles, and is checked when it runs"
+    (is (nil? (compile-error '(fn [m] (pt/parse Point m)))))))
 
-;;; Reads: a parsed value is read only through pt/parsed, and a draft not at all
+(deftest parse-checks-any-map-when-it-runs-test
+  (let [parse (fn [m] (thrown #(pt/parse Point m)))]
+    (testing "a key that is not a field throws, never parses, and names the field it is close to"
+      (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/input-unknown-keys, :fn "pt/parse", :unknown [:yy]
+              :suggestion :y, :fields [:x :y], :parsed "parsed_types.defparsed_test.Point"}
+             (dissoc (parse {:x 1, :yy 2}) :message))))
+    (testing "a missing field throws, never reads nil"
+      (is (= {:rule :parsed-types.rule/input-missing-keys, :missing [:y]} (select-keys (parse {:x 1}) [:rule :missing])))
+      (is (re-find #"Write nil for a field you mean to leave empty, as in \(pt/parse Point \{:x \.\.\., :y \.\.\.\}\)"
+                   (:message (parse {:x 1})))))
+    (testing "a field written as nil is present, and reaches the checks"
+      (is (= ::y-int (:check (parse {:x 1, :y nil})))))
+    (testing "anything but a map throws"
+      (is (= :parsed-types.rule/input-not-a-map (:rule (parse [[:x 1] [:y 1]]))))
+      (is (= :parsed-types.rule/input-not-a-map (:rule (parse nil)))))
+    (testing "a parsed value is already parsed"
+      (let [e (parse (pt/parse Point {:x 2, :y 2}))]
+        (is (= :parsed-types.rule/already-parsed (:rule e)))
+        (is (re-find #"\(pt/parse Point \(assoc \(pt/parsed Point x\) :field v\)\)" (:message e)))))
+    (testing "a sum is no type to parse into"
+      (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/not-a-parsed-type}
+             (select-keys (thrown #(pt/parse Shape {:x 1, :y 1})) [:type :rule]))))
+    (testing "parse is a fn, so it maps"
+      (is (= [{:x 2, :y 2} {:x 3, :y 3}]
+             (mapv #(pt/parsed Point %) (map #(pt/parse Point %) [{:x 2, :y 2} {:x 3, :y 3}])))))
+    (testing "a changed copy is a changed map, parsed again"
+      (let [p (pt/parse Point {:x 2, :y 2})]
+        (is (= {:x 3, :y 3} (pt/parsed Point (pt/parse Point (assoc (pt/parsed Point p) :x 3 :y 3)))))))))
+
+(deftest parse-all-checks-each-map-test
+  (testing "a map with the wrong keys throws with its index, before any check runs"
+    (is (= {:type ::pt/bad-input, :rule :parsed-types.rule/input-missing-keys, :index 1, :missing [:y]}
+           (select-keys (thrown #(pt/parse-all Point [{:x 2, :y 2} {:x 3}])) [:type :rule :index :missing])))
+    (is (re-find #"missing \[:y\] in the map at index 1.*\(pt/parse-all Point \[\{:x \.\.\., :y \.\.\.\}\]\)"
+                 (:message (thrown #(pt/parse-all Point [{:x 2, :y 2} {:x 3}]))))))
+  (testing "a failed check names its index"
+    (is (= {:check ::on-diagonal, :index 1}
+           (select-keys (thrown #(pt/parse-all Point [{:x 2, :y 2} {:x 3, :y 4}])) [:check :index]))))
+  (testing "a single map, not a vector, throws"
+    (is (= :parsed-types.rule/parse-all-not-a-vector (:rule (thrown #(pt/parse-all Point {:x 2, :y 2})))))))
+
+;;; Reads: a parsed value is read only through pt/parsed
 
 (deftest every-read-throws-must-unwrap-test
-  (let [d (pt/draft Point {:x 1, :y 2})
-        p (pt/parse (pt/draft Point {:x 2, :y 2}))]
-    (doseq [[label x rule fix] [["a draft" d :parsed-types.rule/draft-not-readable "(pt/parsed Point (pt/parse d))"]
-                                ["a parsed value" p :parsed-types.rule/read-through-parsed "(pt/parsed Point x)"]]]
+  (let [p (pt/parse Point {:x 2, :y 2})]
+    (doseq [[label x rule fix] [["a parsed value" p :parsed-types.rule/read-through-parsed "(pt/parsed Point x)"]]]
       (testing label
         (doseq [[how op k thunk] [["keyword" "get" :x #(:x x)]
                                   ["keyword, not a field" "get" :z #(:z x)]
@@ -273,17 +305,16 @@
 (deftest a-sink-that-skips-parsed-fails-on-real-values-test
   (testing "it takes a plain map, which no library can stop"
     (is (= [1 1] (forgetful-sink {:x 1, :y 1}))))
-  (testing "but throws on the first parsed value or draft, so it cannot ship working"
-    (is (= ::pt/must-unwrap (:type (thrown #(forgetful-sink (pt/parse (pt/draft Point {:x 1, :y 1})))))))
-    (is (= ::pt/must-unwrap (:type (thrown #(forgetful-sink (pt/draft Point {:x 1, :y 1}))))))))
+  (testing "but throws on the first parsed value, so it cannot ship working"
+    (is (= ::pt/must-unwrap (:type (thrown #(forgetful-sink (pt/parse Point {:x 1, :y 1}))))))))
 
 (pt/defparsed Segment [from to]
   (pure ::points "Both ends are parsed points." [from to] (and (pt/parsed? Point from) (pt/parsed? Point to))))
 
 (deftest parsed-returns-a-plain-map-test
-  (let [a (pt/parse (pt/draft Point {:x 1, :y 1}))
-        b (pt/parse (pt/draft Point {:x 2, :y 2}))
-        m (pt/parsed Segment (pt/parse (pt/draft Segment {:from a, :to b})))]
+  (let [a (pt/parse Point {:x 1, :y 1})
+        b (pt/parse Point {:x 2, :y 2})
+        m (pt/parsed Segment (pt/parse Segment {:from a, :to b}))]
     (testing "pt/parsed returns the fields as a plain map, which carries no proof"
       (is (= {:x 1, :y 1} (pt/parsed Point a)))
       (is (map? (pt/parsed Point a)))
@@ -298,10 +329,10 @@
   (pure ::a-is-x "a's x is 1." [a] (= 1 (:x a))))
 
 (deftest a-check-that-skips-parsed-names-the-fix-test
-  (let [e (thrown #(pt/parse (pt/draft Pair {:a (pt/parse (pt/draft Point {:x 1, :y 1})), :b nil})))]
+  (let [e (thrown #(pt/parse Pair {:a (pt/parse Point {:x 1, :y 1}), :b nil}))]
     (is (= ::pt/invalid (:type e)))
     (is (= ::pt/must-unwrap (:type (ex-data (:threw e)))))
-    (is (str/includes? (:message e) "read a draft or parsed value without pt/parsed"))
+    (is (str/includes? (:message e) "read a parsed value without pt/parsed"))
     (is (str/includes? (:message e) "(pt/parsed Point x)"))
     (is (not (str/includes? (:message e) "Guard its input")) "no guard advice: the input is fine")
     (is (not (re-find #"[^.]\.\.(?!\.)" (:message e))) "no doubled period")))
@@ -311,16 +342,16 @@
 (deftest re-evaluating-a-type-test
   (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
   (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
-  (let [old-kid   (eval-here '(pt/draft Kid {:n 1}))
-        old-value (pt/parse old-kid)
+  (let [old-type  (resolve-here-class 'Kid)
+        old-value (eval-here '(pt/parse Kid {:n 1}))
         sink      (resolve-here 'kid-sink)]
     (eval-here '(pt/defparsed Kid [n] (pure ::n-int "n is an integer." [n] (int? n))))
-    (let [new-kid (eval-here '(pt/draft Kid {:n 2}))]
-      (is (not= (class old-kid) (class new-kid)) "the reload made a new class")
-      (testing "old drafts still parse, with the plans they were defined with, as records would"
-        (is (= (class old-value) (class (pt/parse old-kid)))))
+    (let [new-value (eval-here '(pt/parse Kid {:n 2}))]
+      (is (not= (class old-value) (class new-value)) "the reload made a new class")
+      (testing "the old class still parses, with the plan it was defined with, as records would"
+        (is (= (class old-value) (class (pt/parse old-type {:n 3})))))
       (testing "a sink compiled before the reload says to re-evaluate the code that calls it"
-        (let [e (thrown #(sink (pt/parse new-kid)))]
+        (let [e (thrown #(sink new-value))]
           (is (= :parsed-types.rule/stale-sink (:rule e)))
           (is (re-find #"the code calling \(pt/parsed Kid \.\.\.\) was compiled before the defparsed Kid in parsed-types.defparsed-test was re-evaluated"
                        (:message e)))
@@ -328,11 +359,11 @@
         (is (= {:n 1} (sink old-value)) "and still takes the values of its own class"))
       (eval-here '(defn- kid-sink [x] (pt/parsed Kid x)))
       (testing "once re-evaluated, the sink takes the new class"
-        (is (= {:n 2} ((resolve-here 'kid-sink) (pt/parse new-kid)))))
+        (is (= {:n 2} ((resolve-here 'kid-sink) new-value))))
       (testing "and says to build again what was built before the reload"
         (let [e (thrown #((resolve-here 'kid-sink) old-value))]
           (is (= :parsed-types.rule/stale-value (:rule e)))
-          (is (str/includes? (:message e) "(pt/parse (pt/draft Kid {:n ...}))")))
+          (is (str/includes? (:message e) "(pt/parse Kid {:n ...})")))
         (is (= :parsed-types.rule/stale-value (:rule (thrown #(pt/parsed? (ns-resolve 'parsed-types.defparsed-test 'Kid) old-value)))))))))
 
 (deftest re-evaluating-a-member-of-a-sum-test
@@ -341,7 +372,7 @@
   (eval-here '(pt/defsum Members [Member NonMember]))
   (eval-here '(defn- which-member [x] (pt/match Members x Member m [:member (:n (pt/parsed Member m))] NonMember o [:non-member (:n (pt/parsed NonMember o))])))
   (eval-here '(pt/defparsed Member [n]))
-  (let [member (pt/parse (eval-here '(pt/draft Member {:n 1})))]
+  (let [member (eval-here '(pt/parse Member {:n 1}))]
     (testing "the sum names itself, and a match compiled before the reload names its namespace"
       (is (re-find #"Re-evaluate the defsum Members, then the namespace that calls pt/parsed\?"
                    (:message (thrown #(pt/parsed? (resolve-here 'Members) member)))))
@@ -375,20 +406,20 @@
 
 (deftest every-reload-command-applies-test
   (let [nss   (fn [& suffixes] (map #(symbol (str "parsed-types.stale-fixture." %)) suffixes))
-        debit #(binding [*ns* (the-ns 'parsed-types.stale-fixture.types)] (eval '(pt/draft Debit {:amount 5})))]
+        debit #(binding [*ns* (the-ns 'parsed-types.stale-fixture.types)] (eval '(pt/parse Debit {:amount 5})))]
     (apply require (concat (nss "types" "sum" "app") [:reload]))
     (require (first (nss "types")) :reload)
     (testing "a match compiled before the reload: reload the sum's namespace, then the match's"
-      (let [e (thrown #((fx "app" 'transact) (pt/parse (debit))))]
+      (let [e (thrown #((fx "app" 'transact) (debit)))]
         (is (= :parsed-types.rule/stale-match (:rule e)))
         (is (= "(require 'parsed-types.stale-fixture.sum 'parsed-types.stale-fixture.app :reload)" (apply-fix! e)))
-        (is (= [:debit 5] ((fx "app" 'transact) (pt/parse (debit)))))))
+        (is (= [:debit 5] ((fx "app" 'transact) (debit))))))
     (testing "a match compiled against a sum from before the reload: the same"
       (require (first (nss "types")) :reload)
       (let [e (thrown #(require (first (nss "app")) :reload))]
         (is (= :parsed-types.rule/stale-match (:rule e)))
         (is (= "(require 'parsed-types.stale-fixture.sum 'parsed-types.stale-fixture.app :reload)" (apply-fix! e)))
-        (is (= [:debit 5] ((fx "app" 'transact) (pt/parse (debit)))))))))
+        (is (= [:debit 5] ((fx "app" 'transact) (debit))))))))
 
 (deftest reloading-the-library-keeps-every-type-test
   (eval-here '(pt/defparsed RlLine [n] (pure ::rl-n-int "n is an integer." [n] (int? n))))
@@ -397,20 +428,18 @@
   (eval-here '(defn- rl-match [x] (pt/match RlSum x RlLine l [:line (:n (pt/parsed RlLine l))] RlOther o [:other (:n (pt/parsed RlOther o))])))
   (let [line-type  (ns-resolve 'parsed-types.defparsed-test 'RlLine)
         interfaces #(mapv (fn [n] (Class/forName n false (clojure.lang.DynamicClassLoader.)))
-                          ["parsed_types.core.ParsedValue" "parsed_types.core.DraftValue" "parsed_types.core.Sum"])
+                          ["parsed_types.core.ParsedValue" "parsed_types.core.Sum"])
         before     (interfaces)
-        parsed     (pt/parse (eval-here '(pt/draft RlLine {:n 1})))
-        good       (eval-here '(pt/draft RlLine {:n 2}))
-        bad        (eval-here '(pt/draft RlLine {:n :x}))]
+        parsed     (eval-here '(pt/parse RlLine {:n 1}))]
     (require 'parsed-types.core :reload)
     (testing "the library's classes are the ones loaded before"
       (is (= before (interfaces))))
     (testing "a value parsed before the reload is still parsed"
       (is (pt/parsed? line-type parsed))
       (is (= {:n 1} (pt/parsed line-type parsed))))
-    (testing "a draft built before the reload still parses, and still fails its checks"
-      (is (pt/parsed? line-type (pt/parse good)))
-      (is (= ::rl-n-int (:check (try (pt/parse bad) nil
+    (testing "a type defined before the reload still parses, and still fails its checks"
+      (is (pt/parsed? line-type (pt/parse line-type {:n 2})))
+      (is (= ::rl-n-int (:check (try (pt/parse line-type {:n :x}) nil
                                      (catch clojure.lang.ExceptionInfo e (ex-data e)))))))
     (testing "a sum and a match defined before the reload still take the value"
       (is (pt/parsed? (resolve-here 'RlSum) parsed))
@@ -418,12 +447,12 @@
     (testing "a type defined after the reload holds a value parsed before it"
       (eval-here '(pt/defparsed RlEntry [lines]))
       (is (identical? parsed (first (:lines (pt/parsed (resolve-here-class 'RlEntry)
-                                                       (pt/parse ((eval-here '(fn [x] (pt/draft RlEntry {:lines [x]}))) parsed))))))))))
+                                                       ((eval-here '(fn [x] (pt/parse RlEntry {:lines [x]}))) parsed)))))))))
 
 (deftest a-hand-written-class-with-the-same-name-is-refused-test
   (eval-here '(pt/defparsed Genuine [n]))
   (let [genuine (ns-resolve 'parsed-types.defparsed-test 'Genuine)
-        real    (pt/parse (eval-here '(pt/draft Genuine {:n 1})))]
+        real    (eval-here '(pt/parse Genuine {:n 1}))]
     (eval-here '(deftype Genuine [n] parsed_types.core.ParsedValue (issuedWith [_ _] true)))
     (let [fake (eval-here '(Genuine. 1))]
       (is (= (.getName ^Class genuine) (.getName (class fake))) "same fully qualified name")
@@ -447,7 +476,6 @@
 (deftest a-class-name-belongs-to-one-namespace-test
   (eval-in 'pt-owner.my-app.bank '(pt/defparsed Debit [amount] (pure ::pos "The amount is positive." [amount] (pos? amount))))
   (let [real-type  (eval-in 'pt-owner.my-app.bank 'Debit)
-        real-draft (eval-in 'pt-owner.my-app.bank 'DebitDraft)
         sink       (eval-in 'pt-owner.my-app.bank '(fn [d] (:amount (pt/parsed Debit d))))]
     (testing "a namespace whose name compiles to the same Java package cannot define a type of that name"
       (let [e (thrown #(eval-in 'pt-owner.my_app.bank '(pt/defparsed Debit [amount])))]
@@ -459,35 +487,24 @@
     (testing "inside a let too, which is refused before it compiles"
       (is (= :parsed-types.rule/defparsed-not-top-level
              (:rule (thrown #(eval-in 'pt-owner.my_app.bank '(let [] (pt/defparsed Debit [amount]))))))))
-    (testing "and the refused defparsed defined no class: the owner's classes are still the loaded ones"
+    (testing "and the refused defparsed defined no class: the owner's class is still the loaded one"
       (is (identical? real-type (loaded-class "pt_owner.my_app.bank.Debit")))
-      (is (identical? real-draft (loaded-class "pt_owner.my_app.bank.DebitDraft")))
-      (is (nil? (ns-resolve (the-ns 'pt-owner.my_app.bank) 'DebitDraft)))
-      (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse (pt/draft Debit {:amount 5})))))))
+      (is (nil? (ns-resolve (the-ns 'pt-owner.my_app.bank) 'Debit)))
+      (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse Debit {:amount 5}))))))
     (testing "the owning namespace may redefine it, as a REPL reload does"
       (eval-in 'pt-owner.my-app.bank '(pt/defparsed Debit [amount] (pure ::pos "The amount is positive." [amount] (pos? amount))))
       (let [sink (eval-in 'pt-owner.my-app.bank '(fn [d] (:amount (pt/parsed Debit d))))]
-        (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse (pt/draft Debit {:amount 5}))))))))))
+        (is (= 5 (sink (eval-in 'pt-owner.my-app.bank '(pt/parse Debit {:amount 5})))))))))
 
-(deftest a-class-name-has-one-role-test
-  (testing "a type named like another type's draft is refused, in either order, before it defines a class"
+(deftest defparsed-defines-one-class-test
+  (testing "a type is one class: there is no draft class beside it"
+    (is (class? (resolve-here-class 'Point)))
+    (is (nil? (resolve-here-class 'PointDraft))))
+  (testing "so a type may be named like another type plus Draft"
     (eval-in 'pt-roles.a '(pt/defparsed FooDraft [x]))
-    (let [parsed (loaded-class "pt_roles.a.FooDraft")
-          e      (thrown #(eval-in 'pt-roles.a '(pt/defparsed Foo [y])))]
-      (is (= {:type ::pt/bad-declaration, :rule :parsed-types.rule/class-name-other-role, :class "pt_roles.a.FooDraft"
-              :role :draft, :owner-role :parsed}
-             (select-keys e [:type :rule :class :role :owner-role])))
-      (is (re-find #"pt_roles.a.FooDraft is already the parsed type of \(defparsed FooDraft \.\.\.\) in pt-roles.a"
-                   (:message e)))
-      (is (re-find #"Rename one of the types, as in \(defparsed Foo2 \.\.\.\)" (:message e)))
-      (is (identical? parsed (loaded-class "pt_roles.a.FooDraft")) "FooDraft is still the parsed class"))
-    (eval-in 'pt-roles.b '(pt/defparsed Bar [y]))
-    (let [draft (loaded-class "pt_roles.b.BarDraft")
-          e     (thrown #(eval-in 'pt-roles.b '(pt/defparsed BarDraft [])))]
-      (is (= {:rule :parsed-types.rule/class-name-other-role, :role :parsed, :owner-role :draft}
-             (select-keys e [:rule :role :owner-role])))
-      (is (identical? draft (loaded-class "pt_roles.b.BarDraft")) "BarDraft is still Bar's draft class")
-      (is (some? (pt/parse (eval-in 'pt-roles.b '(pt/draft Bar {:y 1}))))))))
+    (eval-in 'pt-roles.a '(pt/defparsed Foo [y]))
+    (is (some? (eval-in 'pt-roles.a '(pt/parse FooDraft {:x 1}))))
+    (is (some? (eval-in 'pt-roles.a '(pt/parse Foo {:y 1}))))))
 
 (deftest a-match-compiled-before-a-member-joined-throws-test
   (eval-here '(pt/defparsed MA [x]))
@@ -496,14 +513,14 @@
   (eval-here '(pt/defsum Grows [MA MB]))
   (eval-here '(defn- grows-match [v] (pt/match Grows v MA a [:a a] MB b [:b b])))
   (eval-here '(pt/defsum Grows [MA MB MC]))
-  (let [e (try ((resolve-here 'grows-match) (pt/parse (eval-here '(pt/draft MC {:x 1})))) nil
+  (let [e (try ((resolve-here 'grows-match) (eval-here '(pt/parse MC {:x 1}))) nil
                (catch clojure.lang.ExceptionInfo e e))]
     (is (= {:type ::pt/not-parsed, :rule :parsed-types.rule/match-compiled-before-member, :handled '[MA MB]}
            (select-keys (ex-data e) [:type :rule :handled])))
     (is (re-find #"compiled before MC joined the sum.*Re-evaluate the match" (ex-message e))))
   (testing "values that are not parsed still get the sink's own error"
-    (is (= :parsed-types.rule/got-draft
-           (:rule (try ((resolve-here 'grows-match) (eval-here '(pt/draft MC {:x 1}))) nil
+    (is (= :parsed-types.rule/got-unparsed
+           (:rule (try ((resolve-here 'grows-match) {:x 1}) nil
                        (catch clojure.lang.ExceptionInfo e (ex-data e))))))))
 
 ;;; Field names
@@ -513,14 +530,14 @@
 
 (deftest fields-named-like-core-functions-test
   (testing "a field may be named like any clojure.core function or macro"
-    (let [d (pt/draft Awkward {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10})
-          p (pt/parse d)]
+    (let [d {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10}
+          p (pt/parse Awkward d)]
       (is (= {:count 1, :map 2, :set 3, :str 4, :seq 5, :into 6, :contains? 7, :or 8, :when 9, :keys 10} (pt/parsed Awkward p)))
-      (is (= p (pt/parse d)))
-      (is (= (hash p) (hash (pt/parse d))))
+      (is (= p (pt/parse Awkward d)))
+      (is (= (hash p) (hash (pt/parse Awkward d))))
       (is (string? (str p)))
       (is (re-find #"#parsed_types.defparsed_test.Awkward\{" (pr-str p)))
-      (is (= 20 (:map (pt/parsed Awkward (pt/parse (assoc d :map 20))))))
+      (is (= 20 (:map (pt/parsed Awkward (pt/parse Awkward (assoc d :map 20))))))
       (is (= 9 (let [{:keys [when]} (pt/parsed Awkward p)] when)))
       (is (= ::pt/must-unwrap (:type (thrown #(:count p)))))
       (is (= #{:count :map :set :str :seq :into :contains? :or :when :keys} (set (keys (pt/parsed Awkward p))))))))
@@ -537,14 +554,14 @@
 
 (defn- logged [k] (swap! order conj k) k)
 
-(deftest draft-evaluates-a-literal-map-in-the-order-written-test
+(deftest parse-evaluates-a-literal-map-as-clojure-does-test
   (testing "up to 8 keys, in the order written"
     (reset! order [])
-    (pt/draft Point {:y (do (swap! order conj :y) 2), :x (do (swap! order conj :x) 1)})
+    (pt/parse Point {:y (do (swap! order conj :y) 1), :x (do (swap! order conj :x) 1)})
     (is (= [:y :x] @order)))
   (testing "with more, in the order Clojure evaluates the same map literal, which the reader no longer keeps"
     (reset! order [])
-    (pt/draft Nine {:i (logged :i) :h (logged :h) :g (logged :g) :f (logged :f) :e (logged :e) :d (logged :d)
+    (pt/parse Nine {:i (logged :i) :h (logged :h) :g (logged :g) :f (logged :f) :e (logged :e) :d (logged :d)
                     :c (logged :c) :b (logged :b) :a (logged :a)})
     (let [drafted @order]
       (reset! order [])
@@ -566,14 +583,12 @@
   (testing "a value equals only a value of its own type"
     (is (not= (Money. 1M 2 nil) (Money. 1M 3 nil)) "every field is compared, not only the first")
     (is (not= (Money. 1M 2 nil) (OtherMoney. 1M 2 nil)))
-    (is (not= (Money. 1M 2 nil) (pt/draft Money {:amount 1M, :count 2})))
     (is (not= (Money. 1M 2 nil) {:amount 1M, :count 2}))
     (is (not= {:amount 1M, :count 2} (Money. 1M 2 nil)))
     (is (not (.equals (Money. 1M 2 nil) {:amount 1M, :count 2})))))
 
 (deftest not-a-map-test
-  (doseq [[label x] [["a parsed value" (pt/parse (pt/draft Money {:amount 1M, :count 2}))]
-                     ["a draft" (pt/draft Money {:amount 1M, :count 2})]]]
+  (doseq [[label x] [["a parsed value" (pt/parse Money {:amount 1M, :count 2})]]]
     (testing label
       (is (not (map? x)))
       (is (not (instance? java.util.Map x)) "no java.util.Map interop either")
@@ -586,11 +601,11 @@
 
 (deftest a-field-cannot-replace-the-checks-test
   (testing "a field named like a declaration, holding one, is only a field: the checks stay those defparsed wrote"
-    (eval-here '(pt/defparsed Shadow [ShadowDraft-declaration]
-                  (pure ::never "Never passes." [ShadowDraft-declaration] false)))
-    (let [d ((eval-here '(fn [v] (pt/draft Shadow {:ShadowDraft-declaration v})))
-             {:parses-to (resolve 'parsed-types.defparsed-test/Shadow), :checks []})]
-      (is (= ::never (:check (try (pt/parse d) (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
+    (eval-here '(pt/defparsed Shadow [Shadow-declaration]
+                  (pure ::never "Never passes." [Shadow-declaration] false)))
+    (let [parse (eval-here '(fn [v] (pt/parse Shadow {:Shadow-declaration v})))]
+      (is (= ::never (:check (try (parse {:parses-to (resolve 'parsed-types.defparsed-test/Shadow), :checks []})
+                                  (catch clojure.lang.ExceptionInfo e (ex-data e)))))))))
 
 (deftest field-name-limits-test
   (doseq [[fields re] [['[a.b] #"cannot contain a dot"]

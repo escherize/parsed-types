@@ -12,7 +12,7 @@
   | parse, a field of 100 maps of 9 keys                | 277 us  | 36 us   |
   | parse, a field of 1k values nested 2 deep           | 116 us  | 25 us   |
   | parse-all 1k lines with a fetch, then their holder  | 3.3 ms  | 1.3 ms  |
-  | parse-all of 10k 3-field drafts                     | 35 ms   | 10 ms   |
+  | parse-all of 10k 3-field maps                       | 35 ms   | 10 ms   |
   | pt/parsed on a type                                 | 104 ns  | 66 ns   |
   | pt/parsed on a sum                                  | 468 ns  | 258 ns  |"
   (:require
@@ -64,22 +64,22 @@
 (defn -main [& _]
   (let [payload (vec (for [i (range 100)] (zipmap [:a :b :c :d :e :f :g :h :i] (repeat i))))
         nested  (vec (for [i (range 100)] (vec (range i (+ i 10)))))
-        line    (fn [i] (pt/draft Line {:id (mod i 50), :qty 1}))
-        three   (pt/parse (pt/draft Three {:a 1, :b "b", :c 1}))
+        line    (fn [i] {:id (mod i 50), :qty 1})
+        three   (pt/parse Three {:a 1, :b "b", :c 1})
         cases   [["parse, 3 fields"
-                  #(pt/parse (pt/draft Three {:a 1, :b "b", :c 1}))]
+                  #(pt/parse Three {:a 1, :b "b", :c 1})]
                  ["parse, 20 fields"
-                  #(pt/parse (pt/draft Twenty {:f0 0, :f1 1, :f2 2, :f3 3, :f4 4, :f5 5, :f6 6, :f7 7, :f8 8, :f9 9
+                  #(pt/parse Twenty {:f0 0, :f1 1, :f2 2, :f3 3, :f4 4, :f5 5, :f6 6, :f7 7, :f8 8, :f9 9
                                                :f10 10, :f11 11, :f12 12, :f13 13, :f14 14, :f15 15, :f16 16
-                                               :f17 17, :f18 18, :f19 19}))]
+                                               :f17 17, :f18 18, :f19 19})]
                  ["parse, a field of 100 maps of 9 keys"
-                  #(pt/parse (pt/draft Blob {:v payload}))]
+                  #(pt/parse Blob {:v payload})]
                  ["parse, a field of 1k values nested 2 deep"
-                  #(pt/parse (pt/draft Blob {:v nested}))]
+                  #(pt/parse Blob {:v nested})]
                  ["parse-all 1k lines with a fetch, then their holder"
-                  #(pt/parse (pt/draft Holder {:lines (pt/parse-all (mapv line (range 1000)))}))]
-                 ["parse-all of 10k 3-field drafts"
-                  (let [ds (vec (repeat 10000 (pt/draft Three {:a 1, :b "b", :c 1})))] #(pt/parse-all ds))]
+                  #(pt/parse Holder {:lines (pt/parse-all Line (mapv line (range 1000)))})]
+                 ["parse-all of 10k 3-field maps"
+                  (let [ms (vec (repeat 10000 {:a 1, :b "b", :c 1}))] #(pt/parse-all Three ms))]
                  ["pt/parsed on a type"
                   #(pt/parsed Three three)]
                  ["pt/parsed on a sum"

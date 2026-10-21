@@ -1,13 +1,11 @@
 (ns hooks.parsed-types
-  "How clj-kondo reads `defparsed`: both types, then every check as the fn it compiles to, so a check that uses a field
+  "How clj-kondo reads `defparsed`: the type, then every check as the fn it compiles to, so a check that uses a field
   it did not name is an unresolved symbol, and one that names a field it does not use is an unused binding.")
 
 (defmacro defparsed [parsed-name fields & clauses]
-  (let [draft-name (symbol (str parsed-name "Draft"))
-        decl       (symbol (str draft-name "-declaration"))]
+  (let [decl (symbol (str parsed-name "-declaration"))]
     `(do
        (deftype ~parsed-name ~fields)
-       (deftype ~draft-name ~fields)
        (def ~decl
          [~@(for [[head & args] clauses]
               (case head

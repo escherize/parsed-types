@@ -1,5 +1,5 @@
 (ns parsed-types.properties-test
-  "Generative tests of the properties the library promises, over random drafts and random sequences of edits."
+  "Generative tests of the properties the library promises, over random inputs and random sequences of edits."
   (:require
    [clojure.test.check.clojure-test :refer [defspec]]
    [clojure.test.check.generators :as gen]
@@ -69,14 +69,8 @@
             (gen/tuple gen/small-integer gen/string-alphanumeric gen/nat)))
 
 (def ^:private gen-fields
-  "Half malformed and half well-formed, so the pure, the external and the passing paths are all exercised. Fields, not
-  drafts: a draft cannot be read, and each property builds its own drafts from the fields."
+  "Half malformed and half well-formed, so the pure, the external and the passing paths are all exercised."
   (gen/one-of [gen-any-fields gen-well-formed-fields]))
-
-(defn- triple
-  "A new draft with the fields in `m`."
-  [m]
-  (pt/draft Triple {:user-id (:user-id m), :a (:a m), :b (:b m), :c (:c m)}))
 
 (defn- read-parsed
   "The fields of `x`, a parsed value of any type, through pt/parsed."
@@ -96,14 +90,14 @@
 (defspec nothing-touches-the-world-until-every-pure-check-passes 300
   (prop/for-all [m gen-fields]
     (reset! ran [])
-    (let [{:keys [kind]} (outcome #(pt/parse (triple m)))]
+    (let [{:keys [kind]} (outcome #(pt/parse Triple m))]
       (or (not= :pure kind)
           (not-any? #(touches-world? (if (vector? %) (first %) %)) @ran)))))
 
 (defspec nothing-runs-after-the-first-check-that-fails 300
   (prop/for-all [m gen-fields]
     (reset! ran [])
-    (let [{:keys [check ok]} (outcome #(pt/parse (triple m)))
+    (let [{:keys [check ok]} (outcome #(pt/parse Triple m))
           checks-ran         (remove vector? @ran)]
       (= (if ok
            written-order
@@ -112,20 +106,17 @@
 
 (defspec parse-issues-a-new-equal-value-and-nothing-else-is-parsed 300
   (prop/for-all [m gen-fields]
-    (let [draft  (triple m)
-          forged (Triple. (:user-id m) (:a m) (:b m) (:c m) nil)
-          result (outcome #(pt/parse draft))]
+    (let [forged (Triple. (:user-id m) (:a m) (:b m) (:c m) nil)
+          result (outcome #(pt/parse Triple m))]
       (and (not (pt/parsed? Triple forged))
-           (not (pt/parsed? Triple draft))
            (not (pt/parsed? Triple m))
            (if (:ok result)
-             (let [parsed (pt/parse (triple m))]
+             (let [parsed (pt/parse Triple m)]
                (and (pt/parsed? Triple parsed)
                     (= (pt/parsed Triple parsed) m)
                     (not= parsed m)
                     (not= m parsed)
-                    (not= parsed draft)
-                    (= parsed (pt/parse (triple m)))
+                    (= parsed (pt/parse Triple m))
                     (not= parsed forged)
                     (not= forged parsed)
                     (not (identical? parsed forged))))
@@ -135,7 +126,7 @@
   (prop/for-all [m gen-valid-fields
                  k (gen/one-of [(gen/elements fields) gen/keyword])
                  v gen-value]
-    (let [parsed  (pt/parse (triple m))
+    (let [parsed  (pt/parse Triple m)
           ;; a key that is not a field is reported as that first
           as      (if (some #{k} fields) ::pt/cannot-change ::pt/no-field)
           refused (fn [thunk type]
@@ -148,18 +139,18 @@
            (refused #(with-meta parsed {k v}) ::pt/cannot-change)
            (pt/parsed? Triple parsed)))))
 
-(defspec draft-of-round-trips 200
+(defspec parsed-fields-round-trip 200
   (prop/for-all [m gen-valid-fields]
-    (let [parsed   (pt/parse (triple m))
-          reparsed (pt/parse (pt/draft-of parsed))]
+    (let [parsed   (pt/parse Triple m)
+          reparsed (pt/parse Triple (pt/parsed Triple parsed))]
       (and (= parsed reparsed)
            (not (identical? parsed reparsed))
            (pt/parsed? Triple reparsed)))))
 
 (defn- parse-all-from-parse
-  "What parse-all must return, from what parse returned for each draft: every value when every draft parsed; else the
-  failure of the first draft whose pure checks failed, as every draft's pure checks run before any external check;
-  else the failure of the first draft whose external checks failed. The failure carries its draft's index."
+  "What parse-all must return, from what parse returned for each map: every value when every map parsed; else the
+  failure of the first map whose pure checks failed, as every map's pure checks run before any external check;
+  else the failure of the first map whose external checks failed. The failure carries its map's index."
   [each]
   (let [first-of (fn [kind] (first (keep-indexed (fn [i o] (when (= kind (:kind o)) (assoc o :index i))) each)))]
     (or (first-of :pure)
@@ -168,18 +159,18 @@
 
 (defspec parse-all-agrees-with-parse 300
   (prop/for-all [ms (gen/vector gen-fields 0 8)]
-    (= (parse-all-from-parse (mapv #(outcome (fn [] (pt/parse (triple %)))) ms))
-       (outcome #(pt/parse-all (mapv triple ms))))))
+    (= (parse-all-from-parse (mapv #(outcome (fn [] (pt/parse Triple %))) ms))
+       (outcome #(pt/parse-all Triple ms)))))
 
 (declare model)
 
 (defspec parse-all-fetches-once-with-each-distinct-tuple 300
   (prop/for-all [ms (gen/vector gen-fields 0 8)]
     (let [pure-ok? (fn [m] (not= :pure (:kind (model m))))
-          ;; a pure failure in any draft throws before anything is fetched
+          ;; a pure failure in any map throws before anything is fetched
           expected (if (every? pure-ok? ms) (into [] (comp (map (fn [m] [(:a m)])) (distinct)) ms) [])]
       (reset! ran [])
-      (outcome #(pt/parse-all (mapv triple ms)))
+      (outcome #(pt/parse-all Triple ms))
       (let [calls (filterv #(and (vector? %) (= ::row (first %))) @ran)]
         (if (empty? expected)
           (empty? calls)
@@ -189,7 +180,7 @@
 ;;; both sides of a comparison still fails here.
 
 (defn- model
-  "The outcome of parsing a TripleDraft with these fields, from first principles: the first check, pure then external,
+  "The outcome of parsing a Triple from these fields, from first principles: the first check, pure then external,
   each in the order written, that does not return exactly true, or every field when none fails. Each check is a fn, so
   a check after the first failure is never called, as parse never runs it."
   [{:keys [user-id a b c], :as fields}]
@@ -212,19 +203,19 @@
                      :doc      doc
                      :kind     kind
                      :returned r
-                     :draft    "parsed_types.properties_test.TripleDraft"})))
+                     :parsed   "parsed_types.properties_test.Triple"})))
               checks)
         {:ok (into {} fields)})))
 
 (defspec parse-matches-the-model 500
   (prop/for-all [m gen-fields]
-    (= (model m) (outcome #(pt/parse (triple m))))))
+    (= (model m) (outcome #(pt/parse Triple m)))))
 
 (defspec the-generators-reach-every-outcome 1
   (prop/for-all [ms (gen/vector gen-fields 400)]
     (= #{:pure :external :ok} (set (map #(or (:kind %) :ok) (map model ms))))))
 
-;;; Several declarations in one call, sharing a fetch name with different fetches
+;;; Two declarations that share a fetch name with different fetches
 
 (defn- pos-rows [tuples] (into {} (map (fn [[a :as t]] [t {:ok? (and (int? a) (pos? a))}])) tuples))
 
@@ -239,21 +230,13 @@
   (external ::pair-ok "The row for a is ok." [] [row ::row] (true? (:ok? row)))
   (fetch ::row [a] neg-rows))
 
-(def ^:private gen-mixed-fields
-  "`[type fields]`, for a Triple, a PosPair or a NegPair."
-  (gen/one-of [(gen/fmap (fn [m] [:triple m]) gen-fields)
-               (gen/fmap (fn [[positive? a]] [(if positive? :pos :neg) {:a a}])
-                         (gen/tuple gen/boolean gen/small-integer))]))
-
-(defspec parse-all-agrees-with-parse-across-declarations 300
-  (prop/for-all [tms (gen/vector gen-mixed-fields 0 8)]
-    (let [draft-of-any (fn [[t m]] (case t
-                                     :triple (triple m)
-                                     :pos    (pt/draft PosPair {:a (:a m)})
-                                     :neg    (pt/draft NegPair {:a (:a m)})))
-          each         (mapv #(outcome (fn [] (pt/parse (draft-of-any %)))) tms)]
-      (= (parse-all-from-parse each)
-         (outcome #(pt/parse-all (mapv draft-of-any tms)))))))
+(defspec each-declaration-uses-its-own-fetch 300
+  (prop/for-all [as (gen/vector gen/small-integer 0 8)]
+    (let [ms (mapv (fn [a] {:a a}) as)]
+      (and (= (parse-all-from-parse (mapv #(outcome (fn [] (pt/parse PosPair %))) ms))
+              (outcome #(pt/parse-all PosPair ms)))
+           (= (parse-all-from-parse (mapv #(outcome (fn [] (pt/parse NegPair %))) ms))
+              (outcome #(pt/parse-all NegPair ms)))))))
 
 ;;; Sums
 
@@ -265,20 +248,21 @@
     PosPair p [:pair (:a (pt/parsed PosPair p))]))
 
 (def ^:private gen-candidate
-  "A parsed member, a forged member, a draft, or a parsed value of another type."
-  (gen/one-of [(gen/fmap (fn [m] [:parsed (triple m)]) gen-valid-fields)
-               (gen/fmap (fn [a] [:parsed (pt/draft PosPair {:a a})]) (gen/fmap inc gen/nat))
-               (gen/fmap (fn [m] [:forged m]) gen-any-fields)
-               (gen/fmap (fn [a] [:draft (pt/draft PosPair {:a a})]) gen/small-integer)
-               (gen/fmap (fn [a] [:other (pt/draft NegPair {:a a})]) (gen/fmap #(- -1 %) gen/nat))]))
+  "A parsed member, a forged member, a plain map of a member's fields, or a parsed value of another type: `[kind
+  type-or-nil fields]`."
+  (gen/one-of [(gen/fmap (fn [m] [:parsed Triple m]) gen-valid-fields)
+               (gen/fmap (fn [a] [:parsed PosPair {:a a}]) (gen/fmap inc gen/nat))
+               (gen/fmap (fn [m] [:forged nil m]) gen-any-fields)
+               (gen/fmap (fn [a] [:plain nil {:a a}]) gen/small-integer)
+               (gen/fmap (fn [a] [:other NegPair {:a a}]) (gen/fmap #(- -1 %) gen/nat))]))
 
 (defspec match-runs-only-on-parsed-members 300
-  (prop/for-all [[kind d] gen-candidate]
+  (prop/for-all [[kind t m] gen-candidate]
     (let [x      (case kind
-                   :parsed (pt/parse d)
-                   :forged (Triple. (:user-id d) (:a d) (:b d) (:c d) nil)
-                   :draft  d
-                   :other  (pt/parse d))
+                   :parsed (pt/parse t m)
+                   :forged (Triple. (:user-id m) (:a m) (:b m) (:c m) nil)
+                   :plain  m
+                   :other  (pt/parse t m))
           result (try (which x) (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))]
       (if (= :parsed kind)
         (= [(if (instance? Triple x) :triple :pair) (:a (read-parsed x))] result)

@@ -1,7 +1,7 @@
 (ns parsed-types.core
   "Parse, don't validate, for Clojure.
 
-  [[defparsed]] defines a parsed type, its draft, and the checks between them. [[parse]] runs the checks on a draft and
+  [[defparsed]] defines a parsed type and its checks. [[parse]] runs the checks on a map of the type's fields and
   returns a new value of the parsed type, or throws. A function that needs checked data takes the parsed type and
   nothing else:
 
@@ -24,16 +24,15 @@
   A `pure` check is one that should read only its arguments; an `external` one reads the world. The library holds a
   check to the fields it names and refuses field values that can change, but it cannot stop a pure check from
   calling the world. What it guarantees: nothing fetches and no external check runs until every pure check of the
-  draft passes.
+  input passes.
 
-  A field may hold values [[parse]] issued, but never a draft: parse the parts first, then the whole, as in
-  `(pt/parse (pt/draft Order {:customer-id c, :lines (pt/parse-all line-drafts)}))`.
+  A field may hold values [[parse]] issued: parse the parts first, then the whole, as in
+  `(pt/parse Order {:customer-id c, :lines (pt/parse-all OrderLine lines)})`.
 
-  Drafts and parsed values are not maps. [[parsed]] is the only way to read a parsed value: it checks the proof and
-  returns the fields as a plain map. Any other read, as `(:amount x)` or destructuring, throws `::must-unwrap`, so a
-  sink that skips [[parsed]] fails on the first real value. A draft has no read path. Printing either shows its
-  fields, for people, not code. A parsed value cannot change:
-  to change one, take [[draft-of]] it, `assoc`, and [[parse]] again.
+  A parsed value is not a map. [[parsed]] is the only way to read one: it checks the proof and returns the fields as a
+  plain map. Any other read, as `(:amount x)` or destructuring, throws `::must-unwrap`, so a sink that skips
+  [[parsed]] fails on the first real value. Printing shows its fields, for people, not code. A parsed value cannot
+  change: to change one, parse a changed map, as in `(pt/parse Debit (assoc (pt/parsed Debit d) :amount 5M))`.
 
   A parsed value carries its proof: a hidden field that only [[parse]] sets. So [[parsed]] needs no registry of
   issued values, and a value built by hand, equal or not, is refused.
@@ -85,40 +84,33 @@
 ;; issued parsed.
 (defonce ^:private parse-token (Object.))
 
-(defclass-once
-  (definterface DraftValue))
-
 (declare printed-fields)
 
 (defn- print-typed
-  "Print `x`, a draft or parsed value, as `#ns.Type{...}`, like a record, so it is told apart from a plain map. The
-  proof is not a field, so it is never printed. The reader cannot build one back: the type is not a record."
+  "Print `x`, a parsed value, as `#ns.Type{...}`, like a record, so it is told apart from a plain map. The proof is not
+  a field, so it is never printed. The reader cannot build one back: the type is not a record."
   [x ^java.io.Writer w]
   (.write w (str "#" (.getName (class x))))
   (print-method (printed-fields x) w))
 
-;; one method per interface, preferred over the collection's, so a defparsed adds none
+;; one method on the library interface, preferred over the collection's, so a defparsed adds none
 (defmethod print-method ParsedValue [x w] (print-typed x w))
-(defmethod print-method DraftValue [x w] (print-typed x w))
-(doseq [i [ParsedValue DraftValue]]
-  (prefer-method print-method i clojure.lang.IPersistentCollection)
-  (defmethod pprint/simple-dispatch i [x]
-    (.write ^java.io.Writer *out* (str "#" (.getName (class x))))
-    (pprint/simple-dispatch (printed-fields x)))
-  (prefer-method pprint/simple-dispatch i clojure.lang.IPersistentCollection))
+(prefer-method print-method ParsedValue clojure.lang.IPersistentCollection)
+(defmethod pprint/simple-dispatch ParsedValue [x]
+  (.write ^java.io.Writer *out* (str "#" (.getName (class x))))
+  (pprint/simple-dispatch (printed-fields x)))
+(prefer-method pprint/simple-dispatch ParsedValue clojure.lang.IPersistentCollection)
 
 ;;; ------------------------------------------------ State ------------------------------------------------
 
-;; Draft type -> its plan, and parsed type -> the same plan, by identity. Written once per class, when its `defparsed`
-;; loads. It holds every class it was given, so a class a REPL replaces is never released: a REPL-only leak, of two
-;; classes and a plan per re-evaluation.
+;; Parsed type -> its plan, by identity. Written once per class, when its `defparsed` loads. It holds every class it
+;; was given, so a class a REPL replaces is never released: a REPL-only leak, of a class and a plan per re-evaluation.
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap registry
   (java.util.concurrent.ConcurrentHashMap.))
 
-;; Class name -> `{:ns :role :type}`: the namespace, as written, whose `defparsed` first claimed it, the role the class
-;; has there, `:parsed` or `:draft`, and the parsed type's name. `my-app.bank` and `my_app.bank` compile to the same
-;; Java names, and a type named `FooDraft` has the name of `Foo`'s draft, so without this one `defparsed` could
-;; redefine the classes of another.
+;; Class name -> `{:ns :type}`: the namespace, as written, whose `defparsed` first claimed it, and the parsed type's
+;; name. `my-app.bank` and `my_app.bank` compile to the same Java names, so without this one `defparsed` could
+;; redefine the class of another.
 (defonce ^:private ^java.util.concurrent.ConcurrentHashMap owners
   (java.util.concurrent.ConcurrentHashMap.))
 
@@ -133,10 +125,10 @@
   (java.util.concurrent.ConcurrentHashMap.))
 
 (defn- printed-fields
-  "The fields of `x`, a draft or parsed value, as a plain map, for printing only: or `{}` when its class has no plan."
+  "The fields of `x`, a parsed value, as a plain map, for printing only: or `{}` when its class has no plan."
   [x]
   (if-let [plan (.get registry (class x))]
-    ((if (instance? DraftValue x) (:read-draft plan) (:read-parsed plan)) x)
+    ((:read-parsed plan) x)
     {}))
 
 (defn- edit-distance
@@ -178,11 +170,11 @@
   (if-let [m (nearest k candidates)] (str " Did you mean " (pr-str m) "?") ""))
 
 (defn- library-value!
-  "Throws `::bad-input` unless `x` is a draft or a parsed value. `fn-name` names the fn that got it, which the types
+  "Throws `::bad-input` unless `x` is a parsed value. `fn-name` names the fn that got it, which the types
   [[defparsed]] defines call."
   [fn-name x]
-  (when-not (or (instance? DraftValue x) (instance? ParsedValue x))
-    (throw (ex-info (str fn-name " got " (pr-str x) ", which is not a draft or parsed value. It reports a change or a"
+  (when-not (instance? ParsedValue x)
+    (throw (ex-info (str fn-name " got " (pr-str x) ", which is not a parsed value. It reports a change or a"
                          " missing field of a type defparsed defined, and the types call it. Read a missing key of"
                          " your own map with (get m k default), and change it with assoc.")
                     {:type ::bad-input, :rule ::rule/not-a-library-value, :fn fn-name
@@ -214,34 +206,10 @@
                                                 " plain map with (pt/parsed " n " x).")}
                                  {:rule    ::rule/parsed-value-is-final
                                   :message (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n) ": a parsed value"
-                                                " never changes, so its checks stay true. Use (pt/parse (assoc"
-                                                " (pt/draft-of x) " (if (some? k) (pr-str k) ":field") " v)) for a"
-                                                " changed copy.")})]
+                                                " never changes, so its checks stay true. Parse a changed map for a changed copy, as in"
+                                                " (pt/parse " n " (assoc (pt/parsed " n " x) "
+                                                (if (some? k) (pr-str k) ":field") " v)).")})]
     (throw (ex-info message {:type ::cannot-change, :rule rule, :parsed (.getName (class parsed)), :op op, :key k}))))
-
-(defn- fixed!
-  "Throws `::cannot-change`: a draft's fields are fixed. `k` is the key `op` was given, or nil. A key that is not a
-  field throws `::no-field` first. Called by the draft types [[defparsed]] defines."
-  [draft op k]
-  (library-value! "parsed-types.core/fixed!" draft)
-  (when (and (some? k) (not (some #{k} (fields-of draft))))
-    (no-field! draft k op))
-  (let [n                      (.getSimpleName (class draft))
-        {:keys [rule message]} (case op
-                                 "with-meta"
-                                 {:rule    ::rule/no-metadata
-                                  :message (str "with-meta on " (a-or-an n) ": a draft carries no metadata, so it holds only"
-                                                " what parse checks. Keep the metadata beside it, as in {:value x,"
-                                                " :meta m}.")}
-                                 "empty"
-                                 {:rule    ::rule/no-empty
-                                  :message (str n " has fixed fields, so it has no empty version. Build one with"
-                                                " pt/draft, naming every field.")}
-                                 {:rule    ::rule/draft-fields-are-fixed
-                                  :message (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n) ": a draft has"
-                                                " fixed fields, set one at a time with assoc. Use (assoc d "
-                                                (if (some? k) (pr-str k) ":field") " v).")})]
-    (throw (ex-info message {:type ::cannot-change, :rule rule, :draft (.getName (class draft)), :op op, :key k}))))
 
 (defn- no-field!
   "Throws `::no-field`: `x` has no field `k`, which `op`, a change such as `\"assoc\"`, named. Called by the types
@@ -250,65 +218,50 @@
   (library-value! "parsed-types.core/no-field!" x)
   (let [fields  (fields-of x)
         n       (.getSimpleName (class x))
-        draft?  (instance? DraftValue x)
         nearest (nearest k fields)
         field   (pr-str (or nearest (first fields)))]
-    (throw (ex-info (cond
-                      (empty? fields)
+    (throw (ex-info (if (empty? fields)
                       (str n " has no field " (pr-str k) ": it has no fields at all. Add the field to its defparsed, as"
-                           " in (defparsed " (if draft? (subs n 0 (- (count n) 5)) n) " ["
-                           (if (keyword? k) (name k) "field") "]).")
-
-                      draft?
-                      (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A draft has fixed fields. Set"
-                           " one of " fields ", as in (assoc d " field " v).")
-
-                      :else
+                           " in (defparsed " n " [" (if (keyword? k) (name k) "field") "]).")
                       (str n " has no field " (pr-str k) "." (did-you-mean k fields) " A parsed value has fixed"
-                           " fields, and never changes. Change one of " fields " on a copy, as in (pt/parse (assoc"
-                           " (pt/draft-of x) " field " v))."))
+                           " fields, and never changes. Change one of " fields " on a copy, as in (pt/parse " n
+                           " (assoc (pt/parsed " n " x) " field " v))."))
                     (cond-> {:type                     ::no-field
                              :rule                     ::rule/no-such-field-assoc
-                             (if draft? :draft :parsed) (.getName (class x))
+                             :parsed                   (.getName (class x))
                              :key                      k
                              :op                       op
                              :fields                   fields}
                       nearest (assoc :suggestion nearest))))))
 
 (defn- must-unwrap!
-  "Throws `::must-unwrap`: `op` read `x`, a draft or parsed value, which is not a map. `k` is the key read, or nil. A
-  parsed value is read only through [[parsed]], which checks its proof, so a sink that reads without it fails on the
-  first real value instead of also accepting a plain map. A draft is unchecked, so it has no read path. Called by the
-  types [[defparsed]] defines."
+  "Throws `::must-unwrap`: `op` read `x`, a parsed value, which is not a map. `k` is the key read, or nil. A parsed
+  value is read only through [[parsed]], which checks its proof, so a sink that reads without it fails on the first
+  real value instead of also accepting a plain map. Called by the types [[defparsed]] defines."
   [x op k]
   (library-value! "parsed-types.core/must-unwrap!" x)
-  (let [draft? (instance? DraftValue x)
-        n      (.getSimpleName (class x))
-        t      (if draft? (subs n 0 (max 0 (- (count n) 5))) n)
-        fields (fields-of x)
-        what   (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an n))]
-    (throw (ex-info (if draft?
-                      (str what ": a draft is unchecked input, so it cannot be read. Parse it, then read the parsed"
-                           " value through pt/parsed, as in (pt/parsed " t " (pt/parse d)).")
-                      (str what ": a parsed value is read only through pt/parsed, which checks the proof. "
-                           (if (seq fields)
-                             (str "Write (let [{:keys [" (clojure.string/join " " (map name fields)) "]} (pt/parsed " t
-                                  " x)] ...).")
-                             (str t " has no fields to read: check it with (pt/parsed " t " x)."))
-                           (when (and (some? k) (not (some #{k} fields)))
-                             (str " " t " has no field " (pr-str k) "." (did-you-mean k fields)))))
-                    (cond-> {:type                     ::must-unwrap
-                             :rule                     (if draft? ::rule/draft-not-readable ::rule/read-through-parsed)
-                             (if draft? :draft :parsed) (.getName (class x))
-                             :op                       op}
+  (let [t      (.getSimpleName (class x))
+        fields (fields-of x)]
+    (throw (ex-info (str op (when (some? k) (str " " (pr-str k))) " on " (a-or-an t) ": a parsed value is read only"
+                         " through pt/parsed, which checks the proof. "
+                         (if (seq fields)
+                           (str "Write (let [{:keys [" (clojure.string/join " " (map name fields)) "]} (pt/parsed " t
+                                " x)] ...).")
+                           (str t " has no fields to read: check it with (pt/parsed " t " x)."))
+                         (when (and (some? k) (not (some #{k} fields)))
+                           (str " " t " has no field " (pr-str k) "." (did-you-mean k fields))))
+                    (cond-> {:type   ::must-unwrap
+                             :rule   ::rule/read-through-parsed
+                             :parsed (.getName (class x))
+                             :op     op}
                       (some? k) (assoc :key k))))))
 
 (defn- opaque-type-methods
-  "The interfaces and methods of a draft or parsed type with `fields`, whose class is named `class-sym`. It is not a
+  "The interfaces and methods of a parsed type with `fields`, whose class is named `class-sym`. It is not a
   map: each read, as `(:k x)`, `(x :k)`, `get`, destructuring, `contains?`, `find`, `count` or `seq`, throws
   [[must-unwrap!]]. `assoc-form`, over `this`, `k` and `v`, is what `assoc` does; `final-name`, the form of a fn,
   throws for any other change. `same-proof`, of the other value's symbol, is the form that says whether it holds this
-  value's proof, or nil for a type without one. Every function in these bodies is written qualified, so no field name
+  value's proof. Every function in these bodies is written qualified, so no field name
   can shadow it."
   [class-sym fields this k v assoc-form final-name same-proof]
   (clojure.core/let [nf     (gensym "not-found")
@@ -322,7 +275,7 @@
                               (clojure.core/identical? (clojure.core/class ~this) (clojure.core/class ~o))
                               (clojure.core/let [~other ~o]
                                 (clojure.core/and
-                                 ~@(when same-proof [(same-proof other)])
+                                 ~(same-proof other)
                                  ~@(map (fn [f] `(clojure.core/= ~f (. ~other ~(symbol (str "-" f))))) fields))))
                      hash   `(clojure.core/hash [~(str class-sym) ~@fields])]
     `[clojure.lang.Associative
@@ -404,30 +357,28 @@
                         (vec reserved) ". Rename it, as in proof."))))
 
 (defn- builders
-  "The form of the plain fns the plan of `parsed-name` and `draft-name`, with `fields`, uses to build and read values,
-  so that parsing calls no reflection:
+  "The form of the plain fns the plan of `parsed-name`, with `fields`, uses to build and read values, so that parsing
+  calls no reflection:
 
   - `:make-parsed`, of a map of the fields and a proof, builds a parsed value;
-  - `:make-draft`, of a map of the fields, builds a draft;
-  - `:read-draft`, of a draft, returns a map of its fields, each read once from its Java field;
-  - `:read-parsed`, of a parsed value, the same, for [[parsed]]: neither type can be read any other way."
-  [parsed-name draft-name fields]
-  (clojure.core/let [m (gensym "m"), proof (gensym "proof"), d (vary-meta (gensym "d") assoc :tag draft-name)
+  - `:read-parsed`, of a parsed value, returns a map of its fields, each read from its Java field, for [[parsed]]: a
+    parsed value cannot be read any other way."
+  [parsed-name fields]
+  (clojure.core/let [m (gensym "m"), proof (gensym "proof")
                      p (vary-meta (gensym "p") assoc :tag parsed-name)
                      kws (mapv keyword fields)]
     `{:fields      ~kws
       :make-parsed (fn [~m ~proof] (new ~parsed-name ~@(map (fn [k] `(clojure.core/get ~m ~k)) kws) ~proof))
-      :make-draft  (fn [~m] (new ~draft-name ~@(map (fn [k] `(clojure.core/get ~m ~k)) kws)))
-      :read-draft  (fn [~d] ~(into {} (map (fn [f] [(keyword f) `(. ~d ~(symbol (str "-" f)))])) fields))
       :read-parsed (fn [~p] ~(into {} (map (fn [f] [(keyword f) `(. ~p ~(symbol (str "-" f)))])) fields))}))
 
 (defn- defparsed-type
   "The form that defines `name`, a bare parsed type with `fields`, which only [[parse]] issues. It is not a map: every
   read throws `::must-unwrap`, and `assoc`, `conj` and `with-meta` throw `::cannot-change`. Only [[defparsed]] calls
-  this, when it expands: it is private, so a parsed type cannot be defined apart from its draft and its checks.
+  this, when it expands: it is private, so a parsed type cannot be defined apart from its checks.
 
   The type has one more field, `parse-proof`, which is not a field of the type: [[parsed]] does not return it, and it
-  is not in equality, the hash or the printed form. [[parse]] sets it to the proof; any other constructor call leaves it something else. The field
+  is not in equality, the hash or the printed form. [[parse]] sets it to the proof; any other constructor call leaves
+  it something else. The field
   is `volatile-mutable`, which Clojure compiles to a field that is not public, so interop cannot read it, and nothing
   sets it after the constructor: code outside the type can only ask `issuedWith` whether it holds a given object.
   The positional factory `->Name` is removed, so code outside this library has no plain function that builds one."
@@ -444,28 +395,13 @@
                                   `(.issuedWith ~(with-meta o {:tag 'parsed_types.core.ParsedValue}) ~'parse-proof))))
        (ns-unmap *ns* '~(symbol (str "->" name))))))
 
-(defn- defdraft-type
-  "The form that defines `name`, a bare draft type with `fields`. It is not a map: every read throws `::must-unwrap`.
-  `assoc` sets a field, and throws for a key that is not one; `conj` and `with-meta` throw. The positional factory `->NameDraft` is removed: [[draft]]
-  builds a draft, naming every field. Only [[defparsed]] calls this, when it expands."
-  [name fields]
-  (clojure.core/let [this (gensym "this"), k (gensym "k"), v (gensym "v")]
-    `(do
-       (deftype ~name [~@fields]
-         parsed_types.core.DraftValue
-         ~@(opaque-type-methods name fields this k v
-                                `((var assoc-draft) ~this ~k ~v) `(var fixed!) nil))
-       ;; positional, so reordering the fields would silently swap values: pt/draft names every field instead
-       (ns-unmap *ns* '~(symbol (str "->" name))))))
-
 (defn- not-loaded!
   "Throws `::bad-declaration` when `c` is a class a `defparsed` claimed and defined but never registered: an error
   stopped it after its `deftype`s. `where` names what got it. Returns nil for any other class."
   [where ^Class c]
-  (when (and (or (.isAssignableFrom DraftValue c) (.isAssignableFrom ParsedValue c))
-             (nil? (.get registry c)))
-    (when-let [{:keys [ns type role]} (.get owners (.getName c))]
-      (throw (ex-info (str where " got " (if (= :draft role) "a draft of " "the type ") (.getName c) ", but the"
+  (when (and (.isAssignableFrom ParsedValue c) (nil? (.get registry c)))
+    (when-let [{:keys [ns type]} (.get owners (.getName c))]
+      (throw (ex-info (str where " got the type " (.getName c) ", but the"
                            " defparsed " type " in " ns " failed to load: an error stopped it after it defined its"
                            " classes, so they have no checks. A type is ready only once its defparsed has loaded. Fix"
                            " that error and re-evaluate the defparsed " type ", or reload its namespace, as in"
@@ -557,27 +493,26 @@
   [nss]
   (str "(require " (clojure.string/join " " (map #(str "'" %) (distinct nss))) " :reload)"))
 
-(defn- draft-hint
-  "The code that builds a draft of the parsed class `c`, naming its fields, for an error message."
+(defn- input-hint
+  "The map of the fields of the parsed class `c`, as `{:n ...}`, for an error message."
   [^Class c]
-  (str "(pt/draft " (.getSimpleName c) " {"
-       (clojure.string/join ", " (map #(str % " ...") (:fields (.get registry c))))
-       "})"))
+  (str "{" (clojure.string/join ", " (map #(str % " ...") (:fields (.get registry c)))) "}"))
 
 (defn- parse-hint
   "The code that makes a parsed value of `type`, a parsed class or a sum, for an error message."
   [type]
   (if (sum? type)
-    (clojure.string/join " or " (map #(str "(pt/parse " (draft-hint %) ")") (sum-members type)))
-    (str "(pt/parse " (draft-hint type) ")")))
+    (clojure.string/join " or " (map #(str "(pt/parse " (.getSimpleName ^Class %) " " (input-hint %) ")")
+                                      (sum-members type)))
+    (str "(pt/parse " (.getSimpleName ^Class type) " " (input-hint type) ")")))
 
 (defn- stale-value!
-  "Throws `::stale-type`: `what`, a value or draft of the parsed class `c`, is from before `c`'s `defparsed` was
+  "Throws `::stale-type`: `what`, a value of the parsed class `c`, is from before `c`'s `defparsed` was
   re-evaluated, and the code that got it expects the class defined since."
   [where what ^Class c]
   (throw (ex-info (str where " got " what " of " (.getName c) " from before " (defined-in c) " was re-evaluated. Types"
                        " compare by class, like records, and re-evaluating a defparsed makes new classes. Build it"
-                       " again from a new draft, as in " (parse-hint c) ", or re-run the code that built it.")
+                       " again, as in " (parse-hint c) ", or re-run the code that built it.")
                   {:type ::stale-type, :rule ::rule/stale-value, :class (.getName c)})))
 
 (defn- type-name [type]
@@ -702,19 +637,11 @@
                                      " as in " (reload-command nss) ".")))
                          {:type ::stale-type, :rule ::rule/stale-match, :sum (str sum-name), :class (name-of t)
                           :sum-ns sum-ns}))))
-     ;; before the missing members: a clause that names a draft type is usually the member it misses
+     ;; before the missing members: a clause that names another type is usually the member it misses
      (when (seq extra)
        (refuse! ::rule/match-not-a-member
                 (str "match on " sum-name ": not members: " (mapv simple extra) ". A clause handles a member of the"
-                     " sum. "
-                     (if-let [[d p] (first (keep (fn [^Class c]
-                                                   (when (.isAssignableFrom DraftValue c)
-                                                     (some->> (.get registry c) :parses-to
-                                                              (#(when (member? s %) [c %])))))
-                                                 extra))]
-                       (str (simple d) " is the draft of " (simple p) ", and a match branches on parsed values."
-                            " Write " (simple p) " for " (simple d) ".")
-                       "Remove those clauses, or add the types to the defsum."))
+                     " sum. Remove those clauses, or add the types to the defsum.")
                 {:extra (mapv name-of extra)}))
      (when (seq missing)
        (let [simple (mapv simple missing)]
@@ -743,34 +670,22 @@
 
 ;;; ------------------------------------------------ defparsed ------------------------------------------------
 
-(defn- claim-class-names!
-  "Throws `::bad-declaration` unless the `defparsed` of `parsed-name` in the namespace `ns-sym` may define the classes
-  in `claims`, a map from class name to its role, `:parsed` or `:draft`: each name is unclaimed, or claimed by this
-  namespace in the same role, as when a REPL re-evaluates the form. When `record?`, records the claims."
-  [ns-sym parsed-name claims record?]
+(defn- claim-class-name!
+  "Throws `::bad-declaration` unless the `defparsed` of `parsed-name` in the namespace `ns-sym` may define the class
+  named `class-name`: the name is unclaimed, or claimed by this namespace, as when a REPL re-evaluates the form. When
+  `record?`, records the claim."
+  [ns-sym parsed-name class-name record?]
   (locking owners
-    (doseq [[class-name role] claims
-            :let  [{owner :ns, owner-role :role, owner-type :type} (.get owners class-name)]
-            :when owner]
-      (cond
-        (not= owner ns-sym)
+    (let [{owner :ns} (.get owners class-name)]
+      (when (and owner (not= owner ns-sym))
         (throw (ex-info (str "defparsed " parsed-name ": " class-name " is already defined by a defparsed in the"
                              " namespace " owner ", and the namespace " ns-sym " compiles to the same Java class"
-                             " name. One namespace's defparsed would redefine the other's classes. Rename one of the"
+                             " name. One namespace's defparsed would redefine the other's class. Rename one of the"
                              " namespaces, as in " ns-sym "-2.")
                         {:type ::bad-declaration, :rule ::rule/class-name-taken, :class class-name, :owner owner
-                         :ns ns-sym}))
-
-        (not= owner-role role)
-        (throw (ex-info (str "defparsed " parsed-name ": " class-name " is already the " (name owner-role) " type of"
-                             " (defparsed " owner-type " ...) in " owner ", and this defparsed would make it its "
-                             (name role) " type. A class name has one role, and the draft of Name is NameDraft."
-                             " Rename one of the types, as in (defparsed " parsed-name "2 ...).")
-                        {:type ::bad-declaration, :rule ::rule/class-name-other-role, :class class-name
-                         :role role, :owner-role owner-role, :owner-type owner-type}))))
+                         :ns ns-sym}))))
     (when record?
-      (doseq [[class-name role] claims]
-        (.put owners class-name {:ns ns-sym, :role role, :type parsed-name})))))
+      (.put owners class-name {:ns ns-sym, :type parsed-name}))))
 
 (defn- parse-check-clause
   "`(pure name doc [field ...] body ...)` or `(external name doc [field ...] [local fetch ...]? body ...)`, a clause
@@ -814,7 +729,7 @@
                           " Write it after the doc string, like [" (first fields) "].")))
     (when-let [unknown (seq (remove (set fields) args))]
       (syntax-error! form ::rule/reads-unknown-field
-                     (str what " reads fields the draft does not have: " (vec unknown) "."
+                     (str what " reads fields the type does not have: " (vec unknown) "."
                           (did-you-mean (first unknown) fields) " Use only its fields " fields ".")))
     (when-let [twice (seq (for [[f c] (frequencies args) :when (< 1 c)] f))]
       (syntax-error! form ::rule/field-named-twice
@@ -866,7 +781,7 @@
   (when-not (and (vector? reads) (every? (set fields) reads))
     (syntax-error! form ::rule/reads-unknown-field
                    (str "the fetch " (pr-str n) " reads " (pr-str reads) ". A fetch needs a vector of fields of the"
-                        " draft." (if (vector? reads) (did-you-mean (first (remove (set fields) reads)) fields) "")
+                        " type." (if (vector? reads) (did-you-mean (first (remove (set fields) reads)) fields) "")
                         " Name some of " fields ".")))
   (when-not f
     (syntax-error! form ::rule/fetch-no-fn
@@ -875,8 +790,8 @@
   {:name n, :reads (mapv keyword reads), :f f})
 
 (defmacro defparsed
-  "Define `parsed-name`, a parsed type with `fields`, its draft type `<parsed-name>Draft` with the same fields, and the
-  checks [[parse]] runs to turn a draft into a parsed value. Build a draft with [[draft]].
+  "Define `parsed-name`, a parsed type with `fields`, and the checks [[parse]] runs to turn a map of those fields into
+  a parsed value, as in `(pt/parse Order {:customer-id c, :lines ls, :subtotal s})`.
 
     (defparsed Order [customer-id lines subtotal]
       (pure ::lines-parsed \"Every line is a parsed OrderLine.\"
@@ -892,8 +807,8 @@
   - `(pure name doc [field ...] body ...)`: a check over the named fields.
   - `(external name doc [field ...] [local fetch-name ...]? body ...)`: a check over the named fields and the
     results of the named fetches.
-  - `(fetch name [field ...] f)`: `f` takes every distinct tuple of the fields, and returns a map from each tuple to
-    what it fetched. `f` is a fn, or a var that holds one, as in `#'rows-by-id`: a var is called through, so a test
+  - `(fetch name [field ...] f)`: `f` takes a vector of every distinct tuple of the fields, such as `[[7] [8]]` for
+    `[product-id]`, and returns a map from each tuple to what it fetched, with nil for a tuple that found nothing. `f` is a fn, or a var that holds one, as in `#'rows-by-id`: a var is called through, so a test
     can stub it with `with-redefs`.
 
   A check takes no options. Its argument vector is the fields it reads: one that is not a field is a compile error.
@@ -903,17 +818,15 @@
   pure check written before one that reads a proper subset of its fields is a compile error: move the smaller one
   first, so the check that fails first names the root cause.
 
-  A field may hold values [[parse]] issued, which are not checked again, but never a draft: parse the parts first.
+  A field may hold values [[parse]] issued, which are not checked again: parse the parts first.
 
   Write `defparsed` at the top level of a namespace: inside another form it throws `::bad-declaration`.
 
   The plan [[parse]] follows is built and checked when the form loads, so every declaration error throws
   `::bad-declaration` then, not at the first parse. The fetch fns are evaluated and checked before any class is
-  defined, so a re-evaluation they refuse leaves the type as it was. Only `defparsed` defines parsed types: the draft
-  type and the parsed type are defined together, so the draft type is the only one that parses to its parsed type.
+  defined, so a re-evaluation they refuse leaves the type as it was. Only `defparsed` defines parsed types.
 
-  Neither type has a positional factory: only [[draft]] builds a draft, naming every field, and only [[parse]]
-  builds a value that [[parsed]] accepts."
+  The type has no positional factory, and only [[parse]] builds a value that [[parsed]] accepts."
   {:arglists '([parsed-name fields & clauses])}
   ([parsed-name]
    (missing-argument! &form ::bad-declaration
@@ -951,10 +864,7 @@
          checks      (mapv #(parse-check-clause parsed-name fields fetch-names %)
                            (filter (comp '#{pure external} first) clauses))
          names       (concat (map :name checks) (map :name fetches))
-         draft-name  (symbol (str parsed-name "Draft"))
-         parsed-class-name (str (namespace-munge *ns*) "." parsed-name)
-         claims      {parsed-class-name                          :parsed
-                      (str (namespace-munge *ns*) "." draft-name) :draft}]
+         parsed-class-name (str (namespace-munge *ns*) "." parsed-name)]
      (when-not (apply distinct? ::sentinel names)
        (syntax-error! &form ::rule/name-used-twice
                       (str "a check or fetch name is used twice: "
@@ -971,48 +881,43 @@
                            (:name small) ", which reads only " (mapv symbol (:reads small)) ". Pure checks run in the"
                            " order written, and the first that fails stops the parse, so a check on fewer fields goes first"
                            " and the failure names the root cause. Move " (:name small) " before " (:name big) ".")))
-     ;; when it expands, so that a refused defparsed never reaches its deftypes, which would redefine the classes
-     (claim-class-names! (ns-name *ns*) parsed-name claims false)
+     ;; when it expands, so that a refused defparsed never reaches its deftype, which would redefine the class
+     (claim-class-name! (ns-name *ns*) parsed-name parsed-class-name false)
      ;; A top-level `do` runs each form before it compiles the next, so a check that fails in the first form leaves
      ;; every class as it was. The private fns through `var`.
      `(do
         ;; the fetch fns, evaluated once and checked before any class is defined
-        ((var stage!) ~parsed-class-name ~(str (namespace-munge *ns*) "." draft-name)
+        ((var stage!) ~parsed-class-name
                       '~(mapv #(select-keys % [:name :reads]) fetches) [~@(map :f fetches)])
-        ;; before the deftypes, which is what records the claim
-        ((var claim-class-names!) '~(ns-name *ns*) '~parsed-name ~claims true)
+        ;; before the deftype, which is what records the claim
+        ((var claim-class-name!) '~(ns-name *ns*) '~parsed-name ~parsed-class-name true)
         ~(defparsed-type parsed-name fields)
-        ~(defdraft-type draft-name fields)
         ;; only this expansion may record a plan
-        ((var register!) ~parsed-name ~draft-name
+        ((var register!) ~parsed-name
                          {:checks  ~checks
                           :fetches '~(mapv #(select-keys % [:name :reads]) fetches)}
-                         ~(builders parsed-name draft-name fields))
+                         ~(builders parsed-name fields))
         ~parsed-name))))
 
 ;;; ------------------------------------------------ Plans ------------------------------------------------
 
 (defn- bad-declaration!
-  "Throws `::bad-declaration` for the declaration of the draft class named `draft-class-name`, which broke `rule`, when
-  its `defparsed` loads."
-  [^String draft-class-name rule message data]
-  (throw (ex-info (str (subs draft-class-name (inc (.lastIndexOf draft-class-name "."))) ": " message)
-                  (merge {:type ::bad-declaration, :rule rule, :draft draft-class-name} data))))
-
-(defn- draft-value?
-  "Whether `x` is a draft of a type [[defparsed]] defined. A type that only implements `DraftValue` is not."
-  [x]
-  (and (instance? DraftValue x) (some? (.get registry (class x)))))
+  "Throws `::bad-declaration` for the declaration of the parsed class named `class-name`, which broke `rule`, when its
+  `defparsed` loads."
+  [^String class-name rule message data]
+  (throw (ex-info (str (subs class-name (inc (.lastIndexOf class-name "."))) ": " message)
+                  (merge {:type ::bad-declaration, :rule rule, :parsed class-name} data))))
 
 (defn- stage!
   "Check what [[defparsed]] cannot see when it expands, only when it loads, before it defines any class: a fetch that
-  is not a fn, or a var that holds one. A var is called through, so `with-redefs` on it reaches the fetch. Throws `::bad-declaration`, so a `defparsed` that fails here changes nothing. Then keep `fetch-fns` for
-  [[register!]]. `fetches` holds each fetch's `:name` and `:reads`, in the order of `fetch-fns`. Called by the
-  expansion of [[defparsed]]."
-  [parsed-class-name draft-class-name fetches fetch-fns]
+  is not a fn, or a var that holds one. A var is called through, so `with-redefs` on it reaches the fetch. Throws
+  `::bad-declaration`, so a `defparsed` that fails here changes nothing. Then keep `fetch-fns` for [[register!]].
+  `fetches` holds each fetch's `:name` and `:reads`, in the order of `fetch-fns`. Called by the expansion of
+  [[defparsed]]."
+  [parsed-class-name fetches fetch-fns]
   (doseq [[{n :name, :keys [reads]} f] (map vector fetches fetch-fns)]
     (when-not (or (fn? f) (and (var? f) (fn? @f)))
-      (bad-declaration! draft-class-name ::rule/fetch-not-fn
+      (bad-declaration! parsed-class-name ::rule/fetch-not-fn
                         (str "the fetch " n " is " (pr-str f) ", not a fn, in (fetch " n " " (mapv symbol reads) " "
                              (pr-str f) "). A fetch is called with the tuples it fetches. Write a fn of the tuples"
                              " it fetches, or a var that holds one, as in (fetch " n " " (mapv symbol reads)
@@ -1026,9 +931,8 @@
   fetches, external checks. The first check that fails stops the parse, so malformed input never reads the world, and
   nothing runs after a failed permission check. [[defparsed]] refuses a pure check written before one that reads a
   proper subset of its fields, so the check that fails first names the root cause."
-  [parses-to draft-class fields {:keys [checks], :as decl}]
-  {:draft-class draft-class
-   :parses-to   parses-to
+  [parses-to fields {:keys [checks], :as decl}]
+  {:parses-to   parses-to
    :declaration (assoc decl :parses-to parses-to)
    :fields      fields
    :pure        (filterv #(= :pure (:kind %)) checks)
@@ -1039,55 +943,87 @@
   "`x` for an error message: nil, a plain map, or a value of its type."
   [x]
   (cond
-    (nil? x)                                            "nil"
-    (and (map? x) (not (instance? ParsedValue x))
-         (not (instance? DraftValue x)))                "a plain map"
-    :else                                               (a-or-an (.getSimpleName (class x)))))
+    (nil? x)                                  "nil"
+    (and (map? x) (not (instance? ParsedValue x))) "a plain map"
+    :else                                     (a-or-an (.getSimpleName (class x)))))
 
 (defn- register!
-  "Build the plan of `draft-type`, which parses to `parsed-type`, and record it for both, with the `builders`
-  [[defparsed]] generated and the fetch fns [[stage!]] kept. Called by the expansion of [[defparsed]], when it loads,
-  after its `deftype`s."
-  [parsed-type draft-type decl builders]
+  "Build the plan of `parsed-type`, and record it, with the `builders` [[defparsed]] generated and the fetch fns
+  [[stage!]] kept. Called by the expansion of [[defparsed]], when it loads, after its `deftype`."
+  [parsed-type decl builders]
   (let [fetch-fns (.remove pending (.getName ^Class parsed-type))
         decl      (update decl :fetches #(mapv (fn [fd f] (assoc fd :f f)) % fetch-fns))
-        plan      (merge (compile-plan parsed-type draft-type (:fields builders) decl) builders)]
-    (.put registry draft-type plan)
+        plan      (merge (compile-plan parsed-type (:fields builders) decl) builders)]
     (.put registry parsed-type plan)
     (.put latest (.getName ^Class parsed-type) parsed-type)))
 
-(declare issued?)
+(declare issued? check-type!)
 
-(defn- plan-for
-  "The plan of `draft`'s type. Throws `::bad-input` for anything but a draft of a type [[defparsed]] defined, naming
-  `fn-name`, the fn that got it, and its fix as a call of that fn."
-  [fn-name draft]
-  (when-not (draft-value? draft)
-    (when (instance? DraftValue draft) (not-loaded! fn-name (class draft)))
-    (let [call (fn [arg] (if (= "pt/parse-all" fn-name) (str "(pt/parse-all [" arg "])") (str "(" fn-name " " arg ")")))]
-      (throw (ex-info (str fn-name " got " (describe draft) ". It takes only drafts of types defparsed defined."
-                           (cond
-                             (issued? draft)
-                             (if (#{"pt/parse" "pt/parse-all"} fn-name)
-                               " It is already parsed: pass it as it is, or call (pt/draft-of x) to get its draft."
-                               (str " It is already parsed: pass its draft, as in " (call "(pt/draft-of x)") "."))
+(defn- plan-of
+  "The plan of `type`, a parsed type [[defparsed]] defined. Throws `::bad-input` for a sum or anything else, naming
+  `fn-name`, the fn that got it."
+  [fn-name type]
+  (when (sum? type)
+    (throw (ex-info (str fn-name " got the sum " (sum-name type) ". It parses into one parsed type, not a sum. Name"
+                         " the member to parse into, as in (" fn-name " "
+                         (.getSimpleName ^Class (first (sum-members type))) " m).")
+                    {:type ::bad-input, :rule ::rule/not-a-parsed-type, :fn fn-name, :got (str (sum-name type))})))
+  (check-type! fn-name type)
+  (.get registry type))
 
-                             (instance? ParsedValue draft)
-                             (str " It is " (a-or-an (.getSimpleName (class draft))) " that pt/parse did not issue: a value"
-                                  " with no proof. Build a draft and pass that, as in "
-                                  (call (draft-hint (class draft))) ".")
+(defn- key-refusal
+  "nil when `m`, a map given to `fn-name` for the parsed type named `t`, has exactly the keys `fields`, else
+  `[rule message data]`. `at` names where `m` is, for `parse-all`, or is empty."
+  [fn-name t fields m at]
+  (let [unknown (vec (remove (set fields) (keys m)))
+        missing (vec (remove #(contains? m %) fields))
+        m-hint  (str "{" (clojure.string/join ", " (map #(str % " ...") fields)) "}")
+        call    (str "(" fn-name " " t " " (if (= "pt/parse-all" fn-name) (str "[" m-hint "]") m-hint) ")")]
+    (cond
+      (seq unknown)
+      [::rule/input-unknown-keys
+       (str fn-name ": " t " has no fields " unknown at "." (did-you-mean (first unknown) fields) " A map to parse names"
+            " only fields; its fields are " fields ". Remove the others, as in (select-keys m " fields ").")
+       (cond-> {:unknown unknown, :fields fields}
+         (nearest (first unknown) fields) (assoc :suggestion (nearest (first unknown) fields)))]
 
-                             :else
-                             (str " Build a draft with pt/draft, naming every field, as in "
-                                  (call "(pt/draft Debit {:user-id u, :account-id a, :amount n})") ".")))
-                      {:type ::bad-input, :rule ::rule/not-a-draft, :fn fn-name, :got (some-> draft class .getName)}))))
-  (.get registry (class draft)))
+      (seq missing)
+      [::rule/input-missing-keys
+       (str fn-name ": " t " needs every field; missing " missing at ". A map to parse names every field, so none is"
+            " left out by mistake. Write nil for a field you mean to leave empty, as in " call ".")
+       {:missing missing, :fields fields}])))
+
+(defn- check-input!
+  "Throws `::bad-input` unless `m`, given to `fn-name` for the parsed type `type` with `plan`, is a map with exactly the
+  type's fields. `index` is its index in `parse-all`, or nil."
+  [fn-name ^Class type plan m index]
+  (let [t    (.getSimpleName type)
+        at   (if index (str " in the map at index " index) "")
+        data (cond-> {:type ::bad-input, :fn fn-name, :parsed (.getName type)} index (assoc :index index))
+        fail (fn [rule message more] (throw (ex-info message (merge data {:rule rule} more))))]
+    (cond
+      (issued? m)
+      (fail ::rule/already-parsed
+            (str fn-name " got a parsed " (.getSimpleName (class m)) at ", which is already parsed. Pass it as it is,"
+                 " or parse a changed map, as in (pt/parse " t " (assoc (pt/parsed " t " x) :field v)).")
+            {:got (.getName (class m))})
+
+      (not (map? m))
+      (fail ::rule/input-not-a-map
+            (str fn-name " got " (describe m) at " for " t ". It parses a map of " t "'s fields, as in (" fn-name " " t
+                 " " (input-hint type) ")" (when (instance? ParsedValue m) ": a value pt/parse did not issue is no input")
+                 ".")
+            {:got (some-> m class .getName)})
+
+      :else
+      (when-let [[rule message more] (key-refusal fn-name t (:fields plan) m at)]
+        (fail rule message more)))))
 
 (defn declaration
-  "The declaration `defparsed` wrote for `draft`'s type: `{:parses-to :checks :fetches}`, as data. Throws
-  `::bad-input` for anything but a draft."
-  [draft]
-  (:declaration (plan-for "pt/declaration" draft)))
+  "The declaration `defparsed` wrote for the parsed type `type`: `{:parses-to :checks :fetches}`, as data. Throws
+  `::bad-input` for anything but a parsed type."
+  [type]
+  (:declaration (plan-of "pt/declaration" type)))
 
 ;;; ------------------------------------------------ Running ------------------------------------------------
 
@@ -1176,10 +1112,6 @@
            (str "A class that only implements ParsedValue is never parsed: pass a value of a type defparsed defined,"
                 " as pt/parse returns it."))])
 
-      (instance? DraftValue v)
-      [:refuse ::rule/draft-in-field "a draft"
-       "Parse it first, as in (pt/parse d), or each of a vector of drafts with (pt/parse-all ds)."]
-
       (and (instance? clojure.lang.Sorted v)
            (not (identical? clojure.lang.RT/DEFAULT_COMPARATOR (.comparator ^clojure.lang.Sorted v))))
       [:refuse ::rule/mutable-value "a sorted collection with a custom comparator, which can read state that changes"
@@ -1238,8 +1170,8 @@
   inside the field the first value that is not is, what it is, the fix, and its class. docs/guarantees.md lists what
   it accepts. Accepts nil, the values of [[immutable-classes]], classes, Java enum constants, an `Optional` whose
   value passes, `java.time` values but clocks, values [[parse]] issued, and persistent vectors, maps
-  (records included), sets, lists and queues whose contents pass, map keys and metadata included. Refuses a draft,
-  which no check of this parse looks inside, and a parsed type's value `parse` did not issue. A sorted
+  (records included), sets, lists and queues whose contents pass, map keys and metadata included. Refuses a parsed
+  type's value `parse` did not issue. A sorted
   collection must use the default comparator, since a custom one can read state that changes. Refuses everything
   else, lazy and other seqs too: realizing one could run side effects or never end. Refuses a value nested deeper
   than [[max-value-depth]], with the rule `value-too-deep`.
@@ -1293,20 +1225,20 @@
                         (recur (into (conj stack [:exit x acc parent]) (rseq frames)))))))))))))))
 
 (defn- refuse-mutable!
-  "Throws `::bad-input` when a field of `draft` holds, anywhere inside it, a value that is not known to be immutable,
-  or a draft or an unissued value: the checks would prove a value the parsed value does not keep. There is no
-  opt-out. `walked` is as for [[not-immutable]]."
-  [draft values walked]
+  "Throws `::bad-input` when a field of `values`, the input of the parsed type `type`, holds, anywhere inside it, a
+  value that is not known to be immutable, or an unissued value: the checks would prove a value the parsed value does
+  not keep. There is no opt-out. `index` is the input's index in `parse-all`, or nil. `walked` is as for
+  [[not-immutable]]."
+  [^Class type index values walked]
   (doseq [[field v] values
           :let        [[rule path what fix got] (not-immutable v walked)]
           :when       what]
     (let [shown (if (< 8 (count path)) (str (subvec path 0 8) " and " (- (count path) 8) " levels more") path)]
-      (throw (ex-info (str (.getSimpleName (class draft)) ": the field " field
+      (throw (ex-info (str (.getSimpleName type) (when index (str ", the map at index " index ","))
+                           ": the field " field
                            (when (seq path) (str " at " shown))
                            " holds " what " (" got "). "
                            (case rule
-                             ::rule/draft-in-field
-                             "A field holds values pt/parse issued, never drafts: parse checks only the draft it is given."
                              ::rule/unissued-in-field
                              "A field holds values pt/parse issued, and this one carries no proof."
                              ::rule/url-value
@@ -1319,19 +1251,21 @@
                                   (when (= rule ::rule/value-too-deep) ", and proving it walks a bounded depth")
                                   "."))
                            " " fix)
-                      (merge {:type ::bad-input, :rule rule, :draft (.getName (class draft)), :field field
+                      (merge {:type ::bad-input, :rule rule, :parsed (.getName type), :field field
                               :path path, :got got}
+                             (when index {:index index})
                              ;; a path over the limit is long: the ex-data keeps its first steps and its length
                              (when (= rule ::rule/value-too-deep)
                                {:path (subvec path 0 8), :depth (count path)})))))))
 
-(defn- start [fn-name draft walked]
-  (let [plan   (plan-for fn-name draft)
-        ;; every field read once, so the checks and the parsed value see the same values
-        values ((:read-draft plan) draft)]
-    (refuse-mutable! draft values walked)
-    {:draft   draft
-     :values  values
+(defn- start
+  "The state of parsing `m` into `type`, with `plan`, at `index` of `fn-name`'s call (nil for `parse`): its fields,
+  each read once, so the checks and the parsed value see the same values."
+  [fn-name type plan index m walked]
+  (check-input! fn-name type plan m index)
+  (let [values (into {} (map (fn [k] [k (get m k)])) (:fields plan))]
+    (refuse-mutable! type index values walked)
+    {:values  values
      :plan    plan
      :fetched {}}))
 
@@ -1351,7 +1285,7 @@
 (declare invalid!)
 
 (defn- run-check!
-  "Run `check` on `st`, the state of the draft at `index` of `fn-name`'s call. Returns nil when it returns exactly
+  "Run `check` on `st`, the state of the input at `index` of `fn-name`'s call. Returns nil when it returns exactly
   `true`; otherwise throws `::invalid` for it, so no later check runs."
   [fn-name index st {:keys [f reads fetches], :as check}]
   (let [result (call-check f (into (mapv (:values st) reads) (map (:fetched st)) fetches))]
@@ -1359,8 +1293,8 @@
       (invalid! fn-name index st check result))))
 
 (defn- fetch-phase
-  "Run every fetch the drafts need, each once per plan across all of them, with each distinct tuple of arguments
-  once. Every draft here passed its pure checks."
+  "Run every fetch the inputs need, each once across all of them, with each distinct tuple of arguments once. Every
+  input here passed its pure checks."
   [sts]
   (let [wanted (for [[i st] (map-indexed vector sts)
                      fd     (get-in st [:plan :fetches])]
@@ -1396,12 +1330,15 @@
      (group-by (fn [{:keys [i fd]}] [(get-in sts [i :plan]) (:name fd)]) wanted))))
 
 (defn- run-all
-  "Run the checks of every draft, and return the state of each, or throw `::invalid` for the first check that fails.
-  Every draft is read and walked, then every draft's pure checks run, in draft order, then the fetches, then every
-  draft's external checks. `fn-name` names the fn that got them."
-  [fn-name drafts]
-  (let [walked (java.util.IdentityHashMap.)
-        sts    (mapv #(start fn-name % walked) drafts)
+  "Run the checks of every map in `ms`, inputs of `type`, and return the state of each, or throw `::invalid` for the
+  first check that fails. Every input is read and walked, then every input's pure checks run, in order, then the
+  fetches, then every input's external checks. `fn-name` names the fn that got them; for `pt/parse`, which takes one
+  map, an error carries no index."
+  [fn-name type ms]
+  (let [plan   (plan-of fn-name type)
+        walked (java.util.IdentityHashMap.)
+        index  (fn [i] (when (= "pt/parse-all" fn-name) i))
+        sts    (into [] (map-indexed (fn [i m] (start fn-name type plan (index i) m walked))) ms)
         each!  (fn [sts phase]
                  (doseq [[i st] (map-indexed vector sts), check (get-in st [:plan phase])]
                    (run-check! fn-name i st check)))]
@@ -1444,16 +1381,16 @@
 
 (defn- invalid!
   "Throws `::invalid` for `check`, the first that did not return exactly `true`, with `result`, `{:returned x}` or
-  `{:threw e}`, on `st`, the state of the draft at `index` of `fn-name`'s call. An exception the check threw is the
+  `{:threw e}`, on `st`, the state of the input at `index` of `fn-name`'s call. An exception the check threw is the
   cause."
-  [fn-name index {:keys [draft plan fetched]} {n :name, :keys [doc kind fetches], :as check} {:keys [returned threw]}]
+  [fn-name index {:keys [plan fetched]} {n :name, :keys [doc kind fetches], :as check} {:keys [returned threw]}]
   (let [found-nothing (when (and (seq fetches) (every? #(nil? (get fetched %)) fetches)) fetches)
         what          (str "Invalid " (.getSimpleName ^Class (:parses-to plan))
-                           (when (= "pt/parse-all" fn-name) (str ", the draft at index " index " of pt/parse-all")))]
+                           (when (= "pt/parse-all" fn-name) (str ", the map at index " index " of pt/parse-all")))]
     (throw (ex-info (str what ": the check " n " (" doc ")"
                          (if threw
                            (if (= ::must-unwrap (:type (ex-data threw)))
-                             (str " read a draft or parsed value without pt/parsed: " (ex-message threw)
+                             (str " read a parsed value without pt/parsed: " (ex-message threw)
                                   " A field may hold parsed values, and a check reads one through pt/parsed too.")
                              (str " threw " (.getSimpleName (class threw)) ": " (ex-message threw) ". A check that"
                                   " throws met input that no check before it refused." (threw-fix check)))
@@ -1461,14 +1398,14 @@
                                 ;; a fact, not a fix: true whether or not this is the check that tests for the row
                                 (when found-nothing
                                   (str ", and its fetch " (clojure.string/join " and " found-nothing) " found nothing"))
-                                ". A draft parses only when every check returns exactly true, and parse stops at the"
-                                " first that does not. Change the draft so it passes and parse again.")))
+                                ". A map parses only when every check returns exactly true, and parse stops at the"
+                                " first that does not. Change the input so it passes and parse again.")))
                     (cond-> {:type  ::invalid
                              :rule  ::rule/check-failed
                              :check n
                              :doc   doc
                              :kind  kind
-                             :draft (.getName (class draft))}
+                             :parsed (.getName ^Class (:parses-to plan))}
                       threw                      (assoc :threw threw)
                       (not threw)                (assoc :returned returned)
                       (= "pt/parse-all" fn-name) (assoc :index index))
@@ -1476,46 +1413,70 @@
 
 ;;; ------------------------------------------------ API ------------------------------------------------
 
-(defn- assoc-draft
-  "`draft` with `field` set to `v`: a new draft. This is what `assoc` on a draft does; call `assoc`."
-  [draft field v]
-  (let [{:keys [fields make-draft read-draft]} (plan-for "assoc" draft)]
-    (when-not (some #{field} fields)
-      (no-field! draft field "assoc"))
-    (make-draft (assoc (read-draft draft) field v))))
+(defn- literal-keys!
+  "Throws `::bad-input` when [[parse]] is compiled with a parsed type and a literal map whose keys are not exactly the
+  type's fields, so a misspelled or missing key in the source fails when it compiles. Called by the `:inline` of
+  [[parse]]; any other call is checked when it runs."
+  [type-form m]
+  (when (and (symbol? type-form) (map? m))
+    (let [c (resolve type-form)]
+      (when (and (class? c) (parsed-type? c))
+        (when-let [[rule message more] (key-refusal "pt/parse" (.getSimpleName ^Class c) (:fields (.get registry c))
+                                                    m "")]
+          (throw (ex-info message (merge {:type ::bad-input, :rule rule, :fn "pt/parse", :parsed (.getName ^Class c)}
+                                         more))))))))
 
 (defn parse-all
-  "Parse each draft. Returns a vector of parsed values aligned with `drafts`, or throws `::invalid` for the first check
-  that fails, shaped like [[parse]]'s, with `:index`, the index of its draft. Every draft's pure checks run, in draft
-  order, before any fetch; then the fetches; then every draft's external checks. Each fetch runs once for the whole
-  call, with each distinct tuple once, so parsing the parts of a whole together costs one call per fetch. Exceptions
-  out of a fetch, an `Error` and an `InterruptedException` propagate. Throws `::bad-input` when `drafts` is a single
-  draft, a map, or not a sequential collection."
-  [drafts]
-  (when (or (map? drafts) (not (sequential? drafts)))
-    (throw (ex-info (str "pt/parse-all got " (describe drafts) ". It takes a vector of drafts and returns a vector of"
-                         " parsed values. Pass a vector, as in (pt/parse-all [draft]), or parse one draft with"
-                         " (pt/parse draft).")
-                    {:type ::bad-input, :rule ::rule/parse-all-not-a-vector, :got (some-> drafts class .getName)})))
-  (mapv issue (run-all "pt/parse-all" drafts)))
+  "Parse each map of `ms` into the parsed type `type`. Returns a vector of parsed values aligned with `ms`, or throws
+  `::invalid` for the first check that fails, shaped like [[parse]]'s, with `:index`, the index of its map. Every
+  map's pure checks run, in order, before any fetch; then the fetches; then every map's external checks. Each fetch
+  runs once for the whole call, with each distinct tuple once, so parsing the parts of a whole together costs one call
+  per fetch. Exceptions out of a fetch, an `Error` and an `InterruptedException` propagate. Throws `::bad-input`, with
+  `:index`, for a map whose keys are not exactly the type's fields, and when `ms` is a map or not a sequential
+  collection."
+  [type ms]
+  (when (or (map? ms) (not (sequential? ms)))
+    (throw (ex-info (str "pt/parse-all got " (describe ms) ". It takes the type and a vector of maps, and returns a"
+                         " vector of parsed values. Pass a vector, as in (pt/parse-all "
+                         (if (class? type) (.getSimpleName ^Class type) "Debit") " [m]), or parse one map with"
+                         " pt/parse.")
+                    {:type ::bad-input, :rule ::rule/parse-all-not-a-vector, :got (some-> ms class .getName)})))
+  (mapv issue (run-all "pt/parse-all" type ms)))
+
+(defn- parse-one
+  "What [[parse]] does, for its `:inline` expansion to call."
+  [type m]
+  (issue (first (run-all "pt/parse" type [m]))))
 
 (defn parse
-  "Parse `draft`, running its checks in order: pure checks, then fetches, then external checks, each in the order
-  written. Returns a new value of its parsed type. The first check that does not return exactly `true` stops the
-  parse: no check after it runs, and `parse` throws `::invalid` with:
+  "Parse `m`, a map of the fields of the parsed type `type`, running its checks in order: pure checks, then fetches,
+  then external checks, each in the order written. Returns a new value of `type`.
+
+    (pt/parse Debit {:user-id u, :account-id a, :amount 30M})
+
+  `m` names every field, and only fields: write nil for a field you mean to leave empty. A literal map is checked when
+  the call compiles; any other map when it runs. Either way a missing or unknown key throws `::bad-input`, so it never
+  reads as nil.
+
+  The first check that does not return exactly `true` stops the parse: no check after it runs, and `parse` throws
+  `::invalid` with:
 
   - `:check`, `:doc` and `:kind` (`:pure` or `:external`) of that check. A pure failure means the input is malformed;
     an external one means a check of the world refused it.
   - `:returned`, what it returned, or `:threw`, the `Exception` its body threw, which is also the cause. A check that
     threw is a bug in a check, not bad input.
-  - `:draft`: the name of the draft's class.
+  - `:parsed`: the name of the parsed type's class.
 
   Exceptions out of a fetch, an `Error` and an `InterruptedException` propagate.
 
-  Throws `::bad-input`, before any check runs, when `draft` is not a draft, or a field holds a value not known to be
-  immutable, a draft, or a value `parse` did not issue."
-  [draft]
-  (issue (first (run-all "pt/parse" [draft]))))
+  Throws `::bad-input`, before any check runs, when `type` is not a parsed type, `m` is not a map of its fields, or a
+  field holds a value not known to be immutable, or a value `parse` did not issue."
+  {:inline         (fn [type m]
+                     (literal-keys! type m)
+                     `((var parse-one) ~type ~m))
+   :inline-arities #{2}}
+  [type m]
+  (parse-one type m))
 
 (defn- issued?
   "Whether `x` is a parsed value that holds the proof: one [[parse]] built. Its class must be one [[defparsed]]
@@ -1554,16 +1515,11 @@
   [fn-name t]
   (when-not (or (parsed-type? t) (valid-sum? t))
     (when (class? t) (not-loaded! fn-name t))
-    (let [draft-of-type (when (and (class? t) (.isAssignableFrom DraftValue ^Class t))
-                          (some-> ^Class (:parses-to (.get registry t)) .getSimpleName symbol))]
-      (throw (ex-info (str fn-name " got " (if (class? t) (.getSimpleName ^Class t) (pr-str t)) " as its type. Its"
-                           " first argument is a type defined with defparsed, or a sum defined with defsum."
-                           (if draft-of-type
-                             (str " That is a draft type: pass its parsed type, as in (" fn-name " " draft-of-type
-                                  " x).")
-                             (str " Pass one, as in (" fn-name " Debit x).")))
-                      {:type ::bad-input, :rule ::rule/not-a-parsed-type, :fn fn-name
-                       :got  (if (class? t) (.getName ^Class t) (pr-str t))})))))
+    (throw (ex-info (str fn-name " got " (if (class? t) (.getSimpleName ^Class t) (pr-str t)) " as its type. Its"
+                         " first argument is a type defined with defparsed, or a sum defined with defsum. Pass one,"
+                         " as in (" fn-name " Debit" (when-not (= "pt/declaration" fn-name) " x") ").")
+                    {:type ::bad-input, :rule ::rule/not-a-parsed-type, :fn fn-name
+                     :got  (if (class? t) (.getName ^Class t) (pr-str t))}))))
 
 (defn- issued-member?
   "Whether `x` is a value [[parse]] issued, of `type` or of a member of the sum `type`, already checked."
@@ -1603,13 +1559,6 @@
                                                   " pt/parse issued. Write " (parse-hint parsed-type)
                                                   " and pass the result.")}
 
-                                   (and (draft-value? x) (named-member parsed-type (:parses-to (plan-for "pt/parsed" x))))
-                                   {:rule    ::rule/got-draft
-                                    :message (str "Expected a parsed " t ", got " (describe x) ", which is not"
-                                                  " checked yet. A sink takes only a value pt/parse issued. Call"
-                                                  " pt/parse on it first, as in (pt/parse draft), and pass the"
-                                                  " result.")}
-
                                    (member? parsed-type (class x))
                                    {:rule    ::rule/got-unparsed
                                     :message (str "Expected a parsed " t ", got " (describe x) " that pt/parse did"
@@ -1617,11 +1566,11 @@
                                                   " carries no proof. Write " (parse-hint parsed-type)
                                                   " and pass the result.")}
 
-                                   (and (map? x) (not (instance? ParsedValue x)) (not (instance? DraftValue x)))
+                                   (and (map? x) (not (instance? ParsedValue x)))
                                    {:rule    ::rule/got-unparsed
-                                    :message (str "Expected a parsed " t ", got a plain map. A sink takes only a"
-                                                  " value pt/parse issued. Build a draft from its fields and parse"
-                                                  " it, as in " (parse-hint parsed-type) ", and pass the result.")}
+                                    :message (str "Expected a parsed " t ", got a plain map, which is not checked. A"
+                                                  " sink takes only a value pt/parse issued. Parse it, as in "
+                                                  (parse-hint parsed-type) ", and pass the result.")}
 
                                    :else
                                    {:rule    ::rule/got-unparsed
@@ -1670,91 +1619,3 @@
                        :got      (.getName (class v))}))))
   ;; not parsed as any member, so this throws
   (parsed sum v))
-
-(defn draft-of
-  "A draft with the fields of `parsed`, a value [[parse]] issued. Throws `::not-parsed` for any other value."
-  [parsed]
-  (let [plan (when (issued? parsed) (.get registry (class parsed)))]
-    (when-not plan
-      (throw (ex-info (if (instance? DraftValue parsed)
-                        (str "pt/draft-of got " (describe parsed) ", which is already a draft. draft-of turns a value"
-                             " pt/parse issued back into a draft. Use the draft as it is.")
-                        (str "pt/draft-of got " (describe parsed)
-                             (when (instance? ParsedValue parsed) " that pt/parse did not issue")
-                             ". draft-of takes only a value pt/parse issued. Build a draft with pt/draft instead, as in "
-                             (if (parsed-type? (class parsed))
-                               (draft-hint (class parsed))
-                               "(pt/draft Debit {:user-id u, :account-id a, :amount n})")
-                             "."))
-                      {:type ::not-parsed
-                       :rule (if (instance? DraftValue parsed) ::rule/draft-of-a-draft ::rule/draft-of-unissued)
-                       :got  (some-> parsed class .getName)})))
-    ((:make-draft plan) ((:read-parsed plan) parsed))))
-
-;;; ------------------------------------------------ Building and reading ------------------------------------------------
-
-(defmacro draft
-  "A draft of the parsed type `parsed-type`, defined with [[defparsed]], with the fields in `m`.
-
-  `m` is a literal map that names every field, and only fields: anything else is a compile error, so write `nil` for
-  a field you mean to leave empty. For values read at run time, name each field, as in `{:amount (:amount body)}`.
-  This is the only way to build a draft: there is no positional `->NameDraft`.
-
-    (pt/draft Debit {:user-id u, :account-id 1, :amount 30M})
-
-  The values are evaluated in the order Clojure evaluates the same map literal: as written for up to 8 keys, and in
-  no order the source shows beyond that."
-  {:arglists '([parsed-type m])}
-  ([parsed-type]
-   (missing-argument! &form ::bad-input
-                      (str "(pt/draft " (pr-str parsed-type) ") has no map of fields. pt/draft takes the type, then a"
-                           " literal map that names every field. Write "
-                           (let [c (when (symbol? parsed-type) (resolve parsed-type))]
-                             (if (parsed-type? c) (draft-hint c) "(pt/draft Debit {:user-id ..., :amount ...})"))
-                           ".")))
-  ([parsed-type m]
-   (let [refuse! (fn [rule message data] (throw (ex-info message (merge {:type ::bad-input, :rule rule} data))))
-         _       (when-not (symbol? parsed-type)
-                   (refuse! ::rule/name-not-symbol
-                            (str "pt/draft: the type " (pr-str parsed-type) " is not a symbol. pt/draft names a parsed"
-                                 " type by its symbol. Write "
-                                 (if (or (string? parsed-type) (keyword? parsed-type))
-                                   (pr-str (list 'pt/draft (symbol (name parsed-type)) m))
-                                   "(pt/draft Debit {...})")
-                                 ".")
-                            {:got (pr-str parsed-type)}))
-         cls     (resolve parsed-type)
-         _       (when (class? cls) (not-loaded! "pt/draft" cls))
-         dcls    (when (and (parsed-type? cls) (.get registry cls)) (:draft-class (.get registry cls)))
-         _       (when-not dcls
-                   (refuse! ::rule/draft-not-a-parsed-type
-                            (str "pt/draft: " parsed-type " is not a type defined with defparsed. pt/draft builds the"
-                                 " draft of a parsed type. Name a parsed type, not a sum or a draft, as in (pt/draft"
-                                 " Debit {...}).")
-                            {:got (str parsed-type)}))
-         dsym    (symbol (.getName ^Class dcls))
-         flds    (:fields (.get registry cls))]
-     (when-not (map? m)
-       (refuse! ::rule/draft-not-a-literal-map
-                (str "pt/draft: " (pr-str m) " is not a literal map. pt/draft checks the keys when it compiles, so it"
-                     " takes a map written in place that names every field, and only fields. Write one, as in (pt/draft "
-                     parsed-type " {" (clojure.string/join ", " (map #(str % " ...") flds)) "}).")
-                {:got (pr-str m), :fields flds}))
-     (when-let [unknown (seq (remove (set flds) (keys m)))]
-       (refuse! ::rule/draft-literal-unknown-keys
-                (str "pt/draft: " parsed-type " has no fields " (vec unknown) "."
-                     (did-you-mean (first unknown) flds) " A literal map names only fields; its fields are "
-                     flds ". Remove the others.")
-                (cond-> {:unknown-fields (vec unknown), :fields flds}
-                  (nearest (first unknown) flds) (assoc :suggestion (nearest (first unknown) flds)))))
-     (when-let [missing (seq (remove (set (keys m)) flds))]
-       (refuse! ::rule/draft-literal-missing-fields
-                (str "pt/draft: " parsed-type " needs every field; missing " (vec missing) ". A literal map names"
-                     " every field, so none is left out by mistake. Write nil for a field you mean to leave"
-                     " empty, as in " (first missing) " nil.")
-                {:missing (vec missing), :fields flds}))
-     ;; bind in the map's own order, the order Clojure evaluates the same map literal in: as written for up to 8 keys,
-     ;; and the reader's hash order beyond, which the source no longer holds
-     (let [syms (into {} (map (fn [k] [k (gensym (name k))])) (keys m))]
-       `(let [~@(mapcat (fn [[k v]] [(syms k) v]) m)]
-          (new ~dsym ~@(map syms flds)))))))

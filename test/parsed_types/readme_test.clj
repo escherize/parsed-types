@@ -24,7 +24,13 @@
       (let [form (next!)]
         (when-not (= ::eof form)
           (let [m      (marker lines (.getLineNumber r))
-                result (try {:value (eval form)} (catch clojure.lang.ExceptionInfo e {:thrown e}))]
+                result (try {:value (eval form)}
+                            (catch clojure.lang.ExceptionInfo e {:thrown e})
+                            ;; a literal map pt/parse refuses when the form compiles
+                            (catch clojure.lang.Compiler$CompilerException e
+                              (if (instance? clojure.lang.ExceptionInfo (ex-cause e))
+                                {:thrown (ex-cause e)}
+                                (throw e))))]
             (cond
               (nil? m)
               (is (contains? result :value) (str (pr-str form) " threw " (some-> (:thrown result) ex-message)))
